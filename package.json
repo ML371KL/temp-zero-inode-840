@@ -1,0 +1,15 @@
+{
+  "name": "insider-radar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Инсайдерский радар: SEC EDGAR Form 4, кластерный скринер, бэктест форвардных доходностей",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node scripts/selftest.mjs",
+    "backfill": "node scripts/backfill.mjs",
+    "live": "node scripts/live.mjs",
+    "prices": "node scripts/prices.mjs",
+    "compute": "node scripts/compute.mjs"
+  }
+}

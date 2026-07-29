@@ -1,0 +1,88 @@
+name: Бэкфил (датасеты, живой хвост, цены)
+
+# Картриджная схема: один запуск работает в пределах бюджета времени, коммитит
+# прогресс на ветку data и, если работа не закончена, сам передиспатчивает себя.
+on:
+  workflow_dispatch:
+    inputs:
+      iteration:
+        description: "Номер итерации (для защиты от бесконечного цикла)"
+        required: false
+        default: "1"
+
+permissions:
+  contents: write
+  actions: write   # self-redispatch
+
+concurrency:
+  group: insider-radar-backfill
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Восстановить данные с ветки data
+        run: |
+          mkdir -p data
+          if git ls-remote --exit-code origin data >/dev/null 2>&1; then
+            git fetch --depth 1 origin data
+            git archive --format=tar origin/data | tar -x -C data
+            echo "Данные восстановлены: $(du -sh data | cut -f1)"
+          fi
+
+      - name: Самотесты
+        run: npm test
+
+      - name: Квартальные датасеты SEC
+        run: node scripts/backfill.mjs
+
+      - name: Живой хвост (после последнего датасета)
+        run: node scripts/live.mjs --time-budget-min 110
+
+      - name: Цены (бэкфил без кэша)
+        run: node scripts/prices.mjs --mode backfill --time-budget-min 150
+
+      - name: Снапшот на ветку data
+        run: |
+          cd data
+          rm -rf .git
+          git init -q -b data
+          git config user.name "insider-radar-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "backfill snapshot $(date -u +%FT%TZ) (iteration ${{ inputs.iteration }})"
+          git push --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data:data
+
+      - name: Продолжить или завершить
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ITER="${{ inputs.iteration }}"
+          DONE=$(node -e "
+            const { readFileSync, existsSync } = require('fs');
+            const j = p => existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
+            const prices = j('data/prices/_state.json');
+            const live = j('data/state/live.json');
+            const yest = new Date(Date.now() - 36e5 * 96).toISOString().slice(0, 10); // 4 суток: выходные + праздник
+            const liveOk = live.lastDay && live.lastDay >= yest;
+            console.log((prices.backfillDone && liveOk) ? 'yes' : 'no');
+          " | tail -1)
+          echo "Итерация $ITER, завершено: $DONE"
+          if [ "$DONE" = "yes" ]; then
+            echo "Бэкфил завершён. Запускаю daily для сборки и публикации."
+            gh workflow run daily.yml -R "${{ github.repository }}"
+          elif [ "$ITER" -ge 12 ]; then
+            echo "::error::Достигнут предел итераций (12) — разберитесь вручную"
+            exit 1
+          else
+            gh workflow run backfill.yml -R "${{ github.repository }}" -f iteration=$((ITER + 1))
+          fi

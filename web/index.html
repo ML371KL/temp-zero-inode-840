@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Инсайдерский радар — SEC Form 4</title>
+<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'&gt;&lt;text y='.9em' font-size='90'&gt;📡&lt;/text&gt;&lt;/svg&gt;">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-icon">📡</span>
+    <div>
+      <h1>Инсайдерский радар</h1>
+      <div class="sub">SEC EDGAR Form 4 · NYSE + Nasdaq · покупки как сигнал</div>
+    </div>
+  </div>
+  <div class="badges" id="meta-badges" aria-live="polite"></div>
+  <button id="theme-toggle" class="icon-btn" title="Переключить тему">◐</button>
+</header>
+
+<nav class="tabs" role="tablist">
+  <a href="#feed" data-tab="feed" role="tab">Лента</a>
+  <a href="#clusters" data-tab="clusters" role="tab">Кластеры</a>
+  <a href="#ticker" data-tab="ticker" role="tab">Тикер</a>
+  <a href="#stats" data-tab="stats" role="tab">Статистика</a>
+</nav>
+
+<main>
+  <!-- ЛЕНТА -->
+  <section id="tab-feed" class="tab-panel">
+    <div class="filters" id="feed-filters">
+      <input type="search" id="f-search" placeholder="Тикер, компания, инсайдер…" autocomplete="off">
+      <div class="chip-group" id="f-roles" title="Роль инсайдера">
+        <button class="chip" data-role="C">CEO/През</button>
+        <button class="chip" data-role="F">CFO</button>
+        <button class="chip" data-role="O">Офицер</button>
+        <button class="chip" data-role="D">Директор</button>
+        <button class="chip" data-role="T">10%</button>
+      </div>
+      <select id="f-minval">
+        <option value="0">Любая сумма</option>
+        <option value="50000">≥ $50 тыс.</option>
+        <option value="250000">≥ $250 тыс.</option>
+        <option value="1000000">≥ $1 млн</option>
+      </select>
+      <select id="f-minscore">
+        <option value="0">Любой скор</option>
+        <option value="30">Скор 30+</option>
+        <option value="50">Скор 50+</option>
+        <option value="70">Скор 70+</option>
+      </select>
+      <label class="check"><input type="checkbox" id="f-cluster"> только кластеры</label>
+      <label class="check"><input type="checkbox" id="f-nob5"> без 10b5-1</label>
+    </div>
+    <div class="table-wrap"><table id="feed-table"></table></div>
+    <div class="more-row"><button id="feed-more" class="btn">Показать ещё</button><span id="feed-count" class="muted"></span></div>
+  </section>
+
+  <!-- КЛАСТЕРЫ -->
+  <section id="tab-clusters" class="tab-panel">
+    <p class="hint">Кластер — ≥2 разных инсайдеров с покупками на открытом рынке в цепочке с разрывом ≤30 дней; показаны кластеры с последней покупкой за 90 дней. Скор кликабелен — раскрывает компоненты.</p>
+    <div class="table-wrap"><table id="clusters-table"></table></div>
+  </section>
+
+  <!-- ТИКЕР -->
+  <section id="tab-ticker" class="tab-panel">
+    <div class="filters">
+      <input type="search" id="t-search" list="ticker-list" placeholder="Введите тикер (например AVTR)…" autocomplete="off">
+      <datalist id="ticker-list"></datalist>
+      <div class="chip-group" id="t-range">
+        <button class="chip" data-range="1y">1 год</button>
+        <button class="chip active" data-range="5y">5 лет</button>
+        <button class="chip" data-range="max">Всё</button>
+      </div>
+    </div>
+    <div id="ticker-card" class="card hidden">
+      <div class="card-head">
+        <div><span id="tc-name" class="tc-name"></span> <span id="tc-badges"></span></div>
+        <div class="muted" id="tc-asof"></div>
+      </div>
+      <div class="chart-box">
+        <canvas id="tc-chart" height="360"></canvas>
+        <div class="legend">
+          <span><i class="sw" style="background:var(--c-line)"></i> цена закрытия</span>
+          <span><i class="sw tri-up"></i> покупка</span>
+          <span><i class="sw tri-down"></i> продажа</span>
+        </div>
+      </div>
+      <div class="filters">
+        <label class="check"><input type="checkbox" id="tc-onlyp"> только покупки</label>
+      </div>
+      <div class="table-wrap"><table id="tc-trades"></table></div>
+    </div>
+    <p id="ticker-empty" class="hint">Выберите тикер, чтобы увидеть график с отметками сделок инсайдеров и полную историю Form 4.</p>
+  </section>
+
+  <!-- СТАТИСТИКА -->
+  <section id="tab-stats" class="tab-panel">
+    <p class="hint" id="stats-note"></p>
+    <div class="filters">
+      <select id="s-dim">
+        <option value="all">Все покупки</option>
+        <option value="cluster">По кластерности</option>
+        <option value="role">По роли</option>
+        <option value="size">По размеру сделки</option>
+        <option value="b5">Дискреционные vs 10b5-1</option>
+        <option value="dd">По просадке при покупке</option>
+        <option value="score">По скору</option>
+        <option value="year">По годам</option>
+      </select>
+    </div>
+    <div class="table-wrap"><table id="stats-table"></table></div>
+    <details class="method">
+      <summary>Методология</summary>
+      <ul>
+        <li>Считаются только покупки на открытом рынке (код P), форма 4/4A, без своп-сделок; вход — закрытие первого торгового дня <b>после даты подачи</b> формы (когда сигнал стал публичным).</li>
+        <li>Избыточная доходность (excess) = доходность акции − доходность SPY за то же окно; обе по скорректированным ценам (сплиты + дивиденды).</li>
+        <li>Горизонты 3/6/12/24 мес = 63/126/252/504 торговых дня. «Открытые» окна (не дозревшие) в агрегаты не входят.</li>
+        <li>Делистнутые закрываются последней доступной ценой и показаны отдельно (колонка «делист.» и «медиана с делист.») — обычную медиану они не искажают, но игнорировать их = приукрашивать результат.</li>
+        <li>Остаточная ошибка выжившего: эмитенты, по которым не удалось получить ни одной цены, в бэктест не входят (их число — в шапке).</li>
+      </ul>
+    </details>
+  </section>
+</main>
+
+<footer class="muted">
+  Данные: SEC EDGAR (квартальные датасеты Forms 3/4/5 + daily-index) · Цены: Yahoo Finance (скорректированные) · Не инвестиционная рекомендация
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,105 @@
+name: Ежедневное обновление радара
+
+on:
+  schedule:
+    # 03:40 UTC вт–сб: daily-index EDGAR за прошедший торговый день публикуется ~22:00 ET (02:00 UTC)
+    - cron: "40 3 * * 2-6"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/daily.yml"
+      - "scripts/**"
+      - "web/**"
+      - "package.json"
+
+permissions:
+  contents: write   # форс-пуш снапшота на ветку data
+  pages: write
+  id-token: write
+
+# Публикация не отменяется на полпути — иначе Pages останется в подвешенном состоянии
+concurrency:
+  group: insider-radar-daily
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 170
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Восстановить данные с ветки data
+        run: |
+          mkdir -p data
+          if git ls-remote --exit-code origin data >/dev/null 2>&1; then
+            git fetch --depth 1 origin data
+            git archive --format=tar origin/data | tar -x -C data
+            echo "Данные восстановлены: $(du -sh data | cut -f1)"
+          else
+            echo "Ветки data ещё нет — первый запуск (сначала выполните backfill)"
+          fi
+
+      - name: Самотесты
+        run: npm test
+
+      - name: Живой контур EDGAR
+        run: node scripts/live.mjs --time-budget-min 60
+
+      - name: Обновление цен
+        run: node scripts/prices.mjs --mode daily --time-budget-min 55
+
+      - name: Вычисления и payload
+        run: node scripts/compute.mjs
+
+      - name: Сборка сайта
+        run: cp web/* site/
+
+      # Гейт публикации: пустой или неполный payload не публикуется поверх рабочего
+      - name: Проверка payload перед публикацией
+        run: |
+          node -e "
+            const fs = require('fs');
+            const meta = JSON.parse(fs.readFileSync('site/data/meta.json', 'utf8'));
+            if (!meta.trades || meta.trades.buys < 1000) { console.error('Гейт: подозрительно мало покупок', meta.trades); process.exit(1); }
+            if (!fs.existsSync('site/data/feed.json') || !fs.existsSync('site/data/stats.json')) { console.error('Гейт: нет ключевых файлов payload'); process.exit(1); }
+            console.log('Гейт пройден: покупок', meta.trades.buys);
+          "
+
+      - name: Telegram-уведомления (необязательно)
+        continue-on-error: true
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: node scripts/notify.mjs
+
+      # Ветка data — одиночный снапшот-коммит (форс-пуш): история не копится,
+      # репозиторий не растёт на десятки МБ в день от переписываемых кэшей цен
+      - name: Снапшот на ветку data
+        run: |
+          cd data
+          rm -rf .git
+          git init -q -b data
+          git config user.name "insider-radar-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git commit -q -m "data snapshot $(date -u +%FT%TZ)"
+          git push --force "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data:data
+
+      - name: Артефакт Pages
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+      - name: Публикация Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
