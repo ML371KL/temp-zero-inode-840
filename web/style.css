@@ -49,7 +49,12 @@ h1 { font-size: 19px; margin: 0; }
 }
 .tabs a.active { color: var(--ink); border-bottom-color: var(--accent); }
 .tabs a:hover { background: var(--surface); }
+/* Лента — самая широкая таблица (19 колонок), поэтому контейнер шире прочих экранов:
+   на типичном мониторе горизонтальная прокрутка не нужна вовсе */
 main { flex: 1; padding: 16px 20px; max-width: 1500px; width: 100%; margin: 0 auto; }
+body:has(#tab-feed.active) main { max-width: 1860px; }
+#feed-table { font-size: 12.5px; }
+#feed-table td, #feed-table th { padding: 6px 7px; }
 .tab-panel { display: none; }
 .tab-panel.active { display: block; }
 
@@ -60,6 +65,24 @@ main { flex: 1; padding: 16px 20px; max-width: 1500px; width: 100%; margin: 0 au
 }
 .filters input[type="search"] { min-width: 230px; }
 .chip-group { display: flex; gap: 4px; }
+/* Диапазонные фильтры «от/до» */
+.rng-group {
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 1px solid var(--border); border-radius: 8px; padding: 3px 8px; background: var(--surface);
+}
+.rng-lbl { color: var(--ink-2); font-size: 12.5px; white-space: nowrap; }
+.rng-dash { color: var(--ink-3); }
+input.rng {
+  width: 76px; background: transparent; color: var(--ink); border: none;
+  border-bottom: 1px solid var(--border); font-size: 13px; padding: 2px 3px;
+  font-variant-numeric: tabular-nums;
+}
+input.rng.short { width: 46px; }
+input.rng:focus { outline: none; border-bottom-color: var(--accent); }
+/* Подсказка рекомендованного значения — намеренно бледная: она не применена */
+input.rng::placeholder { color: var(--ink-3); opacity: .55; }
+input.rng::-webkit-outer-spin-button, input.rng::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input.rng[type=number] { -moz-appearance: textfield; }
 .chip {
   background: var(--surface); color: var(--ink-2); border: 1px solid var(--border);
   border-radius: 16px; padding: 5px 11px; font-size: 12px; cursor: pointer;
@@ -158,6 +181,12 @@ tr.dropped:hover td { opacity: 1; }
 #market-now { margin-bottom: 12px; }
 .method { margin-top: 14px; color: var(--ink-2); font-size: 13px; max-width: 900px; }
 .method summary { cursor: pointer; font-weight: 600; color: var(--ink); }
+.method h4 { font-size: 13.5px; margin: 14px 0 4px; color: var(--ink); }
+.method ol, .method ul { padding-left: 20px; }
+.method li { margin: 4px 0; }
+.method p { margin: 6px 0; }
+#howto { border-left: 3px solid var(--c-buy); padding-left: 12px; }
+#howto > summary { color: var(--c-buy); }
 footer { padding: 14px 20px; border-top: 1px solid var(--border); }
 
 @media (max-width: 720px) {

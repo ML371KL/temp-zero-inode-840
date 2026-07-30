@@ -266,7 +266,45 @@ function renderClusters() {
 function topRoleOf(rel) { for (const c of ['F', 'C', 'O', 'D', 'T', 'X']) if ((rel ?? '').includes(c)) return c; return 'X'; }
 
 // ---------- ЛЕНТА ----------
-const ff = { roles: new Set(), minval: 0, minscore: 0, cluster: false, gate: 'ok', q: '', recipe: null };
+const ff = {
+  roles: new Set(), cluster: false, gate: 'ok', q: '', recipe: null,
+  // Диапазоны «от/до»: пустое поле = граница не задана. Подсказки в placeholder
+  // показывают рекомендованные значения, но сами по себе не применяются.
+  valMin: null, valMax: null, scoreMin: null, scoreMax: null, downMin: null, downMax: null,
+};
+// Значение поля диапазона: пусто или не число -> граница снята
+const rngVal = id => {
+  const raw = $(id).value.trim();
+  if (raw === '') return null;
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : null;
+};
+// Значение попадает в диапазон. null-граница означает «не задана»; строка без значения
+// (например скор у отсеянной сделки) проходит только когда границы не заданы вовсе.
+function inRange(v, min, max) {
+  if (min === null && max === null) return true;
+  if (v === null || v === undefined) return false;
+  if (min !== null && v < min) return false;
+  if (max !== null && v > max) return false;
+  return true;
+}
+function bindRange(id, key, scale = 1) {
+  let deb;
+  $(id).addEventListener('input', () => {
+    clearTimeout(deb);
+    deb = setTimeout(() => {
+      const v = rngVal(id);
+      ff[key] = v === null ? null : v * scale;
+      renderFeed(true);
+    }, 250);
+  });
+}
+bindRange('#f-val-min', 'valMin');
+bindRange('#f-val-max', 'valMax');
+bindRange('#f-score-min', 'scoreMin');
+bindRange('#f-score-max', 'scoreMax');
+bindRange('#f-down-min', 'downMin', 0.01);   // проценты -> доля
+bindRange('#f-down-max', 'downMax', 0.01);
 
 // Наборы, прошедшие проверку на расщеплённой выборке (docs/ЛУЧШИЕ-ФИЛЬТРЫ.md).
 // Условия намеренно совпадают с проверенными в бэктесте буква в букву.
@@ -293,8 +331,6 @@ for (const b of document.querySelectorAll('#f-roles .chip')) {
     renderFeed(true);
   });
 }
-$('#f-minval').addEventListener('change', e => { ff.minval = +e.target.value; renderFeed(true); });
-$('#f-minscore').addEventListener('change', e => { ff.minscore = +e.target.value; renderFeed(true); });
 $('#f-gate').addEventListener('change', e => { ff.gate = e.target.value; renderFeed(true); });
 $('#f-cluster').addEventListener('change', e => { ff.cluster = e.target.checked; renderFeed(true); });
 {
@@ -325,7 +361,9 @@ function feedFiltered() {
     (ff.gate === 'all' || (ff.gate === 'ok' ? !r.drop : !!r.drop)) &&
     (!ff.cikFilter || (r.ciks ?? []).includes(ff.cikFilter)) &&
     (!ff.roles.size || ff.roles.has(r.role)) &&
-    r.val >= ff.minval && (r.score ?? 0) >= ff.minscore &&
+    inRange(r.val, ff.valMin, ff.valMax) &&
+    inRange(r.score, ff.scoreMin, ff.scoreMax) &&
+    inRange(r.dOwn, ff.downMin, ff.downMax) &&
     (!ff.cluster || r.cl >= 2) &&
     (!ff.q || r.t.toLowerCase().includes(ff.q) || r.name.toLowerCase().includes(ff.q) || r.who.toLowerCase().includes(ff.q)));
 }
