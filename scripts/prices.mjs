@@ -27,9 +27,11 @@ writeJson(join(DATA, 'reference', 'tickers.json'),
 
 const statePath = join(DATA, 'prices', '_state.json');
 const state = readJson(statePath, { missing: {} });
+const splitsPath = join(DATA, 'prices', '_splits.json');
+const splits = readJson(splitsPath, {});
 let stooqDown = false; // per-run: челлендж может исчезнуть, проверяем каждый прогон заново
 
-const trades = loadAllTrades(DATA);
+const { trades } = loadAllTrades(DATA);
 const today = isoToday();
 const recentCut = addDaysIso(today, -760); // ~25 месяцев: открытые 24м окна бэктеста
 
@@ -45,16 +47,26 @@ for (const r of trades) {
   all.set(t, e);
 }
 
+// SPY — общий бенчмарк, IWM — бенчмарк для small/micro (без него альфа завышается почти
+// вдвое: Lakonishok & Lee 2001, 7.8% -> 4.8% после контроля размера)
+const BENCHMARKS = ['SPY', 'IWM'];
+
+// Ряд без колонки объёма — наследие схемы v1; объём нужен для прокси размера компании
+const needsVolume = t => {
+  const c = readPriceCache(DATA, t);
+  return c && (c.length === 0 || c[c.length - 1][3] === null || c[c.length - 1][3] === undefined);
+};
+
 let list;
 if (MODE === 'daily') {
-  list = ['SPY', ...[...all.entries()].filter(([, v]) => v.recent).map(([t]) => t)];
+  list = [...BENCHMARKS, ...[...all.entries()].filter(([, v]) => v.recent).map(([t]) => t)];
   // Повторные попытки по missing: не чаще раза в 7 дней, не более 4 попыток
   for (const [t, m] of Object.entries(state.missing)) {
     if (all.has(t) && m.tries < 4 && (!m.last || m.last < addDaysIso(today, -7))) list.push(t);
   }
 } else {
-  // backfill: без кэша — в порядке алфавита (детерминированный резюм)
-  list = ['SPY', ...[...all.keys()].sort()].filter(t => !readPriceCache(DATA, t));
+  // backfill: тикеры без кэша и кэши без объёма — в алфавитном порядке (детерминированный резюм)
+  list = [...BENCHMARKS, ...[...all.keys()].sort()].filter(t => !readPriceCache(DATA, t) || needsVolume(t));
 }
 list = [...new Set(list)];
 const LIMIT = Number(argVal('--limit', '0'));
@@ -64,10 +76,11 @@ console.log(`[prices] режим ${MODE}: кандидатов ${list.length}`);
 let ok = 0, kept = 0, miss = 0, budgetOut = false;
 for (const t of list) {
   if (Date.now() - started > BUDGET_MS) { budgetOut = true; break; }
-  let res;
+  let res, fromYahoo = true;
   try { res = await fetchYahooDaily(t, FROM); }
   catch (e) { console.log(`[prices] ${t}: сеть (${e.message}) — пропуск`); continue; }
   if (res.missing && !stooqDown) {
+    fromYahoo = false;
     // Резерв Stooq: пробуем; HTML-челлендж = источник закрыт, больше не трогаем в этом прогоне
     try {
       const s = await fetchStooqDaily(t, FROM);
@@ -82,6 +95,12 @@ for (const t of list) {
       console.log(`[prices] ${t}: свежий ряд подозрительно короткий (${res.series.length} < ${cached.length}/2) — кэш сохранён`);
     } else {
       writePriceCache(DATA, t, res.series);
+      // Сплиты обновляются только по ответу Yahoo: у резервного источника их нет, и «пусто»
+      // от него стёрло бы известные коэффициенты, сломав сопоставление цен сделок
+      if (fromYahoo) {
+        if (res.splits?.length) splits[t] = res.splits;
+        else delete splits[t];
+      }
       ok++;
     }
     delete state.missing[t];
@@ -96,4 +115,5 @@ for (const t of list) {
 state.updated = today;
 if (MODE === 'backfill') state.backfillDone = !budgetOut;
 writeJson(statePath, state, true);
+writeJson(splitsPath, splits);
 console.log(`[prices] готово: обновлено ${ok}, сохранён кэш ${kept}, нет данных ${miss}, бюджет ${budgetOut ? 'ИСЧЕРПАН (нужен ещё прогон)' : 'ок'}`);

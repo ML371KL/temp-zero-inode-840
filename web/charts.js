@@ -5,6 +5,10 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+// Имена инсайдеров приходят из подаваемых в EDGAR форм — это неподконтрольный нам текст,
+// который попадает в разметку тултипа. Экранируем на месте вставки.
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
 export class PriceChart {
   constructor(canvas) {
     this.canvas = canvas;
@@ -36,7 +40,13 @@ export class PriceChart {
   }
 
   draw() {
-    if (!this.data?.series?.length) return;
+    // Экземпляр графика переиспользуется между тикерами: при переходе на бумагу без цен
+    // холст надо очистить, иначе на экране останется график предыдущей компании
+    if (!this.data?.series?.length) {
+      const { w, h } = this.layout();
+      this.ctx.clearRect(0, 0, w, h);
+      return;
+    }
     const { series, markers } = this.data;
     const { w, h, padL, padR, padT, padB } = this.layout();
     const ctx = this.ctx;
@@ -85,14 +95,16 @@ export class PriceChart {
     }
     ctx.stroke();
 
-    // Маркеры сделок (с кольцом цвета поверхности — spacer при наложении)
+    // Маркеры сделок (с кольцом цвета поверхности — разделитель при наложении).
+    // Отсеянные конвейером покупки рисуются полыми: видно, что сделка была, но сигналом не считается.
     const surface = cssVar('--surface');
     for (const m of markers) {
       const t = Date.parse(m.d);
       if (t < x0 || t > x1) continue;
       const x = X(t);
       const y = m.px > 0 ? Y(m.px) : Y(nearestY(xs, ys, t));
-      triangle(ctx, x, y, 6.5, m.code === 'P', m.code === 'P' ? cssVar('--c-buy') : cssVar('--c-sell'), surface);
+      const color = m.code === 'P' ? cssVar('--c-buy') : cssVar('--c-sell');
+      triangle(ctx, x, y, 6.5, m.code === 'P', color, surface, !!m.drop);
     }
 
     // Ховер-перекрестие
@@ -118,10 +130,11 @@ export class PriceChart {
     const iso = this.data.series[i][0];
     // Маркеры в радиусе 10px по X от курсора
     const near = this.data.markers.filter(m => Math.abs(this.X(Date.parse(m.d)) - mx) < 10);
-    let html = `<b>${iso}</b> · ${fmtPrice(this.ys[i])}`;
+    let html = `<b>${esc(iso)}</b> · ${fmtPrice(this.ys[i])}`;
     for (const m of near.slice(0, 4)) {
       const cls = m.code === 'P' ? 'pos' : 'neg';
-      html += `<br><span class="${cls}">${m.code === 'P' ? '▲ покупка' : '▼ продажа'}</span> ${m.d} · ${fmtInt(m.sh)} акц. @ ${fmtPrice(m.px)} · ${m.who}`;
+      html += `<br><span class="${cls}">${m.code === 'P' ? '▲ покупка' : '▼ продажа'}</span> ${esc(m.d)} · ${fmtInt(m.sh)} акц. @ ${fmtPrice(m.pxRaw ?? m.px)} · ${esc(m.who)}` +
+        (m.drop ? ' <i>(отсеяна фильтрами)</i>' : '');
     }
     this.tip.innerHTML = html;
     this.tip.style.display = 'block';
@@ -131,13 +144,18 @@ export class PriceChart {
   }
 }
 
-function triangle(ctx, x, y, r, up, color, ring) {
+function triangle(ctx, x, y, r, up, color, ring, hollow) {
   ctx.beginPath();
   if (up) { ctx.moveTo(x, y - r); ctx.lineTo(x - r, y + r * 0.85); ctx.lineTo(x + r, y + r * 0.85); }
   else { ctx.moveTo(x, y + r); ctx.lineTo(x - r, y - r * 0.85); ctx.lineTo(x + r, y - r * 0.85); }
   ctx.closePath();
-  ctx.fillStyle = color; ctx.strokeStyle = ring; ctx.lineWidth = 2;
-  ctx.stroke(); ctx.fill();
+  if (hollow) {
+    ctx.fillStyle = ring; ctx.fill();
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+  } else {
+    ctx.fillStyle = color; ctx.strokeStyle = ring; ctx.lineWidth = 2;
+    ctx.stroke(); ctx.fill();
+  }
 }
 
 function nearestIdx(xs, t) {

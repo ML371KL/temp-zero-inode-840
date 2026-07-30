@@ -1,0 +1,106 @@
+// Конвейер информативности G1–G8 (ПРОЕКТ.md §1).
+// Ключевая идея: код P в Form 4 означает «покупка на открытом рынке ИЛИ частная покупка».
+// Участие в допэмиссии, PIPE, rights offering и DRIP приходят тем же кодом P и выглядят
+// в наивном скринере как кластерные покупки инсайдеров — хотя это привлечение капитала
+// (то есть размытие), а не выражение уверенности. Отсев таких строк — главный фикс v2.
+//
+// Отсеянные строки НЕ удаляются: они получают причину отсева и участвуют в бэктесте,
+// чтобы на собственных данных проверять, что гейты режут именно шум (экран «Статистика»).
+
+export const DROP_LABELS = {
+  cancelled: 'аннулирована поправкой',
+  security: 'не обыкновенные акции (преф/варрант/нота)',
+  units: 'цена формы несопоставима с котировкой (ADR/валюта/иные единицы)',
+  offering: 'размещение/подписка (сноска)',
+  drip: 'реинвестирование дивидендов',
+  espp: 'программа сотрудников',
+  forced: 'принудительная сделка',
+  outlier: 'цена вне разумного диапазона',
+  discount: 'цена ниже рынка (похоже на размещение)',
+  sync: 'синхронная подача многих филеров по одной цене',
+  fund: 'только юрлицо-десятипроцентник',
+  planned: 'план 10b5-1',
+  routine: 'рутинная сделка (CMP)',
+  regular: 'регулярная серия (похоже на план)',
+};
+
+// Порог дисконта к цене закрытия дня сделки. Размещения проходят с дисконтом 5–20%;
+// открыторыночная покупка не может систематически исполняться на 8% ниже закрытия.
+const DISCOUNT_LIMIT = 0.08;
+const DISCOUNT_LIMIT_WAVG = 0.15; // цена-средневзвешенная по серии — допуск шире
+const OUTLIER_LO = 0.1, OUTLIER_HI = 10;
+const SYNC_MIN_FILERS = 3;
+
+// В Table I формы попадают не только обыкновенные акции: привилегированные (обычно с
+// номиналом $25), варранты и ноты. Их цена не сопоставима с котировкой обыкновенных,
+// а экономический смысл покупки другой (доходная бумага, а не ставка на рост).
+// Осторожно с исключениями:
+//  · ADS/ADR — торгуемые обыкновенные акции иностранного эмитента, исключать нельзя
+//    («Depositary Shares ... Preferred» ловится по слову preferred);
+//  · «Common Units» у MLP (например Navios Maritime Partners) — тоже обычная торгуемая
+//    единица капитала, поэтому слово units в список не входит.
+const NON_COMMON_RE = /preferred|warrant|debenture|\bnotes?\b|\bbonds?\b|\brights?\b|convertible/i;
+export function isNonCommon(secTitle) {
+  return NON_COMMON_RE.test(String(secTitle ?? ''));
+}
+
+// row — нормализованная сделка; ctx:
+//   close       — цена закрытия на дату сделки (или null)
+//   syncFilers  — сколько независимых филеров подали ту же цену/дату по этому эмитенту
+//   planned     — плановость (чекбокс или сноска)
+//   routine     — рутинность CMP (true/false/null)
+//   regular     — регулярная серия
+//   fundOnly    — среди подателей нет физлиц
+export function applyGates(row, ctx = {}) {
+  const fn = row.fn ?? {};
+  const tags = [];
+  const drop = reason => ({ ok: false, drop: reason, tags });
+
+  if (row.cancelled) return drop('cancelled');
+  if (isNonCommon(row.sec)) return drop('security');
+
+  // G4: природа сделки по сноскам — самый надёжный признак не-открыторыночной покупки
+  if (fn.offering) return drop('offering');
+  if (fn.drip) return drop('drip');
+  if (fn.espp) return drop('espp');
+  // G6: принудительное распоряжение — не решение инсайдера
+  if (fn.forced) return drop('forced');
+
+  // Единицы формы не сходятся с котировкой по ВСЕМУ эмитенту (ADR-коэффициент, валюта):
+  // такую сделку нельзя ни оценить в долларах, ни сопоставить с ценой. Проверка идёт после
+  // сносок, чтобы у конкретного размещения оставалась его собственная, более точная причина.
+  if (ctx.unitsMismatch) return drop('units');
+
+  // G3: санити цены и G4: дисконт к рынку
+  if (ctx.close && row.px) {
+    const ratio = row.px / ctx.close;
+    if (ratio < OUTLIER_LO || ratio > OUTLIER_HI) return drop('outlier');
+    const limit = fn.wavg ? DISCOUNT_LIMIT_WAVG : DISCOUNT_LIMIT;
+    if (row.code === 'P' && ratio < 1 - limit) return drop('discount');
+  }
+
+  // G4: одинаковая цена у многих филеров в один день = закрытие размещения, а не кластер
+  if (ctx.syncFilers >= SYNC_MIN_FILERS) return drop('sync');
+
+  // G5: сделка только от юрлиц — отдельный дисконтированный канал, не сигнал инсайдера
+  if (ctx.fundOnly) return drop('fund');
+
+  // G7/G8: плановость и рутинность — вся альфа в оппортунистических сделках (CMP 2012)
+  if (ctx.planned) return drop('planned');
+  if (ctx.routine === true) return drop('routine');
+  if (ctx.regular) return drop('regular');
+
+  if (fn.pledge) tags.push('pledge');   // залог акций — риск маржин-колла, но сделка валидна
+  if (fn.trust) tags.push('trust');     // покупка через траст/супруга — деньги те же
+  if (row.di === 'I') tags.push('indirect');
+  if (ctx.routine === null) tags.push('no-history'); // истории мало: рутинность неизвестна
+
+  return { ok: true, drop: null, tags };
+}
+
+// Плановость: чекбокс формы ИЛИ упоминание плана в сносках/Remarks.
+// До 04.2023 чекбокса в схеме не было вовсе — без сносок вся старая история выглядела бы
+// «дискреционной», что систематически завышало бы качество сигнала в бэктесте.
+export function isPlanned(row) {
+  return !!(row.b5 || row.fn?.b5);
+}

@@ -111,6 +111,9 @@ canvas { width: 100%; display: block; }
 .legend .sw { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
 .legend .tri-up { width: 0; height: 0; background: none !important; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid var(--c-buy); }
 .legend .tri-down { width: 0; height: 0; background: none !important; border-left: 6px solid transparent; border-right: 6px solid transparent; border-top: 10px solid var(--c-sell); }
+.legend .tri-up-hollow { width: 0; height: 0; background: none !important; border-left: 6px solid transparent; border-right: 6px solid transparent; border-bottom: 10px solid color-mix(in srgb, var(--c-buy) 35%, transparent); }
+tr.dropped td { opacity: .58; }
+tr.dropped:hover td { opacity: 1; }
 .chart-tip {
   position: absolute; pointer-events: none; background: var(--surface); border: 1px solid var(--border);
   border-radius: 8px; padding: 6px 9px; font-size: 12px; box-shadow: var(--shadow);
