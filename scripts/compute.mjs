@@ -397,6 +397,7 @@ const feedRows = buys.filter(r => r.fdate >= feedCut).map(r => {
     drop: r._gate.drop, tags: r._gate.tags,
     track: r._track ?? null, inflect: r._inflect ?? null,
     b5: isPlanned(r) ? 1 : 0, routine: r._routine,
+    wo: r._wo ?? 0, pre: r._pre ?? 0,
     cur: r._cur ?? null, chg: r._chg ?? null,
     d1: r._fw?.d1 ?? null, w1: r._fw?.w1 ?? null, m1: r._fw?.m1 ?? null, m6: r._fw?.m6 ?? null,
   };

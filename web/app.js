@@ -201,7 +201,23 @@ function renderClusters() {
 function topRoleOf(rel) { for (const c of ['F', 'C', 'O', 'D', 'T', 'X']) if ((rel ?? '').includes(c)) return c; return 'X'; }
 
 // ---------- ЛЕНТА ----------
-const ff = { roles: new Set(), minval: 0, minscore: 0, cluster: false, gate: 'ok', q: '' };
+const ff = { roles: new Set(), minval: 0, minscore: 0, cluster: false, gate: 'ok', q: '', recipe: null };
+
+// Готовые наборы фильтров — те, что прошли проверку train/validation
+// (docs/ЛУЧШИЕ-ФИЛЬТРЫ.md). Логика намеренно совпадает с проверенной в бэктесте.
+const RECIPES = {
+  strength: r => r.wo === 1 && r.dd !== null && r.dd >= -0.05 && r.role !== 'C',
+  conviction: r => r.cl >= 3 && r.dOwn !== null && r.dOwn >= 0.2 && r.dOwn < 9,
+};
+for (const b of document.querySelectorAll('#f-recipes .chip')) {
+  b.addEventListener('click', () => {
+    const key = b.dataset.recipe;
+    for (const x of document.querySelectorAll('#f-recipes .chip')) x.classList.remove('active');
+    if (key === 'reset' || ff.recipe === key) { ff.recipe = null; }
+    else { ff.recipe = key; b.classList.add('active'); }
+    renderFeed(true);
+  });
+}
 for (const b of document.querySelectorAll('#f-roles .chip')) {
   b.addEventListener('click', () => {
     b.classList.toggle('active');
@@ -234,7 +250,9 @@ async function loadFeed(arg) {
   renderFeed(true);
 }
 function feedFiltered() {
+  const recipe = ff.recipe ? RECIPES[ff.recipe] : null;
   return state.feed.filter(r =>
+    (!recipe || recipe(r)) &&
     (ff.gate === 'all' || (ff.gate === 'ok' ? !r.drop : !!r.drop)) &&
     (!ff.cikFilter || (r.ciks ?? []).includes(ff.cikFilter)) &&
     (!ff.roles.size || ff.roles.has(r.role)) &&
@@ -272,7 +290,7 @@ function renderFeed(reset) {
     <td class="num">${fmtMoney(r.val)}</td>
     <td class="num">${r.dOwn === null ? '—' : (r.dOwn >= 9.99 ? 'новая' : fmtPct(r.dOwn, 0))}</td>
     <td class="num">${r.cl >= 2 ? `<span class="pill buy">×${r.cl}</span>` : ''}</td>
-    <td>${r.drop ? `<span class="pill warn" title="Отсеяна: ${esc(dropLabel(r.drop))}">${esc(dropShort(r.drop))}</span> ` : ''}${r.inflect ? `<span class="pill buy" title="${esc(INFLECT_LABEL[r.inflect]?.[1] ?? '')}">${esc(INFLECT_LABEL[r.inflect]?.[0] ?? r.inflect)}</span> ` : ''}${tagsHtml(r)}</td>
+    <td>${r.drop ? `<span class="pill warn" title="Отсеяна: ${esc(dropLabel(r.drop))}">${esc(dropShort(r.drop))}</span> ` : ''}${r.wo ? '<span class="pill buy" title="Покупка в первую неделю после отчёта — на свежей публичной информации">после отчёта</span> ' : ''}${r.dd !== null && r.dd >= -0.05 ? '<span class="pill buy" title="Акция у 52-недельного максимума: инсайдер платит высокую цену">у макс.</span> ' : ''}${r.inflect ? `<span class="pill buy" title="${esc(INFLECT_LABEL[r.inflect]?.[1] ?? '')}">${esc(INFLECT_LABEL[r.inflect]?.[0] ?? r.inflect)}</span> ` : ''}${tagsHtml(r)}</td>
     <td class="num">${scoreCell(r.score, r.parts)}</td>
     <td class="num ${cls(r.d1)}">${fmtPct(r.d1)}</td>
     <td class="num ${cls(r.w1)}">${fmtPct(r.w1)}</td>

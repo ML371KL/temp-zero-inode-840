@@ -52,6 +52,14 @@
   <!-- ЛЕНТА -->
   <section id="tab-feed" class="tab-panel">
     <div class="filters">
+      <span class="muted">Готовые наборы:</span>
+      <div class="chip-group" id="f-recipes">
+        <button class="chip" data-recipe="strength" title="Покупка сразу после отчёта, когда акция у 52-недельного максимума, и не от CEO. Самый устойчивый паттерн в нашем бэктесте: положительная медиана, 53% выше бенчмарка, плюс в 9 годах из 10.">Сила после отчёта</button>
+        <button class="chip" data-recipe="conviction" title="Кластер из ≥3 независимых инсайдеров, каждый увеличил позицию на ≥20%. Максимальное матожидание, но лотерейное распределение: медиана отрицательная, результат делают отдельные имена.">Кластер + докупка</button>
+        <button class="chip" data-recipe="reset">Сбросить</button>
+      </div>
+    </div>
+    <div class="filters">
       <input type="search" id="f-search" placeholder="Тикер, компания, инсайдер…" autocomplete="off">
       <div class="chip-group" id="f-roles" title="Роль инсайдера">
         <button class="chip" data-role="F">CFO</button>
