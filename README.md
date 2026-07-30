@@ -71,6 +71,7 @@ compute.mjs ──> site/data/*.json ──> GitHub Pages       └─ state/*.j
 
 ## Документация
 
+- **[НАСТРОЙКА.md](docs/НАСТРОЙКА.md) — пошагово: Telegram-бот и внешний cron**
 - [ПРОЕКТ.md](docs/ПРОЕКТ.md) — архитектура сигнала, конвейер гейтов, дизайн экранов
 - [КАЛИБРОВКА-V3.md](docs/КАЛИБРОВКА-V3.md) — веса скоринга: train/validation, что подтвердилось
 - [АНАЛИЗ-РЕЗУЛЬТАТА.md](docs/АНАЛИЗ-РЕЗУЛЬТАТА.md) — разбор итога на полной истории
@@ -84,9 +85,10 @@ compute.mjs ──> site/data/*.json ──> GitHub Pages       └─ state/*.j
    (лимит 12 итераций), затем сам запускает `daily.yml`.
 2. `daily.yml` — крон 03:40 UTC вт–сб: живой контур → цены → compute → гейт → Pages + ветка data.
    Гейт публикации: payload с <1000 покупок не публикуется.
-3. Секреты (опционально): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
-4. Крон GitHub ненадёжен — рекомендуется внешний дублёр (cron-job.org) на
-   `POST /repos/ML371KL/temp-zero-inode-840/actions/workflows/daily.yml/dispatches` с PAT `actions:write`.
+3. Секреты (опционально): `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — пошагово в
+   [НАСТРОЙКА.md](docs/НАСТРОЙКА.md). Проверка: Actions → «Проверка Telegram» → Run workflow.
+4. **Внешний cron обязателен**: штатное расписание GitHub опоздало на 7ч46м на первом же
+   прогоне и гасится после 60 дней без активности. Инструкция — там же.
 
 ## Ограничения (осознанные)
 

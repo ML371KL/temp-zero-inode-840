@@ -11,6 +11,31 @@ const SITE = argVal('--site', 'site');
 
 const token = process.env.TELEGRAM_BOT_TOKEN, chat = process.env.TELEGRAM_CHAT_ID;
 
+// Режим проверки настройки: отправляет одно тестовое сообщение и выходит.
+// Нужен, чтобы после добавления секретов можно было убедиться, что связка работает,
+// не дожидаясь настоящего события (кластеры появляются не каждый день).
+if (args.includes('--test')) {
+  if (!token || !chat) {
+    console.error('[notify] ОШИБКА: не заданы TELEGRAM_BOT_TOKEN и/или TELEGRAM_CHAT_ID');
+    console.error(`  токен: ${token ? 'задан (' + token.slice(0, 8) + '…)' : 'ОТСУТСТВУЕТ'}`);
+    console.error(`  чат:   ${chat ? chat : 'ОТСУТСТВУЕТ'}`);
+    process.exit(1);
+  }
+  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      chat_id: chat, parse_mode: 'HTML',
+      text: '✅ <b>Инсайдерский радар</b>: связка с Telegram работает.\n\n' +
+        'Сюда будут приходить: новые и растущие кластеры покупок, крупные покупки CEO/CFO ' +
+        'и переход агрегатного индикатора в зону повышенной активности.',
+    }),
+  });
+  const body = await res.text();
+  if (res.ok) console.log('[notify] тестовое сообщение отправлено');
+  else console.error(`[notify] ОШИБКА Telegram HTTP ${res.status}: ${body}`);
+  process.exit(res.ok ? 0 : 1);
+}
+
 const clusters = readJson(join(SITE, 'data', 'clusters.json'), []);
 const feed = readJson(join(SITE, 'data', 'feed.json'), []);
 const market = readJson(join(SITE, 'data', 'market.json'), null);
