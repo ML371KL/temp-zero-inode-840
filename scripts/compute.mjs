@@ -482,7 +482,8 @@ const DIMS = {
   routine: r => r.routine === true ? 'рутинная (CMP)' : r.routine === false ? 'оппортунистическая' : 'нет истории',
   inflect: r => r.inflect ?? 'обычная',
   dd: r => bucketDdLabel(r.dd),
-  score: r => r.score === null ? 'отсеяна' : r.score >= 70 ? 'скор 70+' : r.score >= 50 ? 'скор 50–69' : r.score >= 30 ? 'скор 30–49' : 'скор <30',
+  // Корзины соответствуют шкале скоринга v3 (максимум ≈86), см. docs/КАЛИБРОВКА-V3.md
+  score: r => r.score === null ? 'отсеяна' : r.score >= 55 ? 'скор 55+' : r.score >= 40 ? 'скор 40–54' : r.score >= 25 ? 'скор 25–39' : r.score >= 10 ? 'скор 10–24' : 'скор <10',
   year: r => r.fdate.slice(0, 4),
 };
 // Срезы, кроме 'gate' и 'routine', считаются только по прошедшим гейты:
@@ -627,7 +628,11 @@ W('market.json', {
     all: aggStats(() => true),
     z1: aggStats(x => x.z >= 1),
     z2: aggStats(x => x.z >= AGG_WARN),
+    // Зона 2–3σ отдельно от накопительной: без этого разделения кажется, будто «повышенная»
+    // активность сама по себе что-то значит, тогда как весь эффект даёт «вспышка» ≥3σ
+    z23: aggStats(x => x.z >= AGG_WARN && x.z < AGG_STRONG),
     z3: aggStats(x => x.z >= AGG_STRONG),
+    quiet: aggStats(x => x.z < -1),
     // Контроль: вспышка добавляет ли что-то сверх просадки рынка
     ddSurge: aggStats(x => x.z >= 1.5 && spyDrawdownAt(x.w) <= -0.1),
     ddOnly: aggStats(x => x.z < 1.5 && spyDrawdownAt(x.w) <= -0.1),
