@@ -98,6 +98,15 @@ export function secDate(s) {
 
 export function isoToday() { return new Date().toISOString().slice(0, 10); }
 
+// Дата вида YYYY-MM-DD, которая действительно существует. Формы подают люди и агенты:
+// в EDGAR встречаются опечатки («2026-06-31», обрезанные строки), и одна такая дата,
+// дойдя до арифметики, роняет всю сборку.
+export function isIsoDate(s) {
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(s + 'T00:00:00Z');
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
 export function addDaysIso(iso, days) {
   const d = new Date(iso + 'T00:00:00Z');
   d.setUTCDate(d.getUTCDate() + days);

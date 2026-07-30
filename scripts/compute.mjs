@@ -6,7 +6,7 @@
 // не помещаются в раннер, поэтому всё, что требует цен, сгруппировано по тикеру с вытеснением
 // кэша, а фазы без цен (гейты, кластеры, скоринг) идут отдельными проходами.
 // Использование: node scripts/compute.mjs [--data data] [--site site]
-import { readJson, writeJson, isoToday, addDaysIso } from './lib/util.mjs';
+import { readJson, writeJson, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
 import { readPriceCache, nominalFactor } from './lib/prices.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
 import { scoreBuy, topRole, dOwnOf, freshness } from './lib/scoring.mjs';
@@ -44,15 +44,19 @@ const iwm = readPriceCache(DATA, 'IWM');
 if (!iwm || iwm.length < 500) console.log('[compute] нет ряда IWM — size-бенчмарк недоступен, excess только vs SPY');
 
 // ---------- Вселенная ----------
-let cntOtc = 0, cntBadTicker = 0;
+let cntOtc = 0, cntBadTicker = 0, cntBadDate = 0;
 const trades = [];
 for (const r of tradesAll) {
+  // Даты из форм не валидируются на стороне SEC: опечатка вроде «2026-06-31» доходит
+  // до арифметики и роняет сборку. Отбрасываем такие строки, но считаем их в meta.
+  if (!isIsoDate(r.tdate) || !isIsoDate(r.fdate)) { cntBadDate++; continue; }
   const cat = issuerCategory(r, ref);
   if (cat === 'otc') { cntOtc++; continue; }
   const t = resolveTicker(r, ref);
   if (!plausibleTicker(t)) { cntBadTicker++; continue; }
   trades.push({ ...r, T: t, cat });
 }
+if (cntBadDate) console.log(`[compute] отброшено строк с некорректной датой: ${cntBadDate}`);
 trades.sort((a, b) => a.fdate < b.fdate ? -1 : a.fdate > b.fdate ? 1 : 0);
 const buys = trades.filter(r => r.code === 'P');
 const byTicker = new Map();
@@ -568,7 +572,7 @@ const liveState = readJson(join(DATA, 'state', 'live.json'), {});
 const priceState = readJson(join(DATA, 'prices', '_state.json'), {});
 W('meta.json', {
   built: new Date().toISOString(), v: 2,
-  trades: { total: trades.length, buys: buys.length, otcExcluded: cntOtc, badTicker: cntBadTicker },
+  trades: { total: trades.length, buys: buys.length, otcExcluded: cntOtc, badTicker: cntBadTicker, badDate: cntBadDate },
   load: loadStats,
   gates: { ok: okN, drops: dropCounts, labels: DROP_LABELS },
   universe: { priced: pricedTickers.size, noPrices: noPriceTickers.size },

@@ -4,7 +4,7 @@
 //   own, di, b5, orig, fn:{...} }
 // Шард: { v:2, trades:[...], amend:[{acc,cik,owners,orig,rows}] } — amend нужен для
 // детекции аннулированных сделок (4/A без строк, которые были в оригинале).
-import { politeFetch, parseTsv, secDate, num } from './util.mjs';
+import { politeFetch, parseTsv, secDate, num, isIsoDate } from './util.mjs';
 import { zipExtract } from './zip.mjs';
 import { rowFootnoteFlags, fnIds } from './footnotes.mjs';
 
@@ -251,7 +251,8 @@ export function parseForm4Txt(txt, acc, fdate) {
     const amounts = tag(tr, 'transactionAmounts') ?? '';
     const sh = num(tagVal(amounts, 'transactionShares'));
     const px = num(tagVal(amounts, 'transactionPricePerShare'));
-    if (!tdate || !sh || sh <= 0) continue;
+    // Дата из XML не проходит никакой валидации на стороне SEC — проверяем сами
+    if (!isIsoDate(tdate) || !sh || sh <= 0) continue;
     const post = tag(tr, 'postTransactionAmounts') ?? '';
     const own = num(tagVal(post, 'sharesOwnedFollowingTransaction'));
     const nature = tag(tr, 'ownershipNature') ?? '';

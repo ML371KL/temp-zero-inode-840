@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { rmSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz } from './lib/util.mjs';
+import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz, isIsoDate } from './lib/util.mjs';
 import { zipCreate, zipExtract } from './lib/zip.mjs';
 import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, SHARD_VERSION } from './lib/edgar.mjs';
 import { mergeSeries, writePriceCache, nominalFactor } from './lib/prices.mjs';
@@ -28,6 +28,16 @@ ok('secDate конвертирует формат SEC', () => {
   assert.equal(secDate('27-DEC-2024'), '2024-12-27');
   assert.equal(secDate(''), null);
   assert.equal(secDate('garbage'), null);
+});
+ok('isIsoDate отсеивает несуществующие даты из форм', () => {
+  // Регрессия: битая дата в одном филинге роняла всю сборку на RangeError
+  assert.equal(isIsoDate('2026-06-30'), true);
+  assert.equal(isIsoDate('2026-06-31'), false);   // такого дня не существует
+  assert.equal(isIsoDate('2026-13-01'), false);
+  assert.equal(isIsoDate('0000-00-00'), false);
+  assert.equal(isIsoDate('2026-6-1'), false);
+  assert.equal(isIsoDate(''), false);
+  assert.equal(isIsoDate(null), false);
 });
 ok('parseTsv разбирает строки с заголовком', () => {
   assert.deepEqual(parseTsv('A\tB\r\n1\t2\n3\t4\n'), [{ A: '1', B: '2' }, { A: '3', B: '4' }]);
@@ -194,6 +204,14 @@ ok('parseForm4Txt: агрегация, роли, построчные сноск
   assert.equal(r.owners[0].rel.includes('C'), true);
   assert.equal(r.fn.wavg, 1);                // F1 привязана к цене
   assert.equal(r.fn.b5, undefined);          // плана нет ни в форме, ни в сносках
+});
+ok('parseForm4Txt отбрасывает строку с невалидной датой сделки', () => {
+  // Регрессия: дата «2026-06-31» из формы доходила до арифметики и роняла всю сборку
+  const bad = FORM4_XML.replace('<transactionDate><value>2026-05-01</value></transactionDate>\n      <transactionCoding><transactionCode>P</transactionCode><equitySwapInvolved>0</equitySwapInvolved></transactionCoding>\n      <transactionAmounts><transactionShares><value>1000</value>',
+    '<transactionDate><value>2026-06-31</value></transactionDate>\n      <transactionCoding><transactionCode>P</transactionCode><equitySwapInvolved>0</equitySwapInvolved></transactionCoding>\n      <transactionAmounts><transactionShares><value>1000</value>');
+  const { trades } = parseForm4Txt(bad, 'ACC-BAD', '2026-07-01');
+  assert.equal(trades.length, 1);            // битая строка отброшена, валидная осталась
+  assert.equal(trades[0].sh, 3000);
 });
 
 // ---------- цены ----------
