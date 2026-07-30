@@ -296,6 +296,19 @@ ok('гейты: отсев ложных покупок', () => {
   assert.equal(applyGates(base, { close: 10, routine: null }).tags.includes('no-history'), true);
   assert.equal(applyGates({ ...base, cancelled: 1 }, { close: 10 }).drop, 'cancelled');
 });
+ok('гейты: покупка на старте торгов не считается открыторыночной', () => {
+  // Регрессия: у только что разместившейся бумаги нет истории котировок, поэтому ценовые
+  // гейты молча не срабатывали — и участие фондов в IPO по ровной цене выпуска попадало
+  // в сигнал как «кластер инсайдеров на десятки миллионов»
+  const base = { code: 'P', px: 15, fn: {}, di: 'D' };
+  assert.equal(applyGates(base, { close: 15, histDays: 3 }).drop, 'newlisting');
+  assert.equal(applyGates(base, { close: 15, histDays: 19 }).drop, 'newlisting');
+  assert.equal(applyGates(base, { close: 15, histDays: 20 }).ok, true);
+  // Нет ряда вовсе — гейт не выносит вердикта, но помечает, что проверить было нечем
+  const noPrice = applyGates(base, { close: null, histDays: null, noPrice: true });
+  assert.equal(noPrice.ok, true);
+  assert.equal(noPrice.tags.includes('no-price'), true);
+});
 ok('гейты: класс бумаги и несопоставимые единицы', () => {
   const base = { code: 'P', px: 10, fn: {}, di: 'D' };
   assert.equal(isNonCommon('7.875% Series A Cumulative Redeemable Preferred Stock'), true);

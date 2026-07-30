@@ -173,11 +173,14 @@ for (const [t, rows] of byTicker) {
   const lastAdj = has ? s[s.length - 1][2] : null;
   const sp = allSplits[t];
   for (const r of rows) {
-    if (!has) { r._dv = null; r._bucket = 'н/д'; r._dd = null; r._fw = null; r._close = null; continue; }
+    // Без ценового ряда три ценовых гейта не могут отработать — помечаем это явно,
+    // чтобы «прошла фильтры» не означало «проверена» там, где проверить было нечем
+    if (!has) { r._dv = null; r._bucket = 'н/д'; r._dd = null; r._fw = null; r._close = null; r._histDays = null; r._noPrice = 1; continue; }
     const i = idxAtOrBefore(s, r.tdate);
     // Цена, которую инсайдер видел в момент сделки: котировка «раскручена» назад через сплиты
     r._split = nominalFactor(sp, r.tdate);
     r._close = i >= 0 ? rnd(s[i][1] * r._split, 4) : null;
+    r._histDays = i + 1;   // сколько торговых дней бумага обращалась до сделки
     r._dd = drawdownAt(s, r.tdate);
     r._cur = cur;
     if (r.code !== 'P') continue;
@@ -223,6 +226,8 @@ for (const r of buys) {
   r._routine = isRoutineCMP(hist, r.tdate);
   r._gate = applyGates(r, {
     close: r._close,
+    histDays: r._histDays ?? null,
+    noPrice: !!r._noPrice,
     syncFilers: (syncCount.get(r._syncKey)?.size) ?? 1,
     planned: isPlanned(r),
     routine: r._routine,
