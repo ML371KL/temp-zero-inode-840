@@ -13,16 +13,27 @@ const PART_LABEL = {
   firstEver: 'первая покупка', windowOpen: 'сразу после отчёта',
   aeh: 'доказанный пред-отчётный трек',
 };
-const TAG_LABEL = {
-  pledge: ['залог', 'Акции инсайдера в залоге — риск принудительной продажи'],
-  trust: ['траст', 'Покупка через траст или на супруга — деньги того же инсайдера'],
-  indirect: ['косв.', 'Косвенное владение'],
-  'no-history': ['нет истории', 'Истории сделок меньше трёх лет — рутинность по CMP не определена'],
-  'no-price': ['нет цен', 'По этой бумаге нет котировок, поэтому ценовые проверки (дисконт к рынку, единицы, старт торгов) провести было не на чем'],
+// Признаки в Ленте обозначаются одно-двухбуквенными кодами, чтобы таблица не требовала
+// горизонтальной прокрутки. Расшифровка — в легенде под фильтрами и в подсказке каждой метки.
+// Формат: код -> [название, пояснение, стиль метки]. Коды не должны повторяться —
+// проверяется самотестом (scripts/selftest.mjs, «легенда признаков без коллизий»).
+export const FEAT = {
+  wo:            ['О',  'После отчёта', 'Покупка в первую неделю после публикации 10-Q/10-K — на свежей публичной информации', 'buy'],
+  high:          ['М',  'У максимума', 'Акция не более чем на 5% ниже 52-недельного максимума: инсайдер платит высокую цену', 'buy'],
+  'first-ever':  ['1',  'Первая покупка', 'Первая покупка этого инсайдера в наших данных', 'buy'],
+  'first-in-3y': ['3г', 'Не покупал 3 года', 'Первая покупка за три года — слом собственного паттерна', 'buy'],
+  pledge:        ['З',  'Залог', 'Акции инсайдера в залоге — риск принудительной продажи', 'gray'],
+  trust:         ['Т',  'Траст', 'Покупка через траст или на супруга — деньги того же инсайдера', 'gray'],
+  indirect:      ['Кс', 'Косвенное владение', 'Бумаги записаны не напрямую на инсайдера', 'gray'],
+  'no-history':  ['Ни', 'Нет истории', 'Истории сделок меньше трёх лет — рутинность по CMP не определена', 'gray'],
+  'no-price':    ['Нц', 'Нет котировок', 'Ценовые проверки (дисконт, единицы, старт торгов) провести было не на чем', 'gray'],
+  'planned-mark': ['Пл', 'План 10b5-1', 'Сделка по заранее принятому плану — малоинформативна', 'warn'],
 };
-const INFLECT_LABEL = {
-  'first-in-3y': ['не покупал 3 года', 'Первая покупка этого инсайдера за три года — слом собственного паттерна'],
-  'first-ever': ['первая покупка', 'Первая покупка этого инсайдера в наших данных'],
+// Причины отсева — те же короткие коды; расшифровки берутся из meta.gates.labels
+export const DROP_CODE = {
+  offering: 'Рз', discount: 'Дк', sync: 'Сн', fund: 'Фн', planned: 'Пл', routine: 'Рт',
+  regular: 'Рг', drip: 'Др', espp: 'Эс', forced: 'Пр', outlier: 'Вб', newlisting: 'Ст',
+  noliq: 'Об', security: 'Пф', units: 'Ед', cancelled: 'Ан',
 };
 
 // ---------- Тема ----------
@@ -109,23 +120,41 @@ function checkStale() {
 // ---------- Общие компоненты ----------
 function scoreCell(score, parts) {
   if (score === null || score === undefined) return '<span class="muted">—</span>';
-  return `<span class="score" data-parts='${esc(JSON.stringify(parts ?? {}))}'>${score}</span>`;
+  return `<span class="score" data-score="${score}" data-parts='${esc(JSON.stringify(parts ?? {}))}' title="Клик — разбор компонент, повторный клик — обратно">${score}</span>`;
 }
+// Разбор компонент разворачивается и сворачивается по клику: элемент не заменяется,
+// а меняет содержимое, поэтому число всегда можно вернуть.
 function bindScoreTips(sel) {
   for (const s of document.querySelectorAll(sel + ' .score')) {
     s.addEventListener('click', () => {
+      if (s.dataset.open === '1') {
+        s.textContent = s.dataset.score;
+        s.classList.remove('score-open');
+        s.dataset.open = '0';
+        return;
+      }
       const parts = JSON.parse(s.dataset.parts);
       const txt = Object.entries(parts).filter(([, v]) => v !== 0)
         .map(([k, v]) => `${PART_LABEL[k] ?? k} ${v > 0 ? '+' : ''}${v}`).join(' · ');
-      s.outerHTML = `<span class="score-detail">${esc(txt || 'нет компонент')}</span>`;
+      s.textContent = txt || 'нет компонент';
+      s.classList.add('score-open');
+      s.dataset.open = '1';
     });
   }
 }
+// Сортировка по трём состояниям: убывание → возрастание → исходный порядок.
+// Направление показывается стрелкой в заголовке.
 function bindSort(sel, rerender) {
   for (const h of document.querySelectorAll(sel + ' th.sortable')) {
+    const key = h.dataset.sort;
+    if (state.sort?.[0] === key) {
+      h.innerHTML = h.innerHTML.replace('⇅', state.sort[1] === -1 ? '↓' : '↑');
+      h.classList.add('sorted');
+    }
     h.addEventListener('click', () => {
-      const key = h.dataset.sort;
-      state.sort = state.sort?.[0] === key ? [key, -state.sort[1]] : [key, -1];
+      if (state.sort?.[0] !== key) state.sort = [key, -1];
+      else if (state.sort[1] === -1) state.sort = [key, 1];
+      else state.sort = null;
       rerender(true);
     });
   }
@@ -135,10 +164,42 @@ function sortRows(rows) {
   const [key, dir] = state.sort;
   return [...rows].sort((a, b) => ((a[key] ?? -1e18) - (b[key] ?? -1e18)) * dir);
 }
-const tagsHtml = r => (r.tags ?? []).map(t => {
-  const [label, title] = TAG_LABEL[t] ?? [t, ''];
-  return `<span class="pill gray" title="${esc(title)}">${esc(label)}</span>`;
-}).join(' ');
+// Метка признака по коду из FEAT
+function featPill(key) {
+  const f = FEAT[key];
+  if (!f) return '';
+  const [code, name, why, style] = f;
+  return `<span class="pill ${style} feat" title="${esc(name + ' — ' + why)}">${esc(code)}</span>`;
+}
+// Полный набор признаков строки ленты в компактном виде
+function featureCell(r) {
+  const out = [];
+  if (r.drop) {
+    const code = DROP_CODE[r.drop] ?? r.drop.slice(0, 2);
+    out.push(`<span class="pill warn feat" title="${esc('Отсеяна: ' + dropLabel(r.drop))}">${esc(code)}</span>`);
+  }
+  if (r.wo) out.push(featPill('wo'));
+  if (r.dd !== null && r.dd >= -0.05) out.push(featPill('high'));
+  if (r.inflect) out.push(featPill(r.inflect));
+  for (const t of r.tags ?? []) out.push(featPill(t));
+  return out.join(' ');
+}
+// Легенда собирается из тех же таблиц, что и метки, поэтому не может с ними разойтись
+function renderFeatLegend() {
+  const boxes = document.querySelectorAll('.feat-legend');
+  if (!boxes.length) return;
+  const group = (title, items) => `<div class="legend-group"><b>${esc(title)}</b>${items.map(([code, name, why, style]) =>
+    `<span class="legend-item" title="${esc(why)}"><i class="pill ${style ?? 'gray'} feat">${esc(code)}</i>${esc(name)}</span>`).join('')}</div>`;
+  const signal = ['wo', 'high', 'first-ever', 'first-in-3y'].map(k => FEAT[k]);
+  const info = ['pledge', 'trust', 'indirect', 'planned-mark', 'no-history', 'no-price'].map(k => FEAT[k]);
+  const labels = state.meta?.gates?.labels ?? {};
+  const drops = Object.entries(DROP_CODE)
+    .filter(([k]) => labels[k])
+    .map(([k, code]) => [code, labels[k], labels[k], 'warn']);
+  const html = group('Сигнальные:', signal) + group('Информационные:', info) +
+    (drops.length ? group('Причины отсева (видны при показе отсеянных):', drops) : '');
+  for (const b of boxes) if (b.dataset.done !== '1') { b.innerHTML = html; b.dataset.done = '1'; }
+}
 
 // ---------- СКРИНЕР ----------
 const PRESETS = {
@@ -248,6 +309,7 @@ async function loadFeed(arg) {
     try { state.feed = await fetchJson('feed.json'); }
     catch { $('#feed-table').innerHTML = '<tr><td>Данные ленты ещё не собраны.</td></tr>'; return; }
   }
+  renderFeatLegend();
   if (arg) {   // переход из рейтинга инсайдеров: #feed/cik:12345
     const m = /^cik:(\d+)$/.exec(arg);
     if (m) { ff.cikFilter = Number(m[1]); ff.gate = 'all'; $('#f-gate').value = 'all'; }
@@ -295,7 +357,7 @@ function renderFeed(reset) {
     <td class="num">${fmtMoney(r.val)}</td>
     <td class="num">${r.dOwn === null ? '—' : (r.dOwn >= 9.99 ? 'новая' : fmtPct(r.dOwn, 0))}</td>
     <td class="num">${r.cl >= 2 ? `<span class="pill buy">×${r.cl}</span>` : ''}</td>
-    <td>${r.drop ? `<span class="pill warn" title="Отсеяна: ${esc(dropLabel(r.drop))}">${esc(dropShort(r.drop))}</span> ` : ''}${r.wo ? '<span class="pill buy" title="Покупка в первую неделю после отчёта — на свежей публичной информации">после отчёта</span> ' : ''}${r.dd !== null && r.dd >= -0.05 ? '<span class="pill buy" title="Акция у 52-недельного максимума: инсайдер платит высокую цену">у макс.</span> ' : ''}${r.inflect ? `<span class="pill buy" title="${esc(INFLECT_LABEL[r.inflect]?.[1] ?? '')}">${esc(INFLECT_LABEL[r.inflect]?.[0] ?? r.inflect)}</span> ` : ''}${tagsHtml(r)}</td>
+    <td>${featureCell(r)}</td>
     <td class="num">${scoreCell(r.score, r.parts)}</td>
     <td class="num ${cls(r.d1)}">${fmtPct(r.d1)}</td>
     <td class="num ${cls(r.w1)}">${fmtPct(r.w1)}</td>
@@ -312,11 +374,6 @@ function renderFeed(reset) {
   bindScoreTips('#feed-table');
 }
 const dropLabel = d => state.meta?.gates?.labels?.[d] ?? d;
-const dropShort = d => ({
-  offering: 'размещение', drip: 'DRIP', espp: 'ESPP', forced: 'принудит.', outlier: 'выброс',
-  discount: 'дисконт', sync: 'синхрон', fund: 'фонд', planned: '10b5-1', routine: 'рутина',
-  regular: 'регулярн.', cancelled: 'аннулир.',
-}[d] ?? d);
 
 // ---------- ТИКЕР ----------
 let tickerRange = '5y';
@@ -361,6 +418,7 @@ async function openTicker(t) {
     d.cat === 'unknown' ? '<span class="pill warn" title="Эмитента нет в текущем справочнике SEC — возможен делистинг или смена структуры">возможен делистинг</span>' : '',
   ].join(' ');
   $('#tc-asof').textContent = d.asOf ? `цены до ${d.asOf} · покупок прошло фильтры: ${d.okBuys}` : 'цены недоступны';
+  renderFeatLegend();
   if (!state.chart) state.chart = new PriceChart($('#tc-chart'));
   renderChart();
   renderTickerTrades();
@@ -399,7 +457,7 @@ function renderTickerTrades() {
     <td class="num">${fmtMoney(r.val)}</td>
     <td class="num">${r.code !== 'P' || r.dOwn === null ? '—' : (r.dOwn >= 9.99 ? 'новая' : fmtPct(r.dOwn, 0))}</td>
     <td class="num">${fmtInt(r.own)}</td>
-    <td>${r.drop ? `<span class="pill warn" title="${esc(dropLabel(r.drop))}">${esc(dropShort(r.drop))}</span> ` : ''}${r.b5 ? '<span class="pill warn">10b5-1</span> ' : ''}${r.di === 'I' ? '<span class="pill gray" title="косвенное владение">косв.</span> ' : ''}${r.sec && !/^common\b/i.test(r.sec) ? `<span class="pill gray" title="${esc(r.sec)}">${esc(trunc(r.sec, 14))}</span> ` : ''}${r.cl >= 2 ? `<span class="pill buy">×${r.cl}</span>` : ''}</td>
+    <td>${r.drop ? `<span class="pill warn feat" title="${esc('Отсеяна: ' + dropLabel(r.drop))}">${esc(DROP_CODE[r.drop] ?? r.drop.slice(0, 2))}</span> ` : ''}${r.b5 ? featPill('planned-mark') : ''}${r.di === 'I' ? featPill('indirect') : ''}${r.sec && !/^common\b/i.test(r.sec) ? `<span class="pill gray feat" title="${esc('Класс бумаги: ' + r.sec)}">Пф</span> ` : ''}${r.cl >= 2 ? `<span class="pill buy" title="Независимых инсайдеров в плотном окне">×${r.cl}</span>` : ''}</td>
     <td class="num">${r.score ?? ''}</td>
   </tr>`).join('');
 }

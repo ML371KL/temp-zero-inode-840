@@ -2,7 +2,7 @@
 // недели запуска; динамические ряды строятся «до сегодня» так, чтобы классификация не менялась.
 import { strict as assert } from 'node:assert';
 import { execFileSync } from 'node:child_process';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz, isIsoDate } from './lib/util.mjs';
@@ -380,6 +380,25 @@ ok('scoreBuy v3: только откалиброванные компонент�
   assert.equal(freshness(5), 1);
   assert.equal(freshness(200), 0);
   assert.ok(freshness(90) > 0 && freshness(90) < 1);
+});
+
+// ---------- легенда признаков в интерфейсе ----------
+ok('легенда признаков: коды короткие и без коллизий', () => {
+  // Коды парсим из web/app.js: дублирующийся код сделал бы легенду ложной
+  const src = readFileSync(join(ROOT, 'web', 'app.js'), 'utf8');
+  const featBlock = src.slice(src.indexOf('export const FEAT = {'), src.indexOf('export const DROP_CODE'));
+  const dropBlock = src.slice(src.indexOf('export const DROP_CODE = {'), src.indexOf('};', src.indexOf('export const DROP_CODE')));
+  const featCodes = [...featBlock.matchAll(/\[\s*'([^']{1,2})'\s*,/g)].map(m => m[1]);
+  const dropCodes = [...dropBlock.matchAll(/:\s*'([^']{1,2})'/g)].map(m => m[1]);
+  assert.ok(featCodes.length >= 9, `кодов признаков должно быть ≥9, найдено ${featCodes.length}`);
+  assert.ok(dropCodes.length >= 15, `кодов отсева должно быть ≥15, найдено ${dropCodes.length}`);
+  for (const c of [...featCodes, ...dropCodes]) assert.ok(c.length <= 2, `код «${c}» длиннее двух знаков`);
+  // Внутри каждой группы коллизий быть не должно. «Пл» намеренно один и тот же для
+  // плановой сделки и причины отсева «план 10b5-1» — это одно и то же понятие.
+  const dupFeat = featCodes.filter((c, i) => featCodes.indexOf(c) !== i);
+  const dupDrop = dropCodes.filter((c, i) => dropCodes.indexOf(c) !== i);
+  assert.deepEqual(dupFeat, [], `дубли среди признаков: ${dupFeat}`);
+  assert.deepEqual(dupDrop, [], `дубли среди причин отсева: ${dupDrop}`);
 });
 
 // ---------- сквозной прогон compute ----------
