@@ -37,7 +37,7 @@ $('#theme-toggle').addEventListener('click', () => {
 
 // ---------- Состояние ----------
 const state = {
-  feed: null, clusters: null, stats: null, meta: null, insiders: null,
+  feed: null, clusters: null, signals: null, stats: null, meta: null, insiders: null,
   tickersIndex: null, tickerData: null, chart: null, feedShown: 100, sort: null, preset: 'all',
 };
 async function fetchJson(path) {
@@ -55,7 +55,7 @@ function route() {
   if (!TABS.includes(tab)) { tab = 'screener'; arg = undefined; }  // неизвестный якорь — не белый экран
   for (const a of tabs) a.classList.toggle('active', a.dataset.tab === tab);
   for (const p of document.querySelectorAll('.tab-panel')) p.classList.toggle('active', p.id === 'tab-' + tab);
-  if (tab === 'screener') loadClusters();
+  if (tab === 'screener') loadScreener();
   if (tab === 'feed') loadFeed(arg);
   if (tab === 'insiders') loadInsiders();
   if (tab === 'market') loadMarket();
@@ -141,6 +141,17 @@ const tagsHtml = r => (r.tags ?? []).map(t => {
 }).join(' ');
 
 // ---------- СКРИНЕР ----------
+// Наборы уровня СДЕЛКИ — прошли проверку на расщеплённой выборке (docs/ЛУЧШИЕ-ФИЛЬТРЫ.md).
+// Отдельный тип таблицы: это признаки конкретной покупки, а не свойства кластера.
+const SIGNAL_PRESETS = {
+  strength: {
+    hint: 'Покупка в первую неделю после публикации отчёта, когда акция не более чем на 5% ниже 52-недельного максимума, и не от CEO. Самый устойчивый паттерн из проверенных: единственный с положительной медианой (+2.2%) и долей успеха выше половины (53%), плюс в 9 годах из 10. Порог близости к максимуму ведёт себя монотонно — чем ближе, тем лучше. Кластер этот паттерн НЕ усиливает.',
+  },
+  conviction: {
+    hint: 'Кластер из ≥3 независимых инсайдеров, где каждый увеличил свою позицию на ≥20%. Максимальное матожидание из найденного (+18.4% за 12 мес), но распределение лотерейное: медиана −4.6%, выигрывает 46% сделок, топ-5 тикеров дают половину результата. Работает только на большом числе позиций. Докупка обязательна: кластер без неё даёт минус.',
+  },
+};
+
 const PRESETS = {
   all: { f: () => true, hint: 'Активные кластеры: ≥2 независимых инсайдера покупали в одной цепочке (разрыв ≤30 дней), последняя покупка за 90 дней. Участники склеены по совместным подачам, поэтому фонд с его партнёрами считается одним покупателем, а не тремя.' },
   strong: { f: c => c.dense >= 3, hint: 'Кластеры из ≥3 независимых инсайдеров в окне 14 дней — сильнейший из документированных паттернов (Alldredge, 2019).' },
@@ -151,21 +162,64 @@ const PRESETS = {
   high: { f: c => c.dd !== null && c.dd >= -0.05, hint: 'Покупки вблизи 52-недельного максимума — инсайдер платит высокую цену, что редко бывает случайным (паттерн InsideArbitrage).' },
   small: { f: c => c.bucket === 'small' || c.bucket === 'micro', hint: 'Малоликвидные имена: исторически именно здесь эффект сильнее всего — но и проскальзывание выше, а ёмкость мала.' },
 };
-for (const b of document.querySelectorAll('#preset-group .chip')) {
+for (const b of document.querySelectorAll('#preset-group .chip, #preset-group-proven .chip')) {
   b.addEventListener('click', () => {
-    for (const x of document.querySelectorAll('#preset-group .chip')) x.classList.remove('active');
+    for (const x of document.querySelectorAll('#preset-group .chip, #preset-group-proven .chip')) x.classList.remove('active');
     b.classList.add('active');
     state.preset = b.dataset.preset;
-    renderClusters();
+    state.sort = null;
+    loadScreener();
   });
 }
-async function loadClusters() {
+async function loadScreener() {
+  if (SIGNAL_PRESETS[state.preset]) {
+    if (!state.signals) {
+      try { state.signals = await fetchJson('signals.json'); }
+      catch { $('#clusters-table').innerHTML = '<tr><td>Сигналы ещё не собраны.</td></tr>'; return; }
+    }
+    renderSignals();
+    return;
+  }
   if (!state.clusters) {
     try { state.clusters = await fetchJson('clusters.json'); }
     catch { $('#clusters-table').innerHTML = '<tr><td>Данные ещё не собраны.</td></tr>'; return; }
   }
   renderClusters();
 }
+// Таблица сигналов уровня сделки
+function renderSignals() {
+  const p = SIGNAL_PRESETS[state.preset];
+  $('#screener-hint').textContent = p.hint;
+  const rows = sortRows(state.signals.filter(s => s.recipes.includes(state.preset)));
+  const th = `<tr>
+    <th>Подача</th><th>Тикер</th><th>Компания</th><th>Инсайдер</th><th>Роль</th>
+    <th class="num">Сумма ⇅</th><th class="num" title="Прирост позиции инсайдера">Δ поз.</th>
+    <th class="num">Цена</th><th class="num">Тек. цена</th>
+    <th class="num sortable" data-sort="chg" title="Изменение с первого дня после подачи">Изм. ⇅</th>
+    <th class="num sortable" data-sort="dd" title="Просадка от 52-недельного максимума на дату сделки">Контекст ⇅</th>
+    <th>Ликвидность</th><th>Признаки</th>
+    <th class="num sortable" data-sort="score">Скор ⇅</th></tr>`;
+  $('#clusters-table').innerHTML = th + (rows.length ? rows.map(s => `<tr>
+    <td>${esc(s.fdate)}</td>
+    <td><a class="tick" href="#ticker/${encodeURIComponent(s.t)}">${esc(s.t)}</a></td>
+    <td title="${esc(s.name)}">${esc(trunc(s.name, 24))}</td>
+    <td title="${esc(s.title)}">${esc(trunc(s.who, 26))}</td>
+    <td>${esc(ROLE_LABEL[s.role] ?? s.role)}</td>
+    <td class="num">${fmtMoney(s.val)}</td>
+    <td class="num">${s.dOwn === null ? '—' : (s.dOwn >= 9.99 ? 'новая' : fmtPct(s.dOwn, 0))}</td>
+    <td class="num">${fmtPrice(s.px)}</td>
+    <td class="num">${fmtPrice(s.cur)}</td>
+    <td class="num ${cls(s.chg)}">${fmtPct(s.chg)}</td>
+    <td class="num ${cls(s.dd)}">${fmtPct(s.dd, 0)}</td>
+    <td>${esc(s.bucket)}</td>
+    <td>${s.wo ? '<span class="pill buy" title="Покупка в первую неделю после отчёта">после отчёта</span> ' : ''}${s.dd !== null && s.dd >= -0.05 ? '<span class="pill buy" title="Акция у 52-недельного максимума">у макс.</span> ' : ''}${s.cl >= 2 ? `<span class="pill buy" title="Независимых инсайдеров в плотном окне">×${s.cl}</span> ` : ''}${s.routine === false ? '<span class="pill gray" title="Инсайдер с известной историей, паттерна рутинных сделок нет">нерутина</span>' : ''}</td>
+    <td class="num">${scoreCell(s.score, s.parts)}</td>
+  </tr>`).join('') : '<tr><td colspan="14" class="muted">За последние 90 дней сигналов по этому набору нет. Это нормально: паттерн даёт около десяти сигналов в месяц, а в тихие периоды меньше.</td></tr>');
+  $('#screener-count').textContent = rows.length ? `${rows.length} сигналов за 90 дней` : '';
+  bindSort('#clusters-table', renderSignals);
+  bindScoreTips('#clusters-table');
+}
+
 function renderClusters() {
   const p = PRESETS[state.preset] ?? PRESETS.all;
   $('#screener-hint').textContent = p.hint;
@@ -195,29 +249,14 @@ function renderClusters() {
     <td class="num">${scoreCell(c.score, c.parts)}</td>
     <td class="score-detail">${c.buyers.slice(0, 4).map(b => `${esc(b.name)} <span class="muted">(${esc(ROLE_LABEL[topRoleOf(b.rel)] ?? '')})</span>`).join('; ')}${c.buyers.length > 4 ? ' …' : ''}</td>
   </tr>`).join('') : '<tr><td colspan="14" class="muted">Под этот фильтр сейчас нет активных кластеров.</td></tr>');
+  $('#screener-count').textContent = rows.length ? `${rows.length} активных кластеров` : '';
   bindSort('#clusters-table', renderClusters);
   bindScoreTips('#clusters-table');
 }
 function topRoleOf(rel) { for (const c of ['F', 'C', 'O', 'D', 'T', 'X']) if ((rel ?? '').includes(c)) return c; return 'X'; }
 
 // ---------- ЛЕНТА ----------
-const ff = { roles: new Set(), minval: 0, minscore: 0, cluster: false, gate: 'ok', q: '', recipe: null };
-
-// Готовые наборы фильтров — те, что прошли проверку train/validation
-// (docs/ЛУЧШИЕ-ФИЛЬТРЫ.md). Логика намеренно совпадает с проверенной в бэктесте.
-const RECIPES = {
-  strength: r => r.wo === 1 && r.dd !== null && r.dd >= -0.05 && r.role !== 'C',
-  conviction: r => r.cl >= 3 && r.dOwn !== null && r.dOwn >= 0.2 && r.dOwn < 9,
-};
-for (const b of document.querySelectorAll('#f-recipes .chip')) {
-  b.addEventListener('click', () => {
-    const key = b.dataset.recipe;
-    for (const x of document.querySelectorAll('#f-recipes .chip')) x.classList.remove('active');
-    if (key === 'reset' || ff.recipe === key) { ff.recipe = null; }
-    else { ff.recipe = key; b.classList.add('active'); }
-    renderFeed(true);
-  });
-}
+const ff = { roles: new Set(), minval: 0, minscore: 0, cluster: false, gate: 'ok', q: '' };
 for (const b of document.querySelectorAll('#f-roles .chip')) {
   b.addEventListener('click', () => {
     b.classList.toggle('active');
@@ -250,9 +289,7 @@ async function loadFeed(arg) {
   renderFeed(true);
 }
 function feedFiltered() {
-  const recipe = ff.recipe ? RECIPES[ff.recipe] : null;
   return state.feed.filter(r =>
-    (!recipe || recipe(r)) &&
     (ff.gate === 'all' || (ff.gate === 'ok' ? !r.drop : !!r.drop)) &&
     (!ff.cikFilter || (r.ciks ?? []).includes(ff.cikFilter)) &&
     (!ff.roles.size || ff.roles.has(r.role)) &&

@@ -296,6 +296,16 @@ ok('гейты: отсев ложных покупок', () => {
   assert.equal(applyGates(base, { close: 10, routine: null }).tags.includes('no-history'), true);
   assert.equal(applyGates({ ...base, cancelled: 1 }, { close: 10 }).drop, 'cancelled');
 });
+ok('гейты: короткий ряд котировок — это старт торгов, а не «цен нет»', () => {
+  // Регрессия: ряд короче порога бэктеста считался отсутствием цен, histDays уходил null,
+  // и гейт старта торгов не срабатывал — участие в IPO попадало в сигнал
+  const base = { code: 'P', px: 15, fn: {}, di: 'D' };
+  assert.equal(applyGates(base, { close: 15, histDays: 8, noPrice: false }).drop, 'newlisting');
+  // Ряда нет вовсе: вердикта нет, но факт непроверяемости помечен тегом
+  const none = applyGates(base, { close: null, histDays: null, noPrice: true });
+  assert.equal(none.ok, true);
+  assert.equal(none.tags.includes('no-price'), true);
+});
 ok('гейты: покупка на старте торгов не считается открыторыночной', () => {
   // Регрессия: у только что разместившейся бумаги нет истории котировок, поэтому ценовые
   // гейты молча не срабатывали — и участие фондов в IPO по ровной цене выпуска попадало

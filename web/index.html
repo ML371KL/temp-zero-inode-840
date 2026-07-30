@@ -34,6 +34,14 @@
   <!-- СКРИНЕР -->
   <section id="tab-screener" class="tab-panel">
     <div class="filters">
+      <span class="proven-label" title="Эти два набора прошли проверку на расщеплённой выборке: веса и пороги подбирались на подачах 2016–2021, результат подтверждён на 2022+">✓ проверено на истории:</span>
+      <div class="chip-group" id="preset-group-proven">
+        <button class="chip proven" data-preset="strength">Сила после отчёта</button>
+        <button class="chip proven" data-preset="conviction">Кластер + докупка</button>
+      </div>
+    </div>
+    <div class="filters">
+      <span class="muted">прочие срезы:</span>
       <div class="chip-group" id="preset-group">
         <button class="chip active" data-preset="all">Все кластеры</button>
         <button class="chip" data-preset="strong">Кластер ≥3</button>
@@ -47,18 +55,11 @@
     </div>
     <p class="hint" id="screener-hint"></p>
     <div class="table-wrap"><table id="clusters-table"></table></div>
+    <div class="more-row"><span id="screener-count" class="muted"></span></div>
   </section>
 
   <!-- ЛЕНТА -->
   <section id="tab-feed" class="tab-panel">
-    <div class="filters">
-      <span class="muted">Готовые наборы:</span>
-      <div class="chip-group" id="f-recipes">
-        <button class="chip" data-recipe="strength" title="Покупка сразу после отчёта, когда акция у 52-недельного максимума, и не от CEO. Самый устойчивый паттерн в нашем бэктесте: положительная медиана, 53% выше бенчмарка, плюс в 9 годах из 10.">Сила после отчёта</button>
-        <button class="chip" data-recipe="conviction" title="Кластер из ≥3 независимых инсайдеров, каждый увеличил позицию на ≥20%. Максимальное матожидание, но лотерейное распределение: медиана отрицательная, результат делают отдельные имена.">Кластер + докупка</button>
-        <button class="chip" data-recipe="reset">Сбросить</button>
-      </div>
-    </div>
     <div class="filters">
       <input type="search" id="f-search" placeholder="Тикер, компания, инсайдер…" autocomplete="off">
       <div class="chip-group" id="f-roles" title="Роль инсайдера">

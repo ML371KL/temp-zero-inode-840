@@ -65,6 +65,14 @@ main { flex: 1; padding: 16px 20px; max-width: 1500px; width: 100%; margin: 0 au
   border-radius: 16px; padding: 5px 11px; font-size: 12px; cursor: pointer;
 }
 .chip.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+/* Наборы, прошедшие проверку на расщеплённой выборке — выделены как самые полезные */
+.chip.proven {
+  background: color-mix(in srgb, var(--c-buy) 16%, var(--surface));
+  border-color: var(--c-buy); color: var(--ink); font-weight: 600;
+}
+.chip.proven:hover { background: color-mix(in srgb, var(--c-buy) 26%, var(--surface)); }
+.chip.proven.active { background: var(--c-buy); color: var(--accent-ink); border-color: var(--c-buy); }
+.proven-label { color: var(--c-buy); font-size: 12.5px; font-weight: 600; }
 .check { display: flex; gap: 5px; align-items: center; color: var(--ink-2); font-size: 13px; cursor: pointer; }
 .hint { color: var(--ink-2); font-size: 13px; max-width: 900px; }
 
