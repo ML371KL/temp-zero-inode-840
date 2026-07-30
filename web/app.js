@@ -375,16 +375,16 @@ function renderFeed(reset) {
     <th>Подача</th><th title="Рабочих дней между сделкой и подачей формы">Лаг</th>
     <th>Тикер</th><th>Компания</th><th>Инсайдер</th><th>Роль</th>
     <th class="num">Акции</th><th class="num">Цена</th>
+    <th class="num sortable" data-sort="chgT" title="Изменение цены с ДАТЫ СДЕЛКИ — результат самого инсайдера. При просроченной подаче отличается от колонки «с подачи»">с сделки ⇅</th>
     <th class="num sortable" data-sort="val">Сумма ⇅</th>
     <th class="num" title="Прирост позиции инсайдера">Δ поз.</th>
     <th class="num">Класт.</th><th>Признаки</th>
     <th class="num sortable" data-sort="score" title="Клик по значению раскрывает компоненты">Скор ⇅</th>
-    <th class="num" title="Через 1 торговый день после входа">1д</th>
-    <th class="num" title="Через неделю">1н</th>
+    <th class="num" title="Через неделю после того, как сигнал стал публичным">1н</th>
     <th class="num" title="Через месяц">1м</th>
     <th class="num" title="Через 6 месяцев">6м</th>
     <th class="num">Тек.</th>
-    <th class="num sortable" data-sort="chg" title="Изменение с первого дня после подачи, с учётом сплитов и дивидендов">Изм. ⇅</th></tr>`;
+    <th class="num sortable" data-sort="chg" title="Изменение с первого торгового дня ПОСЛЕ ПОДАЧИ формы — то, что мог бы получить читатель сигнала. Только эта величина корректна для оценки стратегии">с подачи ⇅</th></tr>`;
   $('#feed-table').innerHTML = th + (shown.length ? shown.map(r => `<tr class="${r.drop ? 'dropped' : ''}">
     <td>${esc(r.fdate)}${r.form === '4/A' ? ' <span class="pill gray" title="поправка">A</span>' : ''}</td>
     <td class="num ${r.delay > 10 ? 'neg' : ''}">${r.delay}</td>
@@ -394,12 +394,12 @@ function renderFeed(reset) {
     <td>${esc(ROLE_LABEL[r.role] ?? r.role)}</td>
     <td class="num">${fmtInt(r.sh)}</td>
     <td class="num">${fmtPrice(r.px)}</td>
+    <td class="num ${cls(r.chgT)}">${fmtPct(r.chgT)}</td>
     <td class="num">${fmtMoney(r.val)}</td>
     <td class="num">${r.dOwn === null ? '—' : (r.dOwn >= 9.99 ? 'новая' : fmtPct(r.dOwn, 0))}</td>
     <td class="num">${r.cl >= 2 ? `<span class="pill buy">×${r.cl}</span>` : ''}</td>
     <td>${featureCell(r)}</td>
     <td class="num">${scoreCell(r.score, r.parts)}</td>
-    <td class="num ${cls(r.d1)}">${fmtPct(r.d1)}</td>
     <td class="num ${cls(r.w1)}">${fmtPct(r.w1)}</td>
     <td class="num ${cls(r.m1)}">${fmtPct(r.m1)}</td>
     <td class="num ${cls(r.m6)}">${fmtPct(r.m6)}</td>

@@ -211,7 +211,13 @@ for (const [t, rows] of byTicker) {
     r._bucket = sizeBucket(r._dv);
     r._fw = forward(r, s);
     const e = idxFirstAfter(s, r.fdate);
+    // Две разные величины, и путать их нельзя:
+    //  _chg  — от момента, когда сигнал стал публичным (вход по подаче). Это то, что мог бы
+    //          получить подписчик, и только это корректно для бэктеста.
+    //  _chgT — от даты самой сделки: результат ИНСАЙДЕРА. При просроченной подаче
+    //          (медиана лага 1 день, но у 3% сделок он больше 60 дней) числа расходятся сильно.
     r._chg = e >= 0 ? rnd(lastAdj / s[e][2] - 1) : null;
+    r._chgT = i >= 0 ? rnd(lastAdj / s[i][2] - 1) : null;
   }
   // Остаточное расхождение единиц по всему эмитенту (ADR-коэффициент, отчётность в другой
   // валюте): у настоящего размещения отклоняются отдельные сделки, а здесь — все и одинаково.
@@ -404,8 +410,8 @@ const feedRows = buys.filter(r => r.fdate >= feedCut).map(r => {
     track: r._track ?? null, inflect: r._inflect ?? null,
     b5: isPlanned(r) ? 1 : 0, routine: r._routine,
     wo: r._wo ?? 0, pre: r._pre ?? 0,
-    cur: r._cur ?? null, chg: r._chg ?? null,
-    d1: r._fw?.d1 ?? null, w1: r._fw?.w1 ?? null, m1: r._fw?.m1 ?? null, m6: r._fw?.m6 ?? null,
+    cur: r._cur ?? null, chg: r._chg ?? null, chgT: r._chgT ?? null,
+    w1: r._fw?.w1 ?? null, m1: r._fw?.m1 ?? null, m6: r._fw?.m6 ?? null,
   };
 });
 feedRows.sort((a, b) => b.fdate < a.fdate ? -1 : b.fdate > a.fdate ? 1 : (b.score ?? -1) - (a.score ?? -1));
