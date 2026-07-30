@@ -343,14 +343,27 @@ ok('плановость: чекбокс ИЛИ сноска', () => {
 });
 
 // ---------- скоринг ----------
-ok('scoreBuy: компоненты, границы, приоритет CFO', () => {
-  const max = scoreBuy({ persons: 3, role: 'F', totalVal: 2e6, dOwn: 0.6, dd: -0.4, track: { n: 5, hit: 0.8 }, inflect: 'first-in-3y', sizeVsTypical: 9 });
-  assert.equal(max.total, 100);                     // клип сверху
-  assert.equal(max.parts.role, 20);                 // CFO выше CEO
-  assert.equal(scoreBuy({ role: 'C' }).parts.role, 14);
-  const weak = scoreBuy({ persons: 1, role: 'T', totalVal: 1e4, track: { n: 6, hit: 0.1 } });
-  assert.equal(weak.parts.track, -6);               // доказанно неудачливый инсайдер штрафуется
-  assert.equal(weak.total, 0);
+ok('scoreBuy v3: только откалиброванные компоненты', () => {
+  // Максимальный профиль: кластер ≥3, CFO, докупка 20–50%, известная нерутинная история,
+  // первая покупка, сразу после отчёта, доказанный пред-отчётный трек
+  const max = scoreBuy({ persons: 3, role: 'F', dOwn: 0.3, val: 2e5, routine: false, inflect: 'first-ever', windowOpen: 1, aehN: 4, aehHit: 0.75 });
+  assert.equal(max.total, 20 + 16 + 16 + 12 + 8 + 6 + 8); // 86
+  // CEO штрафуется (минус в обеих половинах калибровки), CFO и офицер равны
+  assert.equal(scoreBuy({ role: 'C' }).parts.role, -8);
+  assert.equal(scoreBuy({ role: 'O' }).parts.role, 16);
+  // Позиция с нуля и сделка ≥$1M — отрицательные компоненты
+  const weak = scoreBuy({ persons: 1, role: 'D', dOwn: 9.99, val: 2e6 });
+  assert.equal(weak.parts.conviction, -12);
+  assert.equal(weak.parts.big, -8);
+  // Выброшенные в v3 компоненты не существуют
+  assert.equal(max.parts.price, undefined);
+  assert.equal(max.parts.track, undefined);
+  assert.equal(max.parts.dip, undefined);
+  // A&H только со строгим порогом
+  assert.equal(scoreBuy({ aehN: 2, aehHit: 1 }).parts.aeh, 0);
+  assert.equal(scoreBuy({ aehN: 3, aehHit: 0.6 }).parts.aeh, 8);
+  // «Не покупал 3 года» больше не даёт баллов (на validation знак отрицательный)
+  assert.equal(scoreBuy({ inflect: 'first-in-3y' }).parts.firstEver, 0);
   assert.equal(topRole(['DO', 'DF']), 'F');
   assert.equal(dOwnOf({ sh: 500, own: 1500 }), 0.5);
   assert.equal(dOwnOf({ sh: 500, own: 500 }), 9.99);

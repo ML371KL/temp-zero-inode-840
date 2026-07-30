@@ -6,13 +6,13 @@
 // не помещаются в раннер, поэтому всё, что требует цен, сгруппировано по тикеру с вытеснением
 // кэша, а фазы без цен (гейты, кластеры, скоринг) идут отдельными проходами.
 // Использование: node scripts/compute.mjs [--data data] [--site site]
-import { readJson, writeJson, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
+import { readJson, writeJson, readJsonGz, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
 import { readPriceCache, nominalFactor } from './lib/prices.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
 import { scoreBuy, topRole, dOwnOf, freshness } from './lib/scoring.mjs';
 import { applyGates, isPlanned, DROP_LABELS } from './lib/gates.mjs';
 import { buildOwnerGroups, isPersonOwner, isFundOnly, countIndependentPersons } from './lib/entity.mjs';
-import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection, typicalBuyValue } from './lib/routine.mjs';
+import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './lib/routine.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 
@@ -37,6 +37,24 @@ const ref = loadTickerRef(DATA);
 if (!ref.size) throw new Error('reference/tickers.json пуст — сначала запустите prices.mjs');
 const { trades: tradesAll, stats: loadStats } = loadAllTrades(DATA);
 if (!tradesAll.length) throw new Error('нет сделок — сначала backfill/live');
+
+// Даты 10-Q/10-K по эмитентам (scripts/earnings.mjs): признак «перед отчётом» и
+// «окно только что открылось». Отсутствие кэша не блокирует сборку — признаки будут null.
+const reportsRaw = readJsonGz(join(DATA, 'reference', 'reports.json.gz'), {});
+const reports = new Map(Object.entries(reportsRaw).map(([cik, dates]) => [Number(cik), dates]));
+function reportGaps(cik, iso) {
+  const dates = reports.get(cik);
+  if (!dates?.length) return { next: null, prev: null };
+  let lo = 0, hi = dates.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (dates[m] <= iso) lo = m + 1; else hi = m; }
+  const day = 86400000;
+  return {
+    next: lo < dates.length ? Math.round((Date.parse(dates[lo]) - Date.parse(iso)) / day) : null,
+    prev: lo > 0 ? Math.round((Date.parse(iso) - Date.parse(dates[lo - 1])) / day) : null,
+  };
+}
+const PRE_REPORT_DAYS = 21;   // покупка в пределах 3 недель ПЕРЕД отчётом (Ali–Hirshleifer)
+const WINDOW_OPEN_DAYS = 7;   // покупка в первую неделю ПОСЛЕ отчёта — рутинный window-open поток
 
 const spy = readPriceCache(DATA, 'SPY');
 if (!spy || spy.length < 500) throw new Error('нет ряда SPY — бенчмарк обязателен, compute остановлен');
@@ -224,10 +242,15 @@ for (const r of buys) {
   const po = primaryOwner(r);
   const hist = po ? (history.get(po.cik) ?? []) : [];
   r._routine = isRoutineCMP(hist, r.tdate);
+  const gaps = reportGaps(r.cik, r.tdate);
+  r._pre = gaps.next !== null && gaps.next <= PRE_REPORT_DAYS ? 1 : 0;
+  r._wo = gaps.prev !== null && gaps.prev <= WINDOW_OPEN_DAYS ? 1 : 0;
   r._gate = applyGates(r, {
     close: r._close,
     histDays: r._histDays ?? null,
     noPrice: !!r._noPrice,
+    // Ряд котировок есть, а оборота нет — остаточный признак размещения (см. gates.mjs)
+    noLiquidity: !r._noPrice && r._bucket === 'н/д' && r._histDays !== null,
     syncFilers: (syncCount.get(r._syncKey)?.size) ?? 1,
     planned: isPlanned(r),
     routine: r._routine,
@@ -284,13 +307,16 @@ for (const r of buys) {
   if (!r._fw?.mat6 || r._fw.e6 === undefined) continue;
   for (const o of (r.owners ?? []).filter(isPersonOwner)) {
     const g = ownerGroups.get(o.cik) ?? o.cik;
-    (ownerBuys.get(g) ?? ownerBuys.set(g, []).get(g)).push({ mat: r._fw.mat6, e: r._fw.e6 });
+    (ownerBuys.get(g) ?? ownerBuys.set(g, []).get(g)).push({ mat: r._fw.mat6, e: r._fw.e6, pre: r._pre });
   }
 }
 for (const list of ownerBuys.values()) list.sort((a, b) => a.mat < b.mat ? -1 : 1);
 
+// Два трек-рекорда, оба строго point-in-time:
+// общий (все прошлые покупки) и «перед отчётом» (только покупки за ≤21 день до 10-Q/K —
+// признак оппортунизма по Ali–Hirshleifer: такие сделки требуют либо смелости, либо знания).
 function trackRecord(row) {
-  let n = 0, hits = 0;
+  let n = 0, hits = 0, preN = 0, preHits = 0;
   const seen = new Set();
   for (const o of (row.owners ?? []).filter(isPersonOwner)) {
     const g = ownerGroups.get(o.cik) ?? o.cik;
@@ -299,9 +325,13 @@ function trackRecord(row) {
     for (const p of ownerBuys.get(g) ?? []) {
       if (p.mat >= row.fdate) break;   // список отсортирован — дальше только будущее
       n++; if (p.e > 0) hits++;
+      if (p.pre) { preN++; if (p.e > 0) preHits++; }
     }
   }
-  return n ? { n, hit: rnd(hits / n, 3) } : null;
+  return {
+    all: n ? { n, hit: rnd(hits / n, 3) } : null,
+    pre: preN ? { n: preN, hit: rnd(preHits / preN, 3) } : null,
+  };
 }
 
 for (const r of buys) {
@@ -311,12 +341,14 @@ for (const r of buys) {
   r._dOwn = dOwnOf(r);
   if (!r._gate.ok) { r._score = null; continue; }
   const cl = clusterOfRow.get(r);
-  const typical = typicalBuyValue(hist, r.tdate);
-  r._track = trackRecord(r);
+  const tr = trackRecord(r);
+  r._track = tr.all;
+  r._trackPre = tr.pre;
   r._inflect = inflection(hist, r.tdate);
   const common = {
-    role: r._role, dOwn: r._dOwn, dd: r._dd, track: r._track, inflect: r._inflect,
-    sizeVsTypical: typical > 0 ? rnd(r.val / typical, 2) : null,
+    role: r._role, dOwn: r._dOwn, val: r.val,
+    routine: r._routine, inflect: r._inflect, windowOpen: r._wo,
+    aehN: r._trackPre?.n ?? null, aehHit: r._trackPre?.hit ?? null,
   };
   // Скор «на сегодня» — для ленты и скринера (полный кластер уже известен)
   r._score = scoreBuy({
@@ -415,6 +447,9 @@ const backtestRows = buys.filter(r => r._fw).map(r => ({
   score: r._scorePit?.total ?? null, bucket: r._bucket,
   gate: r._gate.ok ? 'ok' : r._gate.drop,
   inflect: r._inflect ?? null, track: r._track?.hit ?? null,
+  og: (r.owners ?? []).filter(isPersonOwner).map(o => ownerGroups.get(o.cik) ?? o.cik)[0] ?? null,
+  pre: r._pre ?? null, wo: r._wo ?? null,
+  aehN: r._trackPre?.n ?? null, aehHit: r._trackPre?.hit ?? null,
   ...r._fw,
 }));
 const years = [...new Set(backtestRows.map(r => r.fdate.slice(0, 4)))].sort();
