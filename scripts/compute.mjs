@@ -513,6 +513,122 @@ W('stats.json', {
   iwm: !!iwm?.length,
 });
 
+// ---------- Агрегатный рыночный индикатор ----------
+// Проверено на нашей истории (docs/АГРЕГАТ.md): линейной связи почти нет, но ХВОСТ
+// работает — недели с экстремальной кластерной активностью предшествовали заметно
+// лучшей доходности рынка, причём сверх факта «рынок только что упал».
+// Метрика — число эмитентов, у которых за неделю купили ≥2 независимых инсайдера.
+// Долларовое ратио сознательно НЕ используется: на наших данных его знак обратный.
+const AGG_BASELINE_WEEKS = 104;   // окно нормировки — два года, строго прошлое
+const AGG_WARN = 2, AGG_STRONG = 3;
+function weekStart(iso) {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  return d.toISOString().slice(0, 10);
+}
+// Продажа как «решение инсайдера»: физлицо, не по плану, без механических сносок.
+// Без этой очистки ратио двигают вестинги и налоговые удержания, а не настроение.
+function isCleanSell(r) {
+  if (r.code !== 'S') return false;
+  const fn = r.fn ?? {};
+  if (fn.offering || fn.drip || fn.espp || fn.forced) return false;
+  if (isPlanned(r)) return false;
+  return (r.owners ?? []).some(o => (o.rel ?? '').includes('D') || (o.rel ?? '').includes('O'))
+    && !isFundOnly(r);
+}
+const wk = new Map();
+const wkGet = k => wk.get(k) ?? wk.set(k, { b: 0, s: 0, bv: 0, sv: 0, iss: new Set(), cp: new Map() }).get(k);
+for (const r of buys) {
+  if (!r._gate.ok) continue;
+  const w = wkGet(weekStart(r.fdate));
+  w.b++; w.bv += r.val; w.iss.add(r.T);
+  for (const o of (r.owners ?? []).filter(isPersonOwner)) {
+    const g = ownerGroups.get(o.cik) ?? o.cik;
+    (w.cp.get(r.T) ?? w.cp.set(r.T, new Set()).get(r.T)).add(g);
+  }
+}
+for (const r of trades) {
+  if (!isCleanSell(r)) continue;
+  const w = wkGet(weekStart(r.fdate));
+  w.s++; w.sv += r.val;
+}
+const wkKeys = [...wk.keys()].sort();
+const ciSeries = wkKeys.map(k => {
+  let n = 0;
+  for (const s of wk.get(k).cp.values()) if (s.size >= 2) n++;
+  return n;
+});
+function zAt(i) {
+  const from = Math.max(0, i - AGG_BASELINE_WEEKS);
+  const hist = ciSeries.slice(from, i);
+  if (hist.length < 52) return null;
+  const m = hist.reduce((a, b) => a + b, 0) / hist.length;
+  const s = Math.sqrt(hist.reduce((a, b) => a + (b - m) ** 2, 0) / hist.length);
+  return s > 0 ? rnd((ciSeries[i] - m) / s, 2) : null;
+}
+// Конец недели по календарю рынка: пятница (или последний торговый день до неё)
+function weekEndIdx(k) {
+  const d = new Date(k + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + 4);
+  return idxAtOrBefore(spy, d.toISOString().slice(0, 10));
+}
+const weeksOut = [];
+for (let i = 0; i < wkKeys.length; i++) {
+  const k = wkKeys[i], w = wk.get(k);
+  const ei = weekEndIdx(k);
+  weeksOut.push({
+    w: k, b: w.b, s: w.s, ci: ciSeries[i], iss: w.iss.size,
+    ratio: w.b ? rnd(w.s / w.b, 2) : null,
+    z: zAt(i),
+    spy: ei >= 0 ? spy[ei][1] : null,
+  });
+}
+// Самопроверка индикатора: форвардная доходность рынка по порогам z (пересчитывается
+// при каждой сборке, поэтому не «застывает» с ростом данных)
+const AGG_HOR = { 3: 63, 6: 126, 12: 252 };
+function spyFwd(k, days) {
+  const i = weekEndIdx(k);
+  return i < 0 || i + days >= spy.length ? null : spy[i + days][1] / spy[i][1] - 1;
+}
+function aggStats(filter) {
+  const out = {};
+  for (const [m, d] of Object.entries(AGG_HOR)) {
+    const f = weeksOut.filter(x => x.z !== null && filter(x)).map(x => spyFwd(x.w, d)).filter(v => v !== null);
+    out['h' + m] = f.length
+      ? { n: f.length, mean: rnd(f.reduce((a, b) => a + b, 0) / f.length), pos: rnd(f.filter(v => v > 0).length / f.length, 3) }
+      : { n: 0, mean: null, pos: null };
+  }
+  return out;
+}
+const lastZ = [...weeksOut].reverse().find(x => x.z !== null)?.z ?? null;
+W('market.json', {
+  built: today,
+  weeks: weeksOut,
+  baselineWeeks: AGG_BASELINE_WEEKS,
+  thresholds: { warn: AGG_WARN, strong: AGG_STRONG },
+  now: {
+    z: lastZ,
+    state: lastZ === null ? 'н/д' : lastZ >= AGG_STRONG ? 'вспышка' : lastZ >= AGG_WARN ? 'повышенная' : lastZ <= -1 ? 'затишье' : 'норма',
+  },
+  // Историческая доходность SPY после недель с разным уровнем индикатора
+  validation: {
+    all: aggStats(() => true),
+    z1: aggStats(x => x.z >= 1),
+    z2: aggStats(x => x.z >= AGG_WARN),
+    z3: aggStats(x => x.z >= AGG_STRONG),
+    // Контроль: вспышка добавляет ли что-то сверх просадки рынка
+    ddSurge: aggStats(x => x.z >= 1.5 && spyDrawdownAt(x.w) <= -0.1),
+    ddOnly: aggStats(x => x.z < 1.5 && spyDrawdownAt(x.w) <= -0.1),
+  },
+});
+function spyDrawdownAt(k) {
+  const i = weekEndIdx(k);
+  if (i < 252) return 0;
+  let hi = 0;
+  for (let q = i - 252; q <= i; q++) hi = Math.max(hi, spy[q][2]);
+  return hi > 0 ? spy[i][2] / hi - 1 : 0;
+}
+
 // Рейтинг инсайдеров: у бесплатных инструментов отсутствует, у платных — ключевая фича.
 // Считается по закрытым 6-месячным окнам прошедших гейты покупок.
 const insiderAgg = new Map();

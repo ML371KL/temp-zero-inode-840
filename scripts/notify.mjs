@@ -13,12 +13,30 @@ const token = process.env.TELEGRAM_BOT_TOKEN, chat = process.env.TELEGRAM_CHAT_I
 
 const clusters = readJson(join(SITE, 'data', 'clusters.json'), []);
 const feed = readJson(join(SITE, 'data', 'feed.json'), []);
+const market = readJson(join(SITE, 'data', 'market.json'), null);
 const statePath = join(DATA, 'state', 'notify.json');
 const state = readJson(statePath, { clusters: {}, bigBuys: [] });
 
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const money = v => v >= 1e6 ? '$' + (v / 1e6).toFixed(1) + ' млн' : '$' + Math.round(v / 1e3) + ' тыс.';
 const events = [];
+
+// Агрегатный индикатор: самое ценное событие по результатам проверки на истории —
+// вход в зону, где индикатор исторически что-то значил. Сообщаем только о ПЕРЕХОДЕ,
+// чтобы не повторять одно и то же каждую сборку.
+if (market?.now && market.now.z !== null) {
+  const z = market.now.z, thr = market.thresholds ?? { warn: 2, strong: 3 };
+  const zone = z >= thr.strong ? 'strong' : z >= thr.warn ? 'warn' : 'none';
+  if (zone !== 'none' && state.aggZone !== zone) {
+    const v = market.validation?.[zone === 'strong' ? 'z3' : 'z2']?.h12;
+    events.push(`📈 <b>Агрегат инсайдеров: ${zone === 'strong' ? 'ВСПЫШКА' : 'повышенная активность'}</b>\n` +
+      `Кластерная активность ${z >= 0 ? '+' : ''}${z}σ от двухлетней нормы.\n` +
+      (v?.n ? `Исторически после таких недель SPY через 12 мес: в среднем ${(v.mean * 100).toFixed(0)}% ` +
+        `(положительных ${Math.round(v.pos * 100)}% из ${v.n} наблюдений).\n` : '') +
+      `Осторожно: эпизодов мало, окна перекрываются, пороги подобраны на этих же данных.`);
+  }
+  state.aggZone = zone;
+}
 
 // Новые/выросшие кластеры
 for (const c of clusters) {

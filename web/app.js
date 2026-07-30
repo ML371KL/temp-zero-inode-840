@@ -1,5 +1,5 @@
 // Инсайдерский радар — логика интерфейса. ES-модуль, без зависимостей.
-import { PriceChart, fmtPrice, fmtInt, fmtMoney, fmtPct } from './charts.js';
+import { PriceChart, MarketChart, fmtPrice, fmtInt, fmtMoney, fmtPct } from './charts.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -48,7 +48,7 @@ async function fetchJson(path) {
 
 // ---------- Роутинг ----------
 const tabs = document.querySelectorAll('.tabs a');
-const TABS = ['screener', 'feed', 'ticker', 'insiders', 'stats'];
+const TABS = ['screener', 'feed', 'ticker', 'insiders', 'market', 'stats'];
 function route() {
   const hash = location.hash || '#screener';
   let [tab, arg] = hash.slice(1).split('/');
@@ -58,6 +58,7 @@ function route() {
   if (tab === 'screener') loadClusters();
   if (tab === 'feed') loadFeed(arg);
   if (tab === 'insiders') loadInsiders();
+  if (tab === 'market') loadMarket();
   if (tab === 'stats') loadStats();
   if (tab === 'ticker') { loadTickerIndex(); if (arg) openTicker(decodeURIComponent(arg)); }
 }
@@ -76,8 +77,34 @@ addEventListener('hashchange', route);
       m.universe?.noPrices > 200 ? `<span class="badge warn" title="Эмитенты без ценовых данных не входят в бэктест — остаточная ошибка выжившего">без цен: ${fmtInt(m.universe.noPrices)}</span>` : '',
     ].join('');
   } catch { $('#meta-badges').innerHTML = '<span class="badge warn">meta.json недоступен — данные ещё собираются</span>'; }
+  checkStale();
   route();
 })();
+
+// Баннер устаревания рисуется на клиенте намеренно: если сломался сборочный цикл,
+// он же и не сможет сообщить о своей поломке — а страница покажет это при любом сбое.
+function checkStale() {
+  const last = state.meta?.liveLastDay;
+  if (!last) return;
+  // Считаем ПРОПУЩЕННЫЕ рабочие дни: строго между последним обработанным и сегодня.
+  // Сегодняшний день не в счёт — его индекс выходит только вечером (22:02 ET).
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const d = new Date(last + 'T00:00:00Z');
+  let gap = 0;
+  d.setUTCDate(d.getUTCDate() + 1);
+  while (d.toISOString().slice(0, 10) < todayIso) {
+    const dow = d.getUTCDay();
+    if (dow !== 0 && dow !== 6) gap++;
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  if (gap < 2) return;   // 0 — норма, 1 — праздник или прогон ещё не отработал
+  const bar = document.createElement('div');
+  bar.className = 'stale-bar';
+  bar.innerHTML = `⚠ Данные EDGAR устарели: последний обработанный день — <b>${esc(last)}</b> ` +
+    `(пропущено рабочих дней: ${gap}). Обновление не отработало — проверьте ` +
+    `<a href="https://github.com/ML371KL/temp-zero-inode-840/actions" target="_blank" rel="noopener">журнал сборок</a>.`;
+  document.body.prepend(bar);
+}
 
 // ---------- Общие компоненты ----------
 function scoreCell(score, parts) {
@@ -391,6 +418,64 @@ function renderInsiders() {
     <td>${esc(r.last)}</td>
   </tr>`).join('') : '<tr><td colspan="10" class="muted">Ничего не найдено.</td></tr>');
   bindSort('#insiders-table', renderInsiders);
+}
+
+// ---------- РЫНОК (агрегатный индикатор) ----------
+const STATE_LABEL = {
+  'вспышка': ['pill sell', 'Кластерная активность вышла за 3σ — редкое состояние, исторически предшествовало лучшей доходности рынка'],
+  'повышенная': ['pill buy', 'Активность выше 2σ — зона, где индикатор исторически что-то значил'],
+  'норма': ['pill gray', 'Активность в пределах двухлетней нормы — индикатор молчит'],
+  'затишье': ['pill warn', 'Инсайдеры покупают заметно меньше обычного'],
+  'н/д': ['pill gray', 'Недостаточно истории для нормировки'],
+};
+async function loadMarket() {
+  if (!state.market) {
+    try { state.market = await fetchJson('market.json'); }
+    catch { $('#market-now').textContent = 'Индикатор ещё не собран.'; return; }
+  }
+  const m = state.market;
+  const [cls, title] = STATE_LABEL[m.now.state] ?? STATE_LABEL['н/д'];
+  const last = m.weeks.filter(w => w.z !== null).slice(-1)[0];
+  $('#market-now').innerHTML =
+    `<div class="card-head"><div><span class="tc-name">Инсайдеры сейчас:</span> ` +
+    `<span class="${cls}" title="${esc(title)}" style="font-size:14px">${esc(m.now.state)}</span> ` +
+    `<span class="muted">${m.now.z >= 0 ? '+' : ''}${m.now.z}σ от двухлетней нормы</span></div>` +
+    `<div class="muted">неделя ${esc(last?.w ?? '—')} · порог сигнала ${m.thresholds.warn}σ</div></div>` +
+    `<p class="hint">За неделю ${esc(last?.w ?? '')}: покупок, прошедших фильтры — <b>${fmtInt(last?.b)}</b>, ` +
+    `эмитентов с кластером (≥2 независимых покупателя) — <b>${fmtInt(last?.ci)}</b>, ` +
+    `очищенных продаж — <b>${fmtInt(last?.s)}</b>.</p>`;
+  if (!state.mkChart) state.mkChart = new MarketChart($('#mk-chart'));
+  state.mkChart.set(m.weeks, m.thresholds);
+  renderMarketTable();
+}
+function renderMarketTable() {
+  const v = state.market.validation;
+  const rows = [
+    ['Все недели (база)', v.all, 'безусловная доходность SPY за период данных'],
+    ['Активность ≥1σ', v.z1, ''],
+    [`Активность ≥${state.market.thresholds.warn}σ`, v.z2, 'зона «повышенная»'],
+    [`Активность ≥${state.market.thresholds.strong}σ`, v.z3, 'зона «вспышка»'],
+    ['Просадка SPY ≥10% И активность ≥1.5σ', v.ddSurge, 'ключевое сравнение'],
+    ['Просадка SPY ≥10% БЕЗ активности', v.ddOnly, 'контроль: одна просадка без инсайдеров'],
+  ];
+  let html = '<tr><th>Состояние на конец недели</th>' +
+    [3, 6, 12].map(h => `<th class="num" colspan="3">SPY через ${h} мес</th>`).join('') + '</tr>';
+  html += '<tr><th></th>' + [3, 6, 12].map(() =>
+    '<th class="num" title="число наблюдений (недели перекрываются)">N</th>' +
+    '<th class="num" title="средняя доходность SPY">сред.</th>' +
+    '<th class="num" title="доля случаев с положительной доходностью">&gt;0</th>').join('') + '</tr>';
+  for (const [label, cell, note] of rows) {
+    if (!cell) continue;
+    html += `<tr${note === 'ключевое сравнение' ? ' style="font-weight:600"' : ''}>` +
+      `<td title="${esc(note)}">${esc(label)}${note ? ' <span class="muted">· ' + esc(note) + '</span>' : ''}</td>` +
+      [3, 6, 12].map(h => {
+        const c = cell['h' + h] ?? {};
+        return `<td class="num muted">${fmtInt(c.n)}</td>` +
+          `<td class="num ${cls(c.mean)}">${fmtPct(c.mean)}</td>` +
+          `<td class="num">${c.pos === null || c.pos === undefined ? '—' : Math.round(c.pos * 100) + '%'}</td>`;
+      }).join('') + '</tr>';
+  }
+  $('#mk-table').innerHTML = html;
 }
 
 // ---------- СТАТИСТИКА ----------

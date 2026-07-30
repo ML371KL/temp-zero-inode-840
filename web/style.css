@@ -119,6 +119,14 @@ tr.dropped:hover td { opacity: 1; }
   border-radius: 8px; padding: 6px 9px; font-size: 12px; box-shadow: var(--shadow);
   white-space: nowrap; z-index: 5; display: none;
 }
+.stale-bar {
+  background: var(--bad-bg); color: var(--ink); border-bottom: 1px solid var(--c-sell);
+  padding: 9px 20px; font-size: 13.5px;
+}
+.stale-bar a { color: var(--accent); }
+.sec-h { font-size: 15px; margin: 18px 0 6px; }
+.chart-box.card { padding: 10px 14px 4px; margin-bottom: 6px; }
+#market-now { margin-bottom: 12px; }
 .method { margin-top: 14px; color: var(--ink-2); font-size: 13px; max-width: 900px; }
 .method summary { cursor: pointer; font-weight: 600; color: var(--ink); }
 footer { padding: 14px 20px; border-top: 1px solid var(--border); }
