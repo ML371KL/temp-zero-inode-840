@@ -443,40 +443,10 @@ for (const [t, clusters] of clustersByTicker) {
 activeClusters.sort((a, b) => (b.score * b.fresh) - (a.score * a.fresh) || b.totalVal - a.totalVal);
 W('clusters.json', activeClusters);
 
-// Сигналы уровня СДЕЛКИ для наборов, проверенных на расщеплённой выборке
-// (docs/ЛУЧШИЕ-ФИЛЬТРЫ.md). Вынесены отдельно от кластеров намеренно: лучший найденный
-// паттерн — «покупка сразу после отчёта у 52-недельного максимума» — к кластерам
-// отношения не имеет, и добавление кластера его ухудшает (validation −8.2%).
-const RECIPE_DEFS = {
-  // Паттерн №1: единственный с положительной медианой и долей успеха выше половины
-  strength: r => r._wo === 1 && r._dd !== null && r._dd >= -0.05 && r._role !== 'C',
-  // Паттерн №2: максимальное матожидание, но лотерейное распределение
-  conviction: r => (clusterOfRow.get(r)?.dense ?? 1) >= 3 && r._dOwn !== null && r._dOwn >= 0.2 && r._dOwn < 9,
-};
-const signals = [];
-for (const r of buys) {
-  if (!r._gate.ok || r.fdate < activeCut) continue;
-  // Наборы проверялись только на сделках с ценовыми данными — строки, которые нельзя
-  // было проверить, в «проверенные» наборы не попадают, иначе бейдж вводил бы в заблуждение
-  if (r._noPrice || r._bucket === 'н/д') continue;
-  const tags = Object.entries(RECIPE_DEFS).filter(([, f]) => f(r)).map(([k]) => k);
-  if (!tags.length) continue;
-  const cl = clusterOfRow.get(r);
-  signals.push({
-    recipes: tags,
-    t: r.T, name: ref.get(r.cik)?.name ?? r.t, fdate: r.fdate, tdate: r.tdate,
-    who: (r.owners ?? []).map(o => o.name).join('; '), role: r._role, title: r.owners?.[0]?.title || '',
-    sh: r.sh, px: r.px, val: r.val, dOwn: r._dOwn, own: r.own,
-    cl: cl ? cl.dense : 1, dd: r._dd, bucket: r._bucket,
-    wo: r._wo ?? 0, routine: r._routine, inflect: r._inflect ?? null,
-    score: r._score?.total ?? null, parts: r._score?.parts ?? null,
-    fresh: freshness(daysAgo(r.fdate)),
-    cur: r._cur ?? null, chg: r._chg ?? null,
-    d1: r._fw?.d1 ?? null, w1: r._fw?.w1 ?? null, m1: r._fw?.m1 ?? null,
-  });
-}
-signals.sort((a, b) => b.fdate < a.fdate ? -1 : b.fdate > a.fdate ? 1 : (b.score ?? 0) - (a.score ?? 0));
-W('signals.json', signals);
+// Наборы, проверенные на расщеплённой выборке (docs/ЛУЧШИЕ-ФИЛЬТРЫ.md), применяются
+// фильтром прямо в ленте: это признаки конкретной сделки, а не свойства кластера, и лента
+// как раз список сделок. Отдельный payload для них не нужен — в feed.json уже есть все
+// нужные поля (wo, dd, role, cl, dOwn, bucket).
 
 // Бэктест: ВСЕ покупки с ценами, включая отсеянные (с причиной) — экран «Статистика»
 // проверяет на собственных данных, что гейты режут именно шум, а не сигнал.
