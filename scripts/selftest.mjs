@@ -319,6 +319,17 @@ ok('гейты: покупка на старте торгов не считае�
   assert.equal(noPrice.ok, true);
   assert.equal(noPrice.tags.includes('no-price'), true);
 });
+ok('гейты: неисполнимый на рынке объём', () => {
+  // Обмен акциями при слиянии приходит кодом P: 2.5 млрд акций микрокапа на $8.6 млрд
+  // при обороте $3 млн/день физически невозможно исполнить на открытом рынке
+  const base = { code: 'P', px: 3.45, fn: {}, di: 'D' };
+  const ctx = { close: 3.45, histDays: 400, dollarVolume: 3e6 };
+  assert.equal(applyGates({ ...base, val: 8.63e9 }, ctx).drop, 'capacity');
+  // Крупная, но исполнимая покупка проходит: $50 млн при обороте $3 млн — 17× оборота
+  assert.equal(applyGates({ ...base, val: 5e7 }, ctx).ok, true);
+  // Без данных об обороте правило не применяется
+  assert.equal(applyGates({ ...base, val: 8.63e9 }, { close: 3.45, histDays: 400, dollarVolume: 0 }).ok, true);
+});
 ok('гейты: класс бумаги и несопоставимые единицы', () => {
   const base = { code: 'P', px: 10, fn: {}, di: 'D' };
   assert.equal(isNonCommon('7.875% Series A Cumulative Redeemable Preferred Stock'), true);

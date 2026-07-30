@@ -256,6 +256,7 @@ for (const r of buys) {
     noPrice: !!r._noPrice,
     // Ряд котировок есть, а оборота нет — остаточный признак размещения (см. gates.mjs)
     noLiquidity: !r._noPrice && r._bucket === 'н/д' && r._histDays !== null,
+    dollarVolume: r._dv ?? 0,
     syncFilers: (syncCount.get(r._syncKey)?.size) ?? 1,
     planned: isPlanned(r),
     routine: r._routine,
