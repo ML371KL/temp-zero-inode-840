@@ -185,6 +185,10 @@ tr.dropped:hover td { opacity: 1; }
 .method ol, .method ul { padding-left: 20px; }
 .method li { margin: 4px 0; }
 .method p { margin: 6px 0; }
+table.mini { border-collapse: collapse; margin: 6px 0 10px; font-size: 12.5px; }
+table.mini th, table.mini td { border: 1px solid var(--grid); padding: 3px 10px; text-align: right; }
+table.mini th:first-child, table.mini td:first-child { text-align: left; }
+table.mini th { color: var(--ink-2); font-weight: 600; }
 #howto { border-left: 3px solid var(--c-buy); padding-left: 12px; }
 #howto > summary { color: var(--c-buy); }
 footer { padding: 14px 20px; border-top: 1px solid var(--border); }
