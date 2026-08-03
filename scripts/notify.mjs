@@ -23,15 +23,13 @@ const token = process.env.TELEGRAM_BOT_TOKEN, chat = process.env.TELEGRAM_CHAT_I
 async function sendNexusEvent(text) {
   const url = process.env.NEXUS_EVENTS_URL;
   const nexusToken = process.env.NEXUS_INGEST_TOKEN;
-  const sitesToken = process.env.NEXUS_SITES_TOKEN;
-  if (!url || !nexusToken || !sitesToken) return;
+  if (!url || !nexusToken) return;
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${nexusToken}`,
-        'OAI-Sites-Authorization': `Bearer ${sitesToken}`,
       },
       body: JSON.stringify({ source: '840', text, occurredAt: new Date().toISOString() }),
     });
