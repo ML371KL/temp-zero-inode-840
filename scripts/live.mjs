@@ -32,14 +32,25 @@ const shardPath = join(DATA, 'trades', 'live.json.gz');
 // ключ строки от схемы не зависит, поэтому перечитанные дни просто ЗАМЕЩАЮТ свои строки.
 // Раньше шард сбрасывался в пустой, и до конца перечитывания свежие сделки пропадали
 // из ленты на несколько прогонов — регрессия в проде ради технической миграции.
-const schemaChanged = state.schema !== SHARD_VERSION;
-if (schemaChanged && state.lastDay) console.log(`[live] схема ${state.schema ?? 1} -> ${SHARD_VERSION}: перечитываю хвост, накопленное сохраняю`);
-
 const from = state.from ?? defaultFrom;
 const today = isoToday();
 
 const rawShard = readJsonGz(shardPath, null);
 const shard = rawShard && !Array.isArray(rawShard) ? rawShard : { v: SHARD_VERSION, trades: [], amend: [] };
+// Нужно ли перечитывать, решаем по СОДЕРЖИМОМУ шарда, а не по метке в состоянии.
+// Метку можно потерять или проставить преждевременно (так и вышло: бэкфил затирал
+// состояние живого контура, тот считал себя перечитанным и молча пропускал старые
+// строки). Признак разбора новым парсером — наличие поля ownD: оно пишется всегда,
+// пусть и со значением null. Такая проверка самовосстанавливающаяся.
+const staleDates = shard.trades.filter(r => !('ownD' in r)).map(r => r.fdate);
+const staleRows = staleDates.length;
+// Перечитывать имеет смысл не всё окно, а с первого дня, где старые строки реально есть:
+// начало окна могло быть перечитано предыдущим прогоном, и повторять его — часы впустую.
+const firstStale = staleRows ? staleDates.reduce((a, b) => b < a ? b : a) : null;
+const schemaChanged = state.schema !== SHARD_VERSION || staleRows > 0;
+if (schemaChanged && shard.trades.length) {
+  console.log(`[live] перечитываю хвост с ${firstStale ?? from}: строк старой схемы ${staleRows} из ${shard.trades.length}, накопленное сохраняю`);
+}
 // Строки, покрытые уже загруженными квартальными датасетами, из live-шарда вычищаются
 const before = shard.trades.length;
 shard.trades = shard.trades.filter(r => r.fdate >= from);
@@ -52,7 +63,9 @@ const seenAmend = new Set(shard.amend.map(a => a.acc));
 // Перечитывание после смены схемы начинается с начала окна, но РЕЗЮМИРУЕТСЯ: прогресс
 // живёт в lastDay, а метка migrating не даёт следующему прогону начать всё заново.
 const startingMigration = schemaChanged && !state.migrating;
-const cursor = startingMigration ? null : (state.lastDay ?? null);
+const cursor = startingMigration
+  ? (firstStale ? addDaysIso(firstStale, -1) : null)   // встаём перед первым устаревшим днём
+  : (state.lastDay ?? null);
 let day = cursor ? addDaysIso(cursor, 1) : from;
 let lastCompleted = cursor;
 let daysDone = 0, filingsDone = 0, added = 0;

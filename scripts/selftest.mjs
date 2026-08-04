@@ -220,6 +220,23 @@ ok('parseForm4Txt отбрасывает строку с невалидной д
   assert.equal(trades[0].sh, 3000);
 });
 
+ok('живой контур: устаревшие строки видны по содержимому, а не по метке состояния', () => {
+  // Регрессия: бэкфил затирал состояние живого контура, тот считал себя перечитанным
+  // и молча пропускал строки старой схемы. Признак нового разбора — наличие поля ownD
+  // (оно пишется всегда, пусть и со значением null), поэтому проверка не зависит от меток.
+  const shard = [
+    { acc: 'A', fdate: '2026-05-10', di: 'D', own: 10 },                 // старая схема
+    { acc: 'B', fdate: '2026-04-02', di: 'D', own: 10, ownD: 10, shD: 1 }, // новая
+    { acc: 'C', fdate: '2026-06-01', di: 'M', own: null, ownD: null, shD: null },
+  ];
+  const staleDates = shard.filter(r => !('ownD' in r)).map(r => r.fdate);
+  assert.equal(staleDates.length, 1);
+  assert.equal(staleDates.reduce((a, b) => b < a ? b : a), '2026-05-10');
+  // строка со значением null поля не теряет: JSON её сохраняет
+  assert.equal('ownD' in shard[2], true);
+  assert.equal(JSON.parse(JSON.stringify(shard[2])).ownD, null);
+});
+
 ok('владение: остаток относится к форме владения, а не к лицу', () => {
   // однородная строка: остаток осмыслен, прирост считается
   assert.equal(dOwnOf({ di: 'D', sh: 1000, own: 11000 }), 0.1);
