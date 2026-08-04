@@ -57,6 +57,29 @@ export function sanitizeSeries(series) {
   return dropped ? { series: series.filter((_, i) => keep[i]), dropped } : { series, dropped: 0 };
 }
 
+// Замороженный хвост: Tiingo не обрывает ряд делистнутой бумаги, а достраивает его
+// последней ценой с нулевым объёмом — у SGEN сделка с Pfizer закрылась 2023-12-14 по
+// $228.74, и дальше идут ещё 660 баров с той же ценой. Для движка это яд: ряд выглядит
+// живым, детектор делистинга (последний бар старше двух недель) не срабатывает, а
+// двухмесячная доходность превращается в «двенадцатимесячную», добитую нулями.
+// Обрезаем до первого бара постоянной цены — он и есть последний торговый день.
+const FROZEN_MIN = 5;
+export function trimFrozenTail(series) {
+  if (!series || series.length < FROZEN_MIN + 20) return { series: series ?? [], trimmed: 0 };
+  const last = series[series.length - 1][2];
+  let i = series.length - 1;
+  while (i > 0 && series[i - 1][2] === last) i--;
+  const runLen = series.length - i;
+  if (runLen < FROZEN_MIN) return { series, trimmed: 0 };
+  // Настоящая торговля на постоянной цене оставляет объём; замороженный хвост — почти нет.
+  const before = series.slice(Math.max(0, i - 60), i).map(r => r[3]).filter(v => v > 0).sort((a, b) => a - b);
+  if (!before.length) return { series, trimmed: 0 };
+  const medVol = before[(before.length - 1) >> 1];
+  const tailVol = series.slice(i + 1).reduce((s, r) => s + (r[3] > 0 ? r[3] : 0), 0);
+  if (tailVol > medVol * 0.01 * runLen) return { series, trimmed: 0 };
+  return { series: series.slice(0, i + 1), trimmed: runLen - 1 };
+}
+
 // Ряд: [[iso, close, adjclose, volume], ...]. close — для графиков (номинал),
 // adjclose (сплиты+дивиденды) — для доходностей, volume — для прокси ликвидности/размера
 // (капитализации в бесплатных источниках нет, а $-оборот доступен и хорошо с ней коррелирует).
@@ -140,7 +163,7 @@ export function priceCachePath(dataDir, ticker) {
 // а в режиме daily перезагружаются только недавние тикеры — остальные ряды очищаются
 // именно здесь, на чтении. Учёт ведётся по тикеру, а не по вызову: compute читает один и
 // тот же ряд дважды (фаза цен и карточки), и без дедупликации счётчик врал бы вдвое.
-export const readStats = { droppedBars: 0, dirtySeries: 0, _seen: new Set() };
+export const readStats = { droppedBars: 0, dirtySeries: 0, frozenBars: 0, frozenSeries: 0, _seen: new Set() };
 
 // Дешёвая проверка наличия: распаковывать и чистить весь ряд ради «есть или нет»
 // значило бы прогнать 100 МБ кэша впустую (режим backfill делает это для всей вселенной).
@@ -160,12 +183,17 @@ export function readPriceCache(dataDir, ticker) {
     series.push([c[0], Number(c[1]), Number(c[2] ?? c[1]), c[3] === undefined ? null : Number(c[3])]);
   }
   const clean = sanitizeSeries(series);
-  if (clean.dropped && !readStats._seen.has(p)) {
+  // Обрезка замороженного хвоста делается и на чтении: ряды, скачанные до появления
+  // правила, лежат на ветке data и повторно не загружаются (месячный лимит символов).
+  const trim = trimFrozenTail(clean.series);
+  if ((clean.dropped || trim.trimmed) && !readStats._seen.has(p)) {
     readStats._seen.add(p);
     readStats.droppedBars += clean.dropped;
-    readStats.dirtySeries++;
+    readStats.frozenBars += trim.trimmed;
+    if (clean.dropped) readStats.dirtySeries++;
+    if (trim.trimmed) readStats.frozenSeries++;
   }
-  return clean.series;
+  return trim.series;
 }
 
 export function writePriceCache(dataDir, ticker, series) {
@@ -210,7 +238,8 @@ export function normalizeTiingo(rows) {
   }
   splits.sort((a, b) => a[0] < b[0] ? -1 : 1);
   const clean = sanitizeSeries(out.filter(Boolean));
-  return { series: clean.series, splits, dropped: clean.dropped };
+  const trim = trimFrozenTail(clean.series);
+  return { series: trim.series, splits, dropped: clean.dropped, frozen: trim.trimmed };
 }
 
 // Слияние: свежие данные замещают хвост кэша с точки перекрытия

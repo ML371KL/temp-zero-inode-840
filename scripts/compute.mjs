@@ -803,6 +803,8 @@ W('meta.json', {
     noEntry: quality.noEntry,
     dirtySeriesOnRead: readStats.dirtySeries,
     droppedBarsOnRead: readStats.droppedBars,
+    frozenSeries: readStats.frozenSeries,
+    frozenBars: readStats.frozenBars,
     rejectedForeign: Object.keys(priceQuality.rejectedMeta ?? {}).length,
   },
   backtest: { rows: backtestRows.length, years },
@@ -818,4 +820,4 @@ console.log(`[compute] сделок ${trades.length}, покупок ${buys.leng
 console.log(`[compute] отсев: ${Object.entries(dropCounts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(', ') || 'нет'}`);
 console.log(`[compute] кластеров активных ${activeClusters.length}, бэктест ${backtestRows.length}, инсайдеров ${insiders.length}, карточек ${tickerFiles}`);
 console.log(`[compute] без цен: ${noPriceTickers.size} тикеров; OTC отсечено строк: ${cntOtc} (из них по реестру символов: ${cntOtcByRegistry})`);
-console.log(`[compute] качество: чужой тикер ${quality.reassigned} строк в ${quality.reassignedTickers.size} тикерах; символ вне реестра ${quality.unknownSymbol}; вход невозможен ${quality.noEntry}; снято выбросов при чтении ${readStats.droppedBars} в ${readStats.dirtySeries} рядах`);
+console.log(`[compute] качество: чужой тикер ${quality.reassigned} строк в ${quality.reassignedTickers.size} тикерах; символ вне реестра ${quality.unknownSymbol}; вход невозможен ${quality.noEntry}; снято выбросов ${readStats.droppedBars} в ${readStats.dirtySeries} рядах; обрезано замороженных хвостов ${readStats.frozenBars} баров в ${readStats.frozenSeries} рядах`);

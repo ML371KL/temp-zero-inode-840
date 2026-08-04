@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz, isIsoDate } from './lib/util.mjs';
 import { zipCreate, zipExtract } from './lib/zip.mjs';
 import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, SHARD_VERSION } from './lib/edgar.mjs';
-import { mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo } from './lib/prices.mjs';
+import { mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo, trimFrozenTail } from './lib/prices.mjs';
 import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import { scoreBuy, topRole, dOwnOf, freshness } from './lib/scoring.mjs';
 import { applyGates, isPlanned, isNonCommon, isImplausible } from './lib/gates.mjs';
@@ -261,6 +261,23 @@ ok('normalizeTiingo: close переводится в конвенцию Yahoo п
   // объём тоже в сплит-конвенции, иначе close*volume разъедется в два раза
   assert.equal(series[0][3], 20);
   assert.equal(series[3][3], 25);
+});
+
+ok('trimFrozenTail: достроенный хвост делистнутой бумаги обрезается', () => {
+  // Tiingo не обрывает ряд поглощённой компании, а повторяет последнюю цену с нулевым
+  // объёмом (SGEN: сделка с Pfizer закрылась 2023-12-14, дальше 660 баров по $228.74)
+  const day = n => addDaysIso('2023-10-01', n);
+  const real = Array.from({ length: 40 }, (_, i) => [day(i), 100 + i, 100 + i, 1e6]);
+  const frozen = Array.from({ length: 30 }, (_, i) => [day(40 + i), 139, 139, 0]);
+  const t = trimFrozenTail(real.concat(frozen));
+  assert.equal(t.trimmed, 30);
+  assert.equal(t.series.length, 40);
+  assert.equal(t.series[t.series.length - 1][0], day(39), 'последним остаётся настоящий торговый день');
+  // живой ряд с настоящим объёмом не трогаем, даже если цена пару дней стоит
+  const alive = real.concat(Array.from({ length: 8 }, (_, i) => [day(40 + i), 139, 139, 9e5]));
+  assert.equal(trimFrozenTail(alive).trimmed, 0);
+  // короткий ряд не трогаем вовсе
+  assert.equal(trimFrozenTail(real.slice(0, 10)).trimmed, 0);
 });
 
 // ---------- реестр биржевых символов ----------
