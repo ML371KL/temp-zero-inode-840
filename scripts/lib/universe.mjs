@@ -1,5 +1,6 @@
 // Загрузка и дедупликация сделок; вселенная эмитентов.
 import { readJsonGz, readJson } from './util.mjs';
+import { exchangeAt } from './symbols.mjs';
 import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -76,12 +77,23 @@ export function resolveTicker(row, ref) {
   return row.t || null;
 }
 
-// 'listed' — NYSE/Nasdaq/CBOE сейчас; 'otc' — исключаем; 'unknown' — нет в справочнике
-// (кандидат в делистинг: включаем в бэктест только при наличии ценового ряда)
-export function issuerCategory(row, ref) {
+// 'listed' — NYSE/Nasdaq/CBOE сейчас; 'otc' — исключаем; 'unknown' — площадка неизвестна.
+//
+// Справочник SEC содержит только ЖИВЫЕ компании. Раньше делистнутый эмитент всегда получал
+// 'unknown' и попадал во вселенную, даже если его бумага никогда не торговалась на бирже:
+// проверить площадку было нечем. Измерено — так проходили 1392 тикера и 26 тыс. покупок,
+// то есть 12% выборки, и они же составляли большую часть «пропавших цен».
+// Теперь при отсутствии эмитента в справочнике площадка берётся из реестра символов
+// НА ДАТУ СДЕЛКИ (lib/symbols.mjs). 'unknown' остаётся только там, где реестр не знает символа.
+export function issuerCategory(row, ref, ranges = null) {
   const cur = ref.get(row.cik);
-  if (!cur || !cur.exchange) return 'unknown';
-  return ALLOWED_EXCHANGES.has(cur.exchange) ? 'listed' : 'otc';
+  if (cur && cur.exchange) return ALLOWED_EXCHANGES.has(cur.exchange) ? 'listed' : 'otc';
+  if (ranges && /^\d{4}-\d{2}-\d{2}$/.test(row.tdate ?? '')) {
+    const t = (cur?.ticker || row.t || '').toUpperCase();
+    const kind = exchangeAt(ranges, t, row.tdate);
+    if (kind) return kind === 'listed' ? 'listed' : 'otc';
+  }
+  return 'unknown';
 }
 
 const TICKER_RE = /^[A-Z][A-Z0-9.-]{0,9}$/;

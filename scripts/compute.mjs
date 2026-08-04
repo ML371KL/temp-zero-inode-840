@@ -7,7 +7,8 @@
 // кэша, а фазы без цен (гейты, кластеры, скоринг) идут отдельными проходами.
 // Использование: node scripts/compute.mjs [--data data] [--site site]
 import { readJson, writeJson, readJsonGz, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
-import { readPriceCache, nominalFactor } from './lib/prices.mjs';
+import { readPriceCache, nominalFactor, readStats } from './lib/prices.mjs';
+import { loadSymbolRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
 import { scoreBuy, topRole, dOwnOf, freshness } from './lib/scoring.mjs';
 import { applyGates, isPlanned, DROP_LABELS } from './lib/gates.mjs';
@@ -62,14 +63,23 @@ const iwm = readPriceCache(DATA, 'IWM');
 if (!iwm || iwm.length < 500) console.log('[compute] нет ряда IWM — size-бенчмарк недоступен, excess только vs SPY');
 
 // ---------- Вселенная ----------
-let cntOtc = 0, cntBadTicker = 0, cntBadDate = 0;
+// Реестр биржевых символов с датами (lib/symbols.mjs). Без него у делистнутого эмитента
+// площадку проверить нечем, и OTC-бумаги проходят фильтр вселенной наравне с биржевыми.
+const symRanges = loadSymbolRanges(DATA);
+if (!symRanges) console.log('[compute] реестра символов нет — площадка мёртвых эмитентов и принадлежность тикера не проверяются');
+
+let cntOtc = 0, cntBadTicker = 0, cntBadDate = 0, cntOtcByRegistry = 0;
 const trades = [];
 for (const r of tradesAll) {
   // Даты из форм не валидируются на стороне SEC: опечатка вроде «2026-06-31» доходит
   // до арифметики и роняет сборку. Отбрасываем такие строки, но считаем их в meta.
   if (!isIsoDate(r.tdate) || !isIsoDate(r.fdate)) { cntBadDate++; continue; }
-  const cat = issuerCategory(r, ref);
-  if (cat === 'otc') { cntOtc++; continue; }
+  const cat = issuerCategory(r, ref, symRanges);
+  if (cat === 'otc') {
+    cntOtc++;
+    if (!ref.get(r.cik)?.exchange) cntOtcByRegistry++;  // отсечено благодаря реестру, а не справочнику SEC
+    continue;
+  }
   const t = resolveTicker(r, ref);
   if (!plausibleTicker(t)) { cntBadTicker++; continue; }
   trades.push({ ...r, T: t, cat });
@@ -147,7 +157,14 @@ const benchFor = b => ((b === 'micro' || b === 'small') && iwm?.length ? iwm : s
 function forward(row, s) {
   const out = {};
   const e = idxFirstAfter(s, row.fdate);
-  if (e < 0) { for (const m of Object.keys(HORIZONS)) out['s' + m] = 'o'; return out; }
+  if (e < 0) {
+    for (const m of Object.keys(HORIZONS)) out['s' + m] = 'o';
+    // Два разных случая под одним 'o'. Если бара до подачи нет вовсе, ряд начинается
+    // ПОЗЖЕ сигнала: вход невозможен в принципе, окно никогда не дозреет. Раньше такие
+    // строки молча растворялись среди «ещё не дозревших» — теперь их видно в meta.
+    if (idxAtOrBefore(s, row.fdate) < 0) { out.noEntry = 1; quality.noEntry++; }
+    return out;
+  }
   const bench = benchFor(row._bucket);
   const dead = s[s.length - 1][0] < addDaysIso(today, -STALE_PRICE_DAYS);
   const entryAdj = s[e][2];
@@ -183,6 +200,8 @@ function forward(row, s) {
 const allSplits = readJson(join(DATA, 'prices', '_splits.json'), {});
 const noPriceTickers = new Set(), pricedTickers = new Set();
 const unitsMismatch = new Set();
+// Счётчики честности ценового слоя (уходят в meta.json и на экран Статистики).
+const quality = { reassigned: 0, reassignedTickers: new Set(), noEntry: 0, unknownSymbol: 0 };
 for (const [t, rows] of byTicker) {
   const s = series(t);
   const n = s?.length ?? 0;
@@ -196,9 +215,26 @@ for (const [t, rows] of byTicker) {
   const lastAdj = has ? s[s.length - 1][2] : null;
   const sp = allSplits[t];
   for (const r of rows) {
+    // Тикер в США переиспользуется, а котировки мы скачиваем сегодняшние. Если дата сделки
+    // не попадает в тот же интервал реестра, что и нынешний владелец символа, ряд относится
+    // к ДРУГОЙ компании: пользоваться им нельзя ни для входа, ни для ценовых гейтов.
+    // Так, к покупкам Legacy Reserves (2017–2019) подставлялся ряд бумаги, занявшей LGCY в 2024-м.
+    //
+    // Проверка применима ТОЛЬКО когда тикер взят из старой формы, то есть эмитента нет в
+    // справочнике SEC. Если справочник знает CIK, он же и даёт нынешний тикер — тогда ряд
+    // принадлежит этому эмитенту по определению, а Yahoo отдаёт историю и под прежним именем.
+    // Без этого ограничения переименования (TICC->OXSQ) выглядели бы подменой: ложно
+    // помечались 345 живых эмитентов и 3917 покупок.
+    const stale = !ref.get(r.cik)?.ticker;
+    const same = has && stale ? sameInstrumentAsLatest(symRanges, t, r.tdate) : null;
+    if (same === null && has && stale) quality.unknownSymbol++;
+    if (same === false) {
+      r._reassigned = 1;
+      quality.reassigned++; quality.reassignedTickers.add(t);
+    }
     // Без ценового ряда три ценовых гейта не могут отработать — помечаем это явно,
     // чтобы «прошла фильтры» не означало «проверена» там, где проверить было нечем
-    if (!has) { r._dv = null; r._bucket = 'н/д'; r._dd = null; r._fw = null; r._close = null; r._histDays = null; r._noPrice = 1; continue; }
+    if (!has || same === false) { r._dv = null; r._bucket = 'н/д'; r._dd = null; r._fw = null; r._close = null; r._histDays = null; r._noPrice = 1; continue; }
     const i = idxAtOrBefore(s, r.tdate);
     // Цена, которую инсайдер видел в момент сделки: котировка «раскручена» назад через сплиты
     r._split = nominalFactor(sp, r.tdate);
@@ -258,6 +294,7 @@ for (const r of buys) {
   r._wo = gaps.prev !== null && gaps.prev <= WINDOW_OPEN_DAYS ? 1 : 0;
   r._gate = applyGates(r, {
     close: r._close,
+    reassigned: !!r._reassigned,
     histDays: r._histDays ?? null,
     noPrice: !!r._noPrice,
     // Ряд котировок есть, а оборота нет — остаточный признак размещения (см. gates.mjs)
@@ -749,12 +786,25 @@ const okN = buys.filter(r => r._gate.ok).length;
 const backfillState = readJson(join(DATA, 'state', 'backfill.json'), {});
 const liveState = readJson(join(DATA, 'state', 'live.json'), {});
 const priceState = readJson(join(DATA, 'prices', '_state.json'), {});
+const priceQuality = readJson(join(DATA, 'prices', '_quality.json'), {});
 W('meta.json', {
   built: new Date().toISOString(), v: 2,
-  trades: { total: trades.length, buys: buys.length, otcExcluded: cntOtc, badTicker: cntBadTicker, badDate: cntBadDate },
+  trades: { total: trades.length, buys: buys.length, otcExcluded: cntOtc, otcByRegistry: cntOtcByRegistry, badTicker: cntBadTicker, badDate: cntBadDate },
   load: loadStats,
   gates: { ok: okN, drops: dropCounts, labels: DROP_LABELS },
   universe: { priced: pricedTickers.size, noPrices: noPriceTickers.size },
+  // Честность ценового слоя: что именно испорчено и в каком объёме. Без этих чисел
+  // «прошло гейты N сделок» ничего не говорит о том, на каких данных они проверены.
+  quality: {
+    symbolsInRegistry: Object.keys(symRanges ?? {}).length,
+    reassigned: quality.reassigned,
+    reassignedTickers: quality.reassignedTickers.size,
+    unknownSymbol: quality.unknownSymbol,
+    noEntry: quality.noEntry,
+    dirtySeriesOnRead: readStats.dirtySeries,
+    droppedBarsOnRead: readStats.droppedBars,
+    rejectedForeign: Object.keys(priceQuality.rejectedMeta ?? {}).length,
+  },
   backtest: { rows: backtestRows.length, years },
   feed: { rows: feedRows.length, days: FEED_DAYS },
   clusters: { active: activeClusters.length },
@@ -767,4 +817,5 @@ W('meta.json', {
 console.log(`[compute] сделок ${trades.length}, покупок ${buys.length}, прошли гейты ${okN} (${Math.round(okN / Math.max(1, buys.length) * 100)}%)`);
 console.log(`[compute] отсев: ${Object.entries(dropCounts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(', ') || 'нет'}`);
 console.log(`[compute] кластеров активных ${activeClusters.length}, бэктест ${backtestRows.length}, инсайдеров ${insiders.length}, карточек ${tickerFiles}`);
-console.log(`[compute] без цен: ${noPriceTickers.size} тикеров; OTC отсечено строк: ${cntOtc}`);
+console.log(`[compute] без цен: ${noPriceTickers.size} тикеров; OTC отсечено строк: ${cntOtc} (из них по реестру символов: ${cntOtcByRegistry})`);
+console.log(`[compute] качество: чужой тикер ${quality.reassigned} строк в ${quality.reassignedTickers.size} тикерах; символ вне реестра ${quality.unknownSymbol}; вход невозможен ${quality.noEntry}; снято выбросов при чтении ${readStats.droppedBars} в ${readStats.dirtySeries} рядах`);

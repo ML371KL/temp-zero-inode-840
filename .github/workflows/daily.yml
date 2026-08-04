@@ -62,6 +62,16 @@ jobs:
       - name: Обновление цен
         run: node scripts/prices.mjs --mode daily --time-budget-min 55
 
+      # Делистнутые бумаги: Yahoo их не отдаёт, поэтому выжившесть закрывается только
+      # через Tiingo. Бесплатный тариф — 500 уникальных символов в месяц и 50 запросов
+      # в час, так что очередь приоритетная и резюмируемая, а бюджет прогона небольшой.
+      # Без секрета TIINGO_TOKEN шаг завершается сразу и ничего не меняет.
+      - name: Котировки делистнутых (Tiingo, необязательно)
+        continue-on-error: true
+        env:
+          TIINGO_TOKEN: ${{ secrets.TIINGO_TOKEN }}
+        run: node scripts/tiingo.mjs --time-budget-min 25
+
       - name: Вычисления и payload
         run: node scripts/compute.mjs
 

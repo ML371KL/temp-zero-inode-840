@@ -35,7 +35,10 @@ export const FEAT = {
 export const DROP_CODE = {
   offering: 'Рз', discount: 'Дк', sync: 'Сн', fund: 'Фн', planned: 'Пл', routine: 'Рт',
   regular: 'Рг', drip: 'Др', espp: 'Эс', forced: 'Пр', outlier: 'Вб', newlisting: 'Ст',
-  noliq: 'Об', security: 'Пф', units: 'Ед', cancelled: 'Ан',
+  noliq: 'Об', security: 'Пф', units: 'Ед', cancelled: 'Ан', capacity: 'Ём',
+  // Порча данных, а не свойство сделки: тикер успел перейти к другой компании,
+  // либо в форме стоят невозможные число акций или цена
+  reassigned: 'Чж', badvalue: 'Нв',
 };
 
 // ---------- Тема ----------

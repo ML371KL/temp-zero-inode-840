@@ -8,13 +8,14 @@ import { fileURLToPath } from 'node:url';
 import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz, isIsoDate } from './lib/util.mjs';
 import { zipCreate, zipExtract } from './lib/zip.mjs';
 import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, SHARD_VERSION } from './lib/edgar.mjs';
-import { mergeSeries, writePriceCache, nominalFactor } from './lib/prices.mjs';
+import { mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo } from './lib/prices.mjs';
+import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import { scoreBuy, topRole, dOwnOf, freshness } from './lib/scoring.mjs';
-import { applyGates, isPlanned, isNonCommon } from './lib/gates.mjs';
+import { applyGates, isPlanned, isNonCommon, isImplausible } from './lib/gates.mjs';
 import { isEntityName, isPersonOwner, buildOwnerGroups, countIndependentPersons, isFundOnly } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection, typicalBuyValue } from './lib/routine.mjs';
 import { classifyFootnotes, rowFootnoteFlags } from './lib/footnotes.mjs';
-import { loadAllTrades } from './lib/universe.mjs';
+import { loadAllTrades, issuerCategory } from './lib/universe.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 let passed = 0;
@@ -221,6 +222,81 @@ ok('mergeSeries: свежее замещает хвост с точки пере
   assert.deepEqual(mergeSeries(cached, fresh), [['2020-01-01', 1, 1, 10], ['2020-01-02', 20, 20, 99], ['2020-01-04', 40, 40, 99]]);
 });
 
+ok('sanitizeSeries: изолированный выброс снимается, настоящий скачок остаётся', () => {
+  const base = Array.from({ length: 12 }, (_, i) => [`2020-01-${String(i + 1).padStart(2, '0')}`, 10, 10, 1000]);
+  // одиночный «залётный» бар (склейка чужого инструмента, как было у ITC)
+  const spiked = base.map((r, i) => i === 5 ? [r[0], 8000, 8000, 5] : r);
+  const cleaned = sanitizeSeries(spiked);
+  assert.equal(cleaned.dropped, 1);
+  assert.equal(cleaned.series.length, 11);
+  assert.ok(!cleaned.series.some(r => r[2] === 8000));
+  // настоящий скачок держится следующими барами и переживает фильтр
+  const real = base.map((r, i) => i >= 5 ? [r[0], 60, 60, 1000] : r);
+  assert.equal(sanitizeSeries(real).dropped, 0);
+});
+
+ok('metaAcceptable: чужая валюта и не-акция отвергаются, отсутствие меты — нет', () => {
+  assert.equal(metaAcceptable({ currency: 'USD', instrumentType: 'EQUITY' }).ok, true);
+  assert.equal(metaAcceptable({ currency: 'USD', instrumentType: 'ETF' }).ok, true);
+  assert.equal(metaAcceptable({ currency: 'INR', instrumentType: 'EQUITY' }).ok, false);
+  assert.equal(metaAcceptable({ currency: 'USD', instrumentType: 'CURRENCY' }).ok, false);
+  assert.equal(metaAcceptable(null).ok, true);
+});
+
+ok('normalizeTiingo: close переводится в конвенцию Yahoo по сплитам', () => {
+  // сплит 2:1 на 2020-01-03: бары до него должны быть поделены на 2, adjClose берётся как есть
+  const rows = [
+    { date: '2020-01-01T00:00:00.000Z', close: 100, adjClose: 49, volume: 10, splitFactor: 1 },
+    { date: '2020-01-02T00:00:00.000Z', close: 102, adjClose: 50, volume: 11, splitFactor: 1 },
+    { date: '2020-01-03T00:00:00.000Z', close: 52, adjClose: 51, volume: 24, splitFactor: 2 },
+    { date: '2020-01-06T00:00:00.000Z', close: 53, adjClose: 52, volume: 25, splitFactor: 1 },
+  ];
+  const { series, splits } = normalizeTiingo(rows);
+  assert.deepEqual(splits, [['2020-01-03', 2]]);
+  assert.equal(series[0][1], 50);   // 100 / 2
+  assert.equal(series[1][1], 51);   // 102 / 2
+  assert.equal(series[2][1], 52);   // день сплита уже посчитан после него
+  assert.equal(series[3][1], 53);
+  assert.equal(series[0][2], 49);   // adjClose не трогаем
+});
+
+// ---------- реестр биржевых символов ----------
+ok('symbols: разбор реестра, площадка на дату и склейка интервалов', () => {
+  const csv = 'ticker,exchange,assetType,priceCurrency,startDate,endDate\n'
+    + 'LGCY,NASDAQ,Stock,USD,2007-01-12,2019-06-28\n'
+    + 'LGCY,AMEX,Stock,USD,2024-09-26,2026-08-03\n'
+    + 'MOVE,NASDAQ,Stock,USD,2010-01-04,2018-03-15\n'
+    + 'MOVE,NYSE,Stock,USD,2018-03-16,2026-08-03\n'
+    + 'JUNK,PINK,Stock,USD,2012-01-01,2020-01-01\n'
+    + 'FUND,NMFQS,Mutual Fund,USD,2000-01-01,2026-01-01\n'
+    + 'CHIN,SHE,Stock,CNY,2000-01-01,2026-01-01\n';
+  const r = parseRegistry(csv);
+  assert.equal(r.FUND, undefined, 'взаимные фонды в реестр не попадают');
+  assert.equal(r.CHIN, undefined, 'иностранная валюта не попадает');
+  assert.equal(exchangeAt(r, 'LGCY', '2017-03-06'), 'listed');
+  assert.equal(exchangeAt(r, 'JUNK', '2015-01-01'), 'otc');
+  assert.equal(exchangeAt(r, 'LGCY', '2021-01-01'), null, 'между интервалами символ ничей');
+  assert.equal(exchangeAt(r, 'НЕТ', '2015-01-01'), null);
+  // перевод листинга Nasdaq -> NYSE идёт встык и должен склеиться в один инструмент
+  assert.deepEqual(mergeRanges(r.MOVE), [['2010-01-04', '2026-08-03']]);
+  assert.equal(sameInstrumentAsLatest(r, 'MOVE', '2012-05-05'), true);
+  // а смена владельца символа оставляет многолетний зазор
+  assert.equal(sameInstrumentAsLatest(r, 'LGCY', '2017-03-06'), false, 'сделки Legacy Reserves ≠ нынешний владелец LGCY');
+  assert.equal(sameInstrumentAsLatest(r, 'LGCY', '2025-01-15'), true);
+  assert.equal(sameInstrumentAsLatest(r, 'НЕТ', '2015-01-01'), null);
+});
+
+ok('issuerCategory: у мёртвого эмитента площадка берётся из реестра символов', () => {
+  const ref = new Map([[111, { ticker: 'ALIV', exchange: 'Nasdaq', name: 'Живая' }]]);
+  const ranges = { DEAD: [[1, '2010-01-01', '2019-01-01']], OTCX: [[0, '2010-01-01', '2019-01-01']] };
+  assert.equal(issuerCategory({ cik: 111, t: 'ALIV', tdate: '2018-05-05' }, ref, ranges), 'listed');
+  // эмитента в справочнике нет: раньше всегда было 'unknown' и OTC проходил во вселенную
+  assert.equal(issuerCategory({ cik: 222, t: 'DEAD', tdate: '2018-05-05' }, ref, ranges), 'listed');
+  assert.equal(issuerCategory({ cik: 333, t: 'OTCX', tdate: '2018-05-05' }, ref, ranges), 'otc');
+  assert.equal(issuerCategory({ cik: 444, t: 'ZZZZ', tdate: '2018-05-05' }, ref, ranges), 'unknown');
+  assert.equal(issuerCategory({ cik: 222, t: 'DEAD', tdate: '2018-05-05' }, ref, null), 'unknown', 'без реестра поведение прежнее');
+});
+
 // ---------- юрлица и кластеры ----------
 ok('entity: различение физлиц и юрлиц', () => {
   assert.equal(isEntityName('Vanguard Group Inc'), true);
@@ -329,6 +405,20 @@ ok('гейты: неисполнимый на рынке объём', () => {
   assert.equal(applyGates({ ...base, val: 5e7 }, ctx).ok, true);
   // Без данных об обороте правило не применяется
   assert.equal(applyGates({ ...base, val: 8.63e9 }, { close: 3.45, histDays: 400, dollarVolume: 0 }).ok, true);
+});
+ok('гейты: невозможные числа в форме и чужой ценовой ряд', () => {
+  const ctx = { close: 3.45, histDays: 400 };
+  // Числа Form 4 не валидируются SEC: в выборке встречается «5 079 100 акций по $253 995.06»
+  assert.equal(isImplausible({ px: 253995.06, sh: 5079100, val: 1.29e12 }), true);
+  assert.equal(isImplausible({ px: 500000, sh: 142857, val: 7.1e10 }), true);
+  assert.equal(applyGates({ code: 'P', px: 253995.06, sh: 5079100, val: 1.29e12, fn: {} }, ctx).drop, 'badvalue');
+  // Обычная крупная покупка правдоподобна и проходит
+  assert.equal(isImplausible({ px: 3.45, sh: 1e6, val: 3.45e6 }), false);
+  // Ряд принадлежит другой компании: причина отсева должна быть именно эта, а не выдумка
+  // о природе сделки, потому что ни цене, ни сопоставлению с котировкой доверять нельзя
+  const g = applyGates({ code: 'P', px: 3.45, sh: 1000, val: 3450, sec: 'Common Stock', fn: {} },
+    { ...ctx, reassigned: true, syncFilers: 9, planned: true });
+  assert.equal(g.drop, 'reassigned');
 });
 ok('гейты: класс бумаги и несопоставимые единицы', () => {
   const base = { code: 'P', px: 10, fn: {}, di: 'D' };

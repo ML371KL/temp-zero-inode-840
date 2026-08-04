@@ -8,7 +8,8 @@
 // Использование: node scripts/prices.mjs --mode daily|backfill [--data data] [--time-budget-min N]
 import { readJson, writeJson, isoToday, addDaysIso } from './lib/util.mjs';
 import { fetchTickerRef } from './lib/edgar.mjs';
-import { fetchYahooDaily, fetchStooqDaily, readPriceCache, writePriceCache } from './lib/prices.mjs';
+import { fetchYahooDaily, fetchStooqDaily, readPriceCache, writePriceCache, hasPriceCache } from './lib/prices.mjs';
+import { fetchSymbolRanges, writeSymbolRanges, loadSymbolRanges } from './lib/symbols.mjs';
 import { loadAllTrades, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
 import { join } from 'node:path';
 
@@ -25,6 +26,21 @@ const ref = await fetchTickerRef();
 writeJson(join(DATA, 'reference', 'tickers.json'),
   Object.fromEntries([...ref.entries()]), false);
 
+// Реестр биржевых символов с датами (lib/symbols.mjs). Справочник SEC знает только живые
+// компании, поэтому у делистнутого эмитента ни биржу, ни принадлежность тикера проверить
+// нечем — этим и пользуется подмена данных. Сбой загрузки не критичен: остаётся прежний кэш.
+try {
+  const fresh = await fetchSymbolRanges();
+  const n = Object.keys(fresh).length;
+  if (n < 10000) throw new Error(`подозрительно мало символов (${n}) — кэш сохранён`);
+  writeSymbolRanges(DATA, fresh);
+  console.log(`[prices] реестр символов обновлён: ${n}`);
+} catch (e) {
+  console.log(`[prices] реестр символов не обновлён (${e.message})`);
+}
+const symRanges = loadSymbolRanges(DATA);
+console.log(`[prices] символов в реестре: ${Object.keys(symRanges ?? {}).length}`);
+
 const statePath = join(DATA, 'prices', '_state.json');
 const state = readJson(statePath, { missing: {} });
 const splitsPath = join(DATA, 'prices', '_splits.json');
@@ -39,7 +55,7 @@ const recentCut = addDaysIso(today, -760); // ~25 месяцев: открыты
 const all = new Map(); // ticker -> { recent: bool }
 for (const r of trades) {
   if (r.code !== 'P') continue;
-  if (issuerCategory(r, ref) === 'otc') continue;
+  if (issuerCategory(r, ref, symRanges) === 'otc') continue;
   const t = resolveTicker(r, ref);
   if (!plausibleTicker(t)) continue;
   const e = all.get(t) ?? { recent: false };
@@ -66,7 +82,7 @@ if (MODE === 'daily') {
   }
 } else {
   // backfill: тикеры без кэша и кэши без объёма — в алфавитном порядке (детерминированный резюм)
-  list = [...BENCHMARKS, ...[...all.keys()].sort()].filter(t => !readPriceCache(DATA, t) || needsVolume(t));
+  list = [...BENCHMARKS, ...[...all.keys()].sort()].filter(t => !hasPriceCache(DATA, t) || needsVolume(t));
 }
 list = [...new Set(list)];
 const LIMIT = Number(argVal('--limit', '0'));
@@ -74,11 +90,19 @@ if (LIMIT > 0) list = list.slice(0, LIMIT); // дымовые прогоны
 console.log(`[prices] режим ${MODE}: кандидатов ${list.length}`);
 
 let ok = 0, kept = 0, miss = 0, budgetOut = false;
+// Гигиена ценового слоя: сколько рядов отвергнуто как чужой инструмент и сколько
+// одиночных «залётных» баров снято фильтром. Числа уходят в _quality.json и в meta.json,
+// чтобы порча данных была видна на панели, а не только в логе прогона.
+const quality = { rejectedMeta: {}, droppedBars: 0, dirtySeries: 0, exchanges: {} };
 for (const t of list) {
   if (Date.now() - started > BUDGET_MS) { budgetOut = true; break; }
   let res, fromYahoo = true;
   try { res = await fetchYahooDaily(t, FROM); }
   catch (e) { console.log(`[prices] ${t}: сеть (${e.message}) — пропуск`); continue; }
+  if (res.rejected) {
+    quality.rejectedMeta[t] = res.rejected;
+    console.log(`[prices] ${t}: ответ не про американскую бумагу (${res.rejected}) — ряд отвергнут`);
+  }
   if (res.missing && !stooqDown) {
     fromYahoo = false;
     // Резерв Stooq: пробуем; HTML-челлендж = источник закрыт, больше не трогаем в этом прогоне
@@ -94,6 +118,8 @@ for (const t of list) {
       kept++;
       console.log(`[prices] ${t}: свежий ряд подозрительно короткий (${res.series.length} < ${cached.length}/2) — кэш сохранён`);
     } else {
+      if (res.dropped) { quality.droppedBars += res.dropped; quality.dirtySeries++; }
+      if (res.exchange) quality.exchanges[res.exchange] = (quality.exchanges[res.exchange] ?? 0) + 1;
       writePriceCache(DATA, t, res.series);
       // Сплиты обновляются только по ответу Yahoo: у резервного источника их нет, и «пусто»
       // от него стёрло бы известные коэффициенты, сломав сопоставление цен сделок
@@ -116,4 +142,16 @@ state.updated = today;
 if (MODE === 'backfill') state.backfillDone = !budgetOut;
 writeJson(statePath, state, true);
 writeJson(splitsPath, splits);
+// Отчёт о гигиене накапливается между прогонами: в режиме daily обновляется лишь часть
+// вселенной, и разовая цифра ничего не сказала бы о состоянии кэша целиком.
+const qPath = join(DATA, 'prices', '_quality.json');
+const prevQ = readJson(qPath, {});
+writeJson(qPath, {
+  updated: today,
+  rejectedMeta: { ...(prevQ.rejectedMeta ?? {}), ...quality.rejectedMeta },
+  droppedBarsLastRun: quality.droppedBars,
+  dirtySeriesLastRun: quality.dirtySeries,
+  exchangesLastRun: quality.exchanges,
+}, true);
 console.log(`[prices] готово: обновлено ${ok}, сохранён кэш ${kept}, нет данных ${miss}, бюджет ${budgetOut ? 'ИСЧЕРПАН (нужен ещё прогон)' : 'ок'}`);
+console.log(`[prices] гигиена: отвергнуто как чужой инструмент ${Object.keys(quality.rejectedMeta).length}, снято выбросов ${quality.droppedBars} в ${quality.dirtySeries} рядах`);
