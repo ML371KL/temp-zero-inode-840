@@ -44,10 +44,16 @@ const shard = rawShard && !Array.isArray(rawShard) ? rawShard : { v: SHARD_VERSI
 // пусть и со значением null. Такая проверка самовосстанавливающаяся.
 const staleDates = shard.trades.filter(r => !('ownD' in r)).map(r => r.fdate);
 const staleRows = staleDates.length;
+// Часть строк перечитать нельзя в принципе: филинга уже нет в дневном индексе, либо это
+// поправка, пришедшая другим днём. После полного прохода такой остаток фиксируется как
+// пол (staleFloor). Без него метка migrating снималась бы по достижении сегодняшнего дня,
+// остаток строк старой схемы снова включал бы миграцию — и хвост перечитывался бы вечно.
+const staleFloor = state.staleFloor ?? 0;
+const needReread = staleRows > staleFloor;
 // Перечитывать имеет смысл не всё окно, а с первого дня, где старые строки реально есть:
 // начало окна могло быть перечитано предыдущим прогоном, и повторять его — часы впустую.
-const firstStale = staleRows ? staleDates.reduce((a, b) => b < a ? b : a) : null;
-const schemaChanged = state.schema !== SHARD_VERSION || staleRows > 0;
+const firstStale = needReread ? staleDates.reduce((a, b) => b < a ? b : a) : null;
+const schemaChanged = state.schema !== SHARD_VERSION || needReread;
 if (schemaChanged && shard.trades.length) {
   console.log(`[live] перечитываю хвост с ${firstStale ?? from}: строк старой схемы ${staleRows} из ${shard.trades.length}, накопленное сохраняю`);
 }
@@ -78,9 +84,14 @@ function save() {
   // счёл бы миграцию завершённой и остаток дней остался бы в старой схеме
   const caughtUp = lastCompleted && addDaysIso(lastCompleted, 4) >= today;
   const done = !schemaChanged || caughtUp;
+  // Проход завершён — запоминаем неустранимый остаток, чтобы не начинать миграцию заново
+  const floor = done && schemaChanged
+    ? shard.trades.filter(r => !('ownD' in r)).length
+    : staleFloor;
   writeJson(statePath, {
     schema: done ? SHARD_VERSION : (state.schema ?? 1),
     migrating: done ? undefined : true,
+    staleFloor: floor || undefined,
     from, lastDay: lastCompleted, updated: isoToday(),
   }, true);
 }
