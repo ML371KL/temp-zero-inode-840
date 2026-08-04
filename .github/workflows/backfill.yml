@@ -14,8 +14,10 @@ permissions:
   contents: write
   actions: write   # self-redispatch
 
+# Группа общая с ежедневным прогоном: оба форс-пушат ветку data. Раньше группы были
+# разные, и одновременный запуск означал гонку — снапшот одного затирал работу другого.
 concurrency:
-  group: insider-radar-backfill
+  group: insider-radar-data
   cancel-in-progress: false
 
 jobs:
