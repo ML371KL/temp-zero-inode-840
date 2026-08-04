@@ -8,7 +8,33 @@ import { politeFetch, parseTsv, secDate, num, isIsoDate } from './util.mjs';
 import { zipExtract } from './zip.mjs';
 import { rowFootnoteFlags, fnIds } from './footnotes.mjs';
 
-export const SHARD_VERSION = 2;
+export const SHARD_VERSION = 3;
+
+// Остаток владения (SHRS_OWND_FOLWNG_TRANS) относится к КОНКРЕТНОЙ форме владения, а не
+// к лицу: прямой пакет и пакет «через траст» — разные счётчики. Строки одной подачи мы
+// агрегируем (одна покупка часто разбита на несколько ценовых строк), и раньше в ключ
+// агрегации не входил признак D/I: прямой и косвенный пакеты складывались, а остаток
+// брался из случайно последней строки. Купленные акции при этом суммируются верно —
+// портится именно остаток, а с ним прирост позиции dOwn.
+// Измерено на 3 кварталах: смешанных агрегатов 3.2%, и ключ с D/I устраняет лишь 15%
+// арифметических невозможностей — остальное это НЕСКОЛЬКО КОСВЕННЫХ пакетов у одного
+// лица (траст, супруга, LLC), которым Form 4 не даёт структурного ключа вовсе.
+// Поэтому: (1) считаем остаток по форме владения, (2) внутри формы берём МАКСИМУМ —
+// при разбиении одной покупки на ценовые строки остаток растёт, и итоговый в последней;
+// (3) там, где однозначно сопоставить нельзя, отдаём null вместо правдоподобного числа.
+function foldOwnership(forms, code) {
+  const out = { di: 'D', sh: 0, own: null, ownD: null, shD: null };
+  const keys = [...forms.keys()];
+  for (const [, f] of forms) out.sh += f.sh;
+  out.di = keys.length > 1 ? 'M' : (keys[0] ?? 'D');
+  const pick = f => f.own === null ? null : (code === 'S' ? f.ownMin : f.ownMax);
+  const direct = forms.get('D');
+  if (direct) { out.shD = Math.round(direct.sh); out.ownD = pick(direct); }
+  // Остаток отдаём только для однородной строки: у смешанной он относился бы к одной
+  // из форм, а sh — к обеим, и прирост позиции получился бы завышенным без всякого признака.
+  if (keys.length === 1) out.own = pick(forms.get(keys[0]));
+  return out;
+}
 
 const DATASET_URL = q => `https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/${q}_form345.zip`;
 
@@ -95,12 +121,24 @@ export function normalizeQuarterZip(zipBuf) {
     // Класс бумаги важен: в Table I попадают и привилегированные акции, и варранты —
     // их цена не сопоставима с котировкой обыкновенных, а сигнал у них другой природы
     const key = `${r.ACCESSION_NUMBER}|${r.TRANS_CODE}|${tdate}|${r.SECURITY_TITLE}`;
-    const a = agg.get(key) ?? { sh: 0, cost: 0, own: null, di: 'D', fnIds: new Set(), sec: r.SECURITY_TITLE || '' };
+    const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), fnIds: new Set(), sec: r.SECURITY_TITLE || '' };
     a.sh += sh;
     a.cost += sh * (px ?? 0);
+    // Учёт по форме владения (см. foldOwnership): остаток относится к ней, а не к лицу
+    const di = r.DIRECT_INDIRECT_OWNERSHIP === 'I' ? 'I' : 'D';
+    const f = a.forms.get(di) ?? { sh: 0, own: null, ownMin: null, ownMax: null };
+    f.sh += sh;
     const own = num(r.SHRS_OWND_FOLWNG_TRANS);
-    if (own !== null) a.own = own; // остаток берём из последней строки агрегата
-    if (r.DIRECT_INDIRECT_OWNERSHIP === 'I') a.di = 'I';
+    // Одна покупка обычно разбита на несколько ценовых строк, и остаток в них НАРАСТАЕТ:
+    // итоговый — наибольший. Раньше брался остаток случайно последней строки, из-за чего
+    // прирост позиции ошибался на порядок (HY 2019-03-27: +500% вместо +1%).
+    // У продаж остаток, наоборот, убывает — там итоговый наименьший.
+    if (own !== null) {
+      f.own = own;
+      f.ownMin = f.ownMin === null ? own : Math.min(f.ownMin, own);
+      f.ownMax = f.ownMax === null ? own : Math.max(f.ownMax, own);
+    }
+    a.forms.set(di, f);
     for (const id of fnIds(r.TRANS_SHARES_FN, r.TRANS_PRICEPERSHARE_FN, r.SECURITY_TITLE_FN,
       r.TRANS_ACQUIRED_DISP_CD_FN, r.NATURE_OF_OWNERSHIP_FN, r.DIRECT_INDIRECT_OWNERSHIP_FN,
       r.SHRS_OWND_FOLWNG_TRANS_FN, r.TRANS_DATE_FN)) a.fnIds.add(id);
@@ -116,6 +154,7 @@ export function normalizeQuarterZip(zipBuf) {
     const allTexts = noteMap ? [...noteMap.values()] : [];
     if (sub.remarks) allTexts.push(sub.remarks); // Remarks часто содержит дату плана 10b5-1
     const px = a.sh > 0 ? a.cost / a.sh : null;
+    const ow = foldOwnership(a.forms, a.code);
     trades.push({
       acc: a.acc, form: sub.form, fdate: sub.fdate, tdate: a.tdate,
       cik: sub.cik, t: sub.t,
@@ -123,7 +162,7 @@ export function normalizeQuarterZip(zipBuf) {
       code: a.code, sh: Math.round(a.sh),
       px: px !== null ? Math.round(px * 10000) / 10000 : null,
       val: Math.round(a.cost),
-      own: a.own, di: a.di, b5: sub.b5,
+      own: ow.own, di: ow.di, ownD: ow.ownD, shD: ow.shD, b5: sub.b5,
       orig: sub.orig ?? null,
       sec: a.sec.slice(0, 60),
       fn: rowFootnoteFlags(rowTexts, allTexts),
@@ -259,10 +298,20 @@ export function parseForm4Txt(txt, acc, fdate) {
     const di = tagVal(nature, 'directOrIndirectOwnership') === 'I' ? 'I' : 'D';
     const secTitle = tagVal(tr, 'securityTitle') ?? '';
     const key = `${code}|${tdate}|${secTitle}`;
-    const a = agg.get(key) ?? { sh: 0, cost: 0, own: null, di: 'D', ids: new Set(), sec: secTitle };
+    const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), ids: new Set(), sec: secTitle };
     a.sh += sh; a.cost += sh * (px ?? 0);
-    if (own !== null) a.own = own;
-    if (di === 'I') a.di = 'I';
+    const f = a.forms.get(di) ?? { sh: 0, own: null, ownMin: null, ownMax: null };
+    f.sh += sh;
+    // Одна покупка обычно разбита на несколько ценовых строк, и остаток в них НАРАСТАЕТ:
+    // итоговый — наибольший. Раньше брался остаток случайно последней строки, из-за чего
+    // прирост позиции ошибался на порядок (HY 2019-03-27: +500% вместо +1%).
+    // У продаж остаток, наоборот, убывает — там итоговый наименьший.
+    if (own !== null) {
+      f.own = own;
+      f.ownMin = f.ownMin === null ? own : Math.min(f.ownMin, own);
+      f.ownMax = f.ownMax === null ? own : Math.max(f.ownMax, own);
+    }
+    a.forms.set(di, f);
     // Сноски, привязанные к полям именно этой транзакции
     for (const idm of tr.matchAll(/<footnoteId\s+id="([^"]+)"/g)) a.ids.add(idm[1]);
     a.code = code; a.tdate = tdate;
@@ -272,11 +321,12 @@ export function parseForm4Txt(txt, acc, fdate) {
   const trades = [];
   for (const a of agg.values()) {
     const rowTexts = [...a.ids].map(id => noteMap.get(id)).filter(Boolean);
+    const ow = foldOwnership(a.forms, a.code);
     trades.push({
       acc, form: docType, fdate, tdate: a.tdate, cik, t, owners,
       code: a.code, sh: Math.round(a.sh),
       px: a.sh > 0 ? Math.round((a.cost / a.sh) * 10000) / 10000 : null,
-      val: Math.round(a.cost), own: a.own, di: a.di, b5,
+      val: Math.round(a.cost), own: ow.own, di: ow.di, ownD: ow.ownD, shD: ow.shD, b5,
       orig: orig ?? null,
       sec: String(a.sec).slice(0, 60),
       fn: rowFootnoteFlags(rowTexts, allTexts),

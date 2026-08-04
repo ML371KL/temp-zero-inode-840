@@ -28,30 +28,48 @@ const statePath = join(DATA, 'state', 'live.json');
 const state = readJson(statePath, {});
 const shardPath = join(DATA, 'trades', 'live.json.gz');
 
-// Смена схемы парсера -> перечитываем хвост заново
+// Смена схемы парсера -> перечитываем хвост заново. Шард при этом НЕ обнуляется:
+// ключ строки от схемы не зависит, поэтому перечитанные дни просто ЗАМЕЩАЮТ свои строки.
+// Раньше шард сбрасывался в пустой, и до конца перечитывания свежие сделки пропадали
+// из ленты на несколько прогонов — регрессия в проде ради технической миграции.
 const schemaChanged = state.schema !== SHARD_VERSION;
-if (schemaChanged && state.lastDay) console.log(`[live] схема ${state.schema ?? 1} -> ${SHARD_VERSION}: перечитываю хвост`);
+if (schemaChanged && state.lastDay) console.log(`[live] схема ${state.schema ?? 1} -> ${SHARD_VERSION}: перечитываю хвост, накопленное сохраняю`);
 
-const from = (schemaChanged ? null : state.from) ?? defaultFrom;
+const from = state.from ?? defaultFrom;
 const today = isoToday();
 
-const rawShard = schemaChanged ? null : readJsonGz(shardPath, null);
+const rawShard = readJsonGz(shardPath, null);
 const shard = rawShard && !Array.isArray(rawShard) ? rawShard : { v: SHARD_VERSION, trades: [], amend: [] };
 // Строки, покрытые уже загруженными квартальными датасетами, из live-шарда вычищаются
 const before = shard.trades.length;
 shard.trades = shard.trades.filter(r => r.fdate >= from);
 shard.amend = shard.amend.filter(a => a.orig >= '2000-01-01');
 if (shard.trades.length !== before) console.log(`[live] вычищено ${before - shard.trades.length} строк, покрытых датасетами`);
-const seen = new Set(shard.trades.map(r => `${r.acc}|${r.code}|${r.tdate}|${r.sec ?? ''}`));
+const rowKey = r => `${r.acc}|${r.code}|${r.tdate}|${r.sec ?? ''}`;
+const byKey = new Map(shard.trades.map(r => [rowKey(r), r]));
 const seenAmend = new Set(shard.amend.map(a => a.acc));
 
-let day = (schemaChanged ? null : state.lastDay) ? addDaysIso(state.lastDay, 1) : from;
-let lastCompleted = schemaChanged ? null : (state.lastDay ?? null);
+// Перечитывание после смены схемы начинается с начала окна, но РЕЗЮМИРУЕТСЯ: прогресс
+// живёт в lastDay, а метка migrating не даёт следующему прогону начать всё заново.
+const startingMigration = schemaChanged && !state.migrating;
+const cursor = startingMigration ? null : (state.lastDay ?? null);
+let day = cursor ? addDaysIso(cursor, 1) : from;
+let lastCompleted = cursor;
 let daysDone = 0, filingsDone = 0, added = 0;
 
 function save() {
+  shard.trades = [...byKey.values()];
+  shard.v = SHARD_VERSION;
   writeJsonGz(shardPath, shard);
-  writeJson(statePath, { schema: SHARD_VERSION, from, lastDay: lastCompleted, updated: isoToday() }, true);
+  // Версия помечается только когда хвост перечитан до конца: иначе следующий прогон
+  // счёл бы миграцию завершённой и остаток дней остался бы в старой схеме
+  const caughtUp = lastCompleted && addDaysIso(lastCompleted, 4) >= today;
+  const done = !schemaChanged || caughtUp;
+  writeJson(statePath, {
+    schema: done ? SHARD_VERSION : (state.schema ?? 1),
+    migrating: done ? undefined : true,
+    from, lastDay: lastCompleted, updated: isoToday(),
+  }, true);
 }
 
 outer:
@@ -78,11 +96,12 @@ while (day <= today) {
     filingsDone++;
     const parsed = parseForm4Txt(txt, acc ?? p, day);
     for (const r of parsed.trades) {
-      const key = `${r.acc}|${r.code}|${r.tdate}|${r.sec ?? ''}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      shard.trades.push(r);
-      added++;
+      const key = rowKey(r);
+      // При перечитывании после смены схемы строка замещается свежим разбором,
+      // при обычном прогоне просто добавляется недостающая
+      if (!byKey.has(key)) added++;
+      else if (!schemaChanged) continue;
+      byKey.set(key, r);
     }
     for (const a of parsed.amend) {
       if (seenAmend.has(a.acc)) continue;

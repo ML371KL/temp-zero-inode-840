@@ -124,7 +124,8 @@ ok('normalizeQuarterZip: агрегация, фильтры, сноски, по�
   const p = trades.find(r => r.acc === 'ACC-1');
   assert.equal(p.sh, 2000);
   assert.equal(p.px, 11);                    // vwap (1000*10 + 1000*12)/2000
-  assert.equal(p.own, 6000);                 // остаток из последней строки
+  assert.equal(p.own, 6000);                 // итоговый остаток покупки — наибольший из строк
+  assert.equal(p.di, 'D');
   assert.equal(p.owners[0].rel.includes('C'), true);  // CEO по титулу
   const pipe = trades.find(r => r.acc === 'ACC-4');
   assert.equal(pipe.fn.offering, 1);         // сноска привязана к строке через TRANS_PRICEPERSHARE_FN
@@ -200,7 +201,11 @@ ok('parseForm4Txt: агрегация, роли, построчные сноск
   assert.equal(r.t, 'TST');
   assert.equal(r.sh, 4000);
   assert.equal(r.px, 9.5);
-  assert.equal(r.di, 'I');                   // хотя бы одна строка indirect
+  // Строка смешивает прямое и косвенное владение: раньше весь агрегат становился 'I',
+  // а остаток брался из случайной строки и давал правдоподобный, но неверный прирост
+  assert.equal(r.di, 'M');
+  assert.equal(r.own, null, 'у смешанной строки общего остатка не существует');
+  assert.equal(dOwnOf(r) === null || dOwnOf(r) > 0, true);
   assert.equal(r.owners[0].name, 'Smith & Jones Trust');
   assert.equal(r.owners[0].rel.includes('C'), true);
   assert.equal(r.fn.wavg, 1);                // F1 привязана к цене
@@ -213,6 +218,20 @@ ok('parseForm4Txt отбрасывает строку с невалидной д
   const { trades } = parseForm4Txt(bad, 'ACC-BAD', '2026-07-01');
   assert.equal(trades.length, 1);            // битая строка отброшена, валидная осталась
   assert.equal(trades[0].sh, 3000);
+});
+
+ok('владение: остаток относится к форме владения, а не к лицу', () => {
+  // однородная строка: остаток осмыслен, прирост считается
+  assert.equal(dOwnOf({ di: 'D', sh: 1000, own: 11000 }), 0.1);
+  // позиция открыта с нуля
+  assert.equal(dOwnOf({ di: 'D', sh: 5000, own: 5000 }), 9.99);
+  // смешанная строка: общий остаток не определён, берём прямую часть
+  assert.equal(dOwnOf({ di: 'M', sh: 1500, own: null, shD: 1000, ownD: 11000 }), 0.1);
+  // смешанная строка без прямой части — прирост неизвестен, а не «правдоподобен»
+  assert.equal(dOwnOf({ di: 'M', sh: 1500, own: null, shD: null, ownD: null }), null);
+  // купить больше, чем осталось после покупки, нельзя: остаток от другого пакета
+  // (у одного лица бывает несколько косвенных — траст, супруга, LLC)
+  assert.equal(dOwnOf({ di: 'I', sh: 5750000, own: 3000000 }), null);
 });
 
 // ---------- цены ----------

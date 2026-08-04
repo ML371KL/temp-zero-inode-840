@@ -26,10 +26,21 @@ export function topRole(rels) {
 }
 
 // Прирост позиции: куплено / остаток до сделки. 9.99 = позиция открыта с нуля.
+//
+// Остаток в Form 4 относится к форме владения (прямой пакет или конкретный косвенный),
+// а не к лицу. У смешанной строки (di='M') сопоставим с покупкой только прямой пакет —
+// берём его. Отрицательный остаток «до» арифметически невозможен для одной формы
+// владения и означает, что остаток и покупка относятся к разным пакетам (у одного лица
+// бывает несколько косвенных: траст, супруга, LLC — Form 4 не даёт им ключа).
+// Такие строки честнее отдать как «неизвестно», чем как правдоподобное число.
 export function dOwnOf(r) {
-  if (r.own === null || r.own === undefined || !r.sh) return null;
-  const before = r.own - r.sh;
-  return before > 0 ? rnd(r.sh / before) : (r.own === r.sh ? 9.99 : null);
+  const mixed = r.di === 'M';
+  const sh = mixed ? r.shD : r.sh;
+  const own = mixed ? r.ownD : r.own;
+  if (own === null || own === undefined || !sh) return null;
+  const before = own - sh;
+  if (before < 0) return null;
+  return before > 0 ? rnd(sh / before) : 9.99;
 }
 
 export function scoreBuy({

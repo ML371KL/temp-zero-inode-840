@@ -6,7 +6,6 @@
 import { readJson, writeJson, readJsonGz, writeJsonGz, isoToday } from './lib/util.mjs';
 import { fetchQuarter, quarterList, SHARD_VERSION } from './lib/edgar.mjs';
 import { join } from 'node:path';
-import { rmSync, existsSync } from 'node:fs';
 
 const args = process.argv.slice(2);
 function argVal(name, def) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; }
@@ -16,15 +15,24 @@ const MAX = Number(argVal('--max-quarters', '999'));
 const statePath = join(DATA, 'state', 'backfill.json');
 const state = readJson(statePath, { schema: SHARD_VERSION, done: [], missing: [] });
 
-if (state.schema !== SHARD_VERSION) {
-  console.log(`[backfill] схема шардов ${state.schema ?? 1} -> ${SHARD_VERSION}: пересобираю сделки с нуля`);
-  if (existsSync(join(DATA, 'trades'))) rmSync(join(DATA, 'trades'), { recursive: true, force: true });
-  state.schema = SHARD_VERSION;
-  state.done = [];
-  state.missing = [];
+// Пересборка при смене схемы идёт БЕЗ удаления данных: строки замещаются на месте по
+// тому же ключу. Раньше каталог сносился целиком, и до конца пересборки compute падал
+// на «нет сделок» — прод останавливался на часы. Теперь частично пересобранный набор
+// остаётся консистентным, потому что схема v3 не меняет состав строк, а только уточняет
+// поля владения; версия помечается лишь когда пройдены все кварталы.
+const rebuilding = state.schema !== SHARD_VERSION;
+if (rebuilding) {
+  if (!state.rebuildFrom) {
+    console.log(`[backfill] схема шардов ${state.schema ?? 1} -> ${SHARD_VERSION}: перечитываю кварталы, данные не удаляю`);
+    state.rebuildFrom = state.schema ?? 1;
+    state.done = [];
+    state.missing = [];
+  }
   // Живой контур тоже парсит формы — его хвост нужно перечитать
   const liveState = readJson(join(DATA, 'state', 'live.json'), null);
-  if (liveState) writeJson(join(DATA, 'state', 'live.json'), { schema: SHARD_VERSION }, true);
+  if (liveState && liveState.schema !== SHARD_VERSION) {
+    writeJson(join(DATA, 'state', 'live.json'), { schema: SHARD_VERSION }, true);
+  }
 }
 
 const today = isoToday();
@@ -59,20 +67,33 @@ for (const q of wanted) {
   };
   for (const r of data.trades) bucket(r.tdate.slice(0, 4))?.trades.push(r);
   for (const a of data.amend) bucket(a.orig.slice(0, 4))?.amend.push(a); // поправка живёт в году оригинала
+  const rowKey = r => `${r.acc}|${r.code}|${r.tdate}|${r.sec ?? ''}`;
   for (const [y, add] of byYear) {
     const shard = readShard(y);
-    // Дедуп: повторная загрузка квартала идемпотентна
-    const seenT = new Set(shard.trades.map(r => `${r.acc}|${r.code}|${r.tdate}|${r.sec ?? ''}`));
-    const newT = add.trades.filter(r => !seenT.has(`${r.acc}|${r.code}|${r.tdate}|${r.sec ?? ''}`));
+    const seenT = new Set(shard.trades.map(rowKey));
+    const newT = add.trades.filter(r => !seenT.has(rowKey(r)));
     const seenA = new Set(shard.amend.map(a => a.acc));
     const newA = add.amend.filter(a => !seenA.has(a.acc));
-    if (newT.length || newA.length) {
+    // При пересборке строка не пропускается как дубль, а ЗАМЕЩАЕТСЯ свежим разбором:
+    // ключ строки от схемы не зависит, поэтому замена идемпотентна и безопасна на любом
+    // шаге. Обычный прогон, как и раньше, только дописывает недостающее.
+    let replaced = 0;
+    if (rebuilding) {
+      const byKey = new Map(shard.trades.map(r => [rowKey(r), r]));
+      for (const r of add.trades) { if (byKey.has(rowKey(r))) replaced++; byKey.set(rowKey(r), r); }
+      shard.trades = [...byKey.values()];
+      const aByKey = new Map(shard.amend.map(a => [a.acc, a]));
+      for (const a of add.amend) aByKey.set(a.acc, a);
+      shard.amend = [...aByKey.values()];
+      shard.v = SHARD_VERSION;
+      writeJsonGz(shardPath(y), shard);
+    } else if (newT.length || newA.length) {
       shard.v = SHARD_VERSION;
       shard.trades = shard.trades.concat(newT);
       shard.amend = shard.amend.concat(newA);
       writeJsonGz(shardPath(y), shard);
     }
-    console.log(`[backfill] ${q} -> ${y}: +${newT.length} сделок, +${newA.length} поправок (всего ${shard.trades.length})`);
+    console.log(`[backfill] ${q} -> ${y}: +${newT.length} сделок${replaced ? `, перечитано ${replaced}` : ''}, +${newA.length} поправок (всего ${shard.trades.length})`);
   }
   state.done.push(q);
   state.missing = state.missing.filter(x => x !== q);
@@ -80,5 +101,14 @@ for (const q of wanted) {
   writeJson(statePath, state, true);
   processed++;
 }
-const remaining = wanted.filter(q => !state.done.includes(q));
-console.log(`[backfill] готово: ${state.done.length}/${wanted.length} кварталов; осталось: ${remaining.join(', ') || 'нет'}`);
+const remaining = wanted.filter(q => !state.done.includes(q) && !state.missing.includes(q));
+// Версия схемы помечается только когда пройдены ВСЕ кварталы: до этого набор смешанный,
+// и преждевременная отметка остановила бы пересборку на полпути.
+if (rebuilding && !remaining.length) {
+  state.schema = SHARD_VERSION;
+  delete state.rebuildFrom;
+  writeJson(statePath, state, true);
+  console.log(`[backfill] пересборка схемы завершена: все ${wanted.length} кварталов перечитаны`);
+}
+console.log(`[backfill] готово: ${state.done.length}/${wanted.length} кварталов; осталось: ${remaining.join(', ') || 'нет'}`
+  + (rebuilding && remaining.length ? ` (пересборка схемы ${state.rebuildFrom} -> ${SHARD_VERSION} не завершена)` : ''));
