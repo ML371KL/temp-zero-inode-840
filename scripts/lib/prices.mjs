@@ -196,9 +196,14 @@ export function normalizeTiingo(rows) {
   for (let i = asc.length - 1; i >= 0; i--) {
     const r = asc[i];
     const iso = String(r.date ?? '').slice(0, 10);
-    const close = Number(r.close), adj = Number(r.adjClose), vol = Number(r.volume);
+    const close = Number(r.close), adj = Number(r.adjClose);
+    // Объём берём скорректированный на сплиты: прокси ликвидности считается как
+    // close * volume, а close мы здесь тоже приводим к сплит-конвенции. Смешать сырой
+    // объём со сплит-скорректированной ценой значило бы ошибиться в разы на любой бумаге,
+    // пережившей сплит. У Yahoo обе величины уже согласованы, у Tiingo — нет.
+    const vol = Number(r.adjVolume ?? r.volume);
     out[i] = /^\d{4}-\d{2}-\d{2}$/.test(iso) && Number.isFinite(close) && close > 0 && Number.isFinite(adj) && adj > 0
-      ? [iso, rnd(close / cum), rnd(adj), Number.isFinite(vol) && vol > 0 ? vol : 0]
+      ? [iso, rnd(close / cum), rnd(adj), Number.isFinite(vol) && vol > 0 ? Math.round(vol) : 0]
       : null;
     const sf = Number(r.splitFactor);
     if (Number.isFinite(sf) && sf > 0 && sf !== 1) { splits.push([iso, Math.round(sf * 1e6) / 1e6]); cum *= sf; }

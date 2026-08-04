@@ -93,11 +93,15 @@ let ok = 0, empty = 0, fail = 0, budgetOut = false, rateLimited = false;
 for (const t of queue) {
   if (used.size >= MONTH_SYMBOL_CAP) { console.log('[tiingo] месячный лимит символов исчерпан'); break; }
   if (Date.now() - started > BUDGET_MS) { budgetOut = true; break; }
-  const url = `https://api.tiingo.com/tiingo/daily/${encodeURIComponent(t)}/prices`
-    + `?startDate=${FROM}&format=json&token=${TOKEN}`;
+  // Токен уходит заголовком, а не в строке запроса: URL попадает в тексты сетевых ошибок
+  // и в отладочный вывод, а секрету там делать нечего.
+  const url = `https://api.tiingo.com/tiingo/daily/${encodeURIComponent(t)}/prices?startDate=${FROM}&format=json`;
   let res;
   try {
-    res = await fetch(url, { headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(60000) });
+    res = await fetch(url, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Token ${TOKEN}` },
+      signal: AbortSignal.timeout(60000),
+    });
   } catch (e) {
     fail++;
     const f = state.failed[t] ?? { tries: 0 };

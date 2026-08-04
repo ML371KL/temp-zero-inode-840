@@ -246,10 +246,10 @@ ok('metaAcceptable: чужая валюта и не-акция отвергаю�
 ok('normalizeTiingo: close переводится в конвенцию Yahoo по сплитам', () => {
   // сплит 2:1 на 2020-01-03: бары до него должны быть поделены на 2, adjClose берётся как есть
   const rows = [
-    { date: '2020-01-01T00:00:00.000Z', close: 100, adjClose: 49, volume: 10, splitFactor: 1 },
-    { date: '2020-01-02T00:00:00.000Z', close: 102, adjClose: 50, volume: 11, splitFactor: 1 },
-    { date: '2020-01-03T00:00:00.000Z', close: 52, adjClose: 51, volume: 24, splitFactor: 2 },
-    { date: '2020-01-06T00:00:00.000Z', close: 53, adjClose: 52, volume: 25, splitFactor: 1 },
+    { date: '2020-01-01T00:00:00.000Z', close: 100, adjClose: 49, volume: 10, adjVolume: 20, splitFactor: 1 },
+    { date: '2020-01-02T00:00:00.000Z', close: 102, adjClose: 50, volume: 11, adjVolume: 22, splitFactor: 1 },
+    { date: '2020-01-03T00:00:00.000Z', close: 52, adjClose: 51, volume: 24, adjVolume: 24, splitFactor: 2 },
+    { date: '2020-01-06T00:00:00.000Z', close: 53, adjClose: 52, volume: 25, adjVolume: 25, splitFactor: 1 },
   ];
   const { series, splits } = normalizeTiingo(rows);
   assert.deepEqual(splits, [['2020-01-03', 2]]);
@@ -258,6 +258,9 @@ ok('normalizeTiingo: close переводится в конвенцию Yahoo п
   assert.equal(series[2][1], 52);   // день сплита уже посчитан после него
   assert.equal(series[3][1], 53);
   assert.equal(series[0][2], 49);   // adjClose не трогаем
+  // объём тоже в сплит-конвенции, иначе close*volume разъедется в два раза
+  assert.equal(series[0][3], 20);
+  assert.equal(series[3][3], 25);
 });
 
 // ---------- реестр биржевых символов ----------
