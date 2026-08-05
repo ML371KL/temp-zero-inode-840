@@ -25,6 +25,8 @@ const SITE_URL = 'https://ml371kl.github.io/temp-zero-inode-840/';
 const token = process.env.TELEGRAM_BOT_TOKEN, chat = process.env.TELEGRAM_CHAT_ID;
 
 // ---------- отправка ----------
+const plain = s => String(s).replace(/<[^>]+>/g, '');
+
 async function tg(payload) {
   const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -34,24 +36,42 @@ async function tg(payload) {
   return res.ok;
 }
 
-const plain = s => String(s).replace(/<[^>]+>/g, '');
-
-// Копия каждого сигнала уходит в приватную ленту NEXUS. Канал best-effort:
-// его отказ никогда не блокирует Telegram и ежедневную публикацию радара.
+// Копия каждого сообщения уходит в приватную ленту NEXUS. Канал best-effort: его отказ
+// никогда не блокирует Telegram и ежедневную публикацию радара. Молчать при этом нельзя —
+// раньше ненастроенное зеркало не оставляло в логе ни строчки, и «почему на хабе пусто»
+// было нечем ответить.
 async function sendNexusEvent(text) {
   const url = process.env.NEXUS_EVENTS_URL;
   const nexusToken = process.env.NEXUS_INGEST_TOKEN;
-  if (!url || !nexusToken) return;
+  if (!url || !nexusToken) {
+    console.log('[notify] NEXUS не настроен (нет NEXUS_EVENTS_URL или NEXUS_INGEST_TOKEN) — зеркало пропущено');
+    return false;
+  }
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${nexusToken}` },
       body: JSON.stringify({ source: '840', text: plain(text), occurredAt: new Date().toISOString() }),
     });
-    if (!res.ok) console.error('[notify] NEXUS HTTP', res.status, (await res.text()).slice(0, 200));
+    if (!res.ok) { console.error('[notify] NEXUS HTTP', res.status, (await res.text()).slice(0, 200)); return false; }
+    console.log('[notify] NEXUS: событие принято');
+    return true;
   } catch (error) {
     console.error('[notify] NEXUS недоступен:', error?.message || error);
+    return false;
   }
+}
+
+// Единственная дверь наружу. Всё, что бот показывает в Telegram, обязано попасть и в ленту
+// NEXUS — иначе очередной путь (тест, предпросмотр, боевая рассылка) молча обойдёт зеркало.
+// Ровно это и случилось: предпросмотр слал только в чат, и на хабе сообщения не было.
+// Отсутствие секретов Telegram больше не отменяет зеркало: это два независимых канала.
+async function send(text, markup) {
+  let ok = false;
+  if (token && chat) ok = await tg({ text, reply_markup: markup });
+  else console.log('[notify] секреты Telegram не заданы — отправка в чат пропущена');
+  await sendNexusEvent(text);
+  return ok;
 }
 
 // ---------- форматирование ----------
@@ -92,15 +112,14 @@ if (args.includes('--test')) {
     console.error(`  чат:   ${chat ? chat : 'ОТСУТСТВУЕТ'}`);
     process.exit(1);
   }
-  const ok = await tg({
-    text: '✅ <b>Инсайдерский радар</b> — связка с Telegram работает.\n\n'
-      + 'Сюда приходит ровно одно событие: <b>в рабочем наборе открылась новая позиция</b> — '
-      + 'инсайдер купил на существенную сумму у 52-недельного максимума в ликвидной бумаге.\n\n'
-      + 'Повторные покупки в уже открытой позиции не присылаются: входить второй раз не нужно. '
-      + 'В тихие недели писем не будет вовсе — набор даёт около восьми сигналов в месяц, '
-      + 'а в отдельные месяцы не даёт ни одного.',
-    reply_markup: { inline_keyboard: [[{ text: 'Открыть радар', url: SITE_URL }]] },
-  });
+  const ok = await send(
+    '✅ <b>Инсайдерский радар</b> — связка работает.\n\n'
+    + 'Сюда приходит ровно одно событие: <b>в рабочем наборе открылась новая позиция</b> — '
+    + 'инсайдер купил на существенную сумму у 52-недельного максимума в ликвидной бумаге.\n\n'
+    + 'Повторные покупки в уже открытой позиции не присылаются: входить второй раз не нужно. '
+    + 'В тихие недели писем не будет вовсе — набор даёт около восьми сигналов в месяц, '
+    + 'а в отдельные месяцы не даёт ни одного.',
+    { inline_keyboard: [[{ text: 'Открыть радар', url: SITE_URL }]] });
   if (ok) console.log('[notify] тестовое сообщение отправлено');
   process.exit(ok ? 0 : 1);
 }
@@ -208,11 +227,13 @@ const kb = p => ({
 if (PREVIEW) {
   if (!allPositions.length) { console.log('[notify] позиций в наборе нет'); process.exit(0); }
   const p = allPositions[0];
-  const text = card(p);
-  if (DRY || !token || !chat) { console.log('\n' + plain(text)); process.exit(0); }
-  const ok = await tg({ text, reply_markup: kb(p) });
-  console.log(ok ? '[notify] предпросмотр отправлен' : '[notify] предпросмотр НЕ отправлен');
-  process.exit(ok ? 0 : 1);
+  // Оговорка обязательна в обоих каналах: карточка предпросмотра неотличима от боевой,
+  // и без пометки она читается на хабе как новый сигнал.
+  const text = card(p) + '\n\n<i>Это образец формата, а не новый сигнал.</i>';
+  if (DRY) { console.log('\n' + plain(text)); process.exit(0); }
+  const ok = await send(text, kb(p));
+  console.log(ok ? '[notify] предпросмотр отправлен' : '[notify] предпросмотр в чат НЕ отправлен');
+  process.exit(0);
 }
 
 // ---------- что уже отправляли ----------
@@ -252,14 +273,12 @@ if (DRY) {
   for (const m of messages) console.log('\n' + '─'.repeat(46) + '\n' + plain(m.text));
   process.exit(0);
 }
-if (!token || !chat) { console.log('[notify] секреты Telegram не заданы — отправка пропущена'); process.exit(0); }
 
 let okCount = 0;
 for (const [k, m] of messages.entries()) {
   // Telegram душит бота примерно на одном сообщении в секунду на чат; карточек бывает до
   // четырёх подряд, поэтому между ними пауза — иначе часть вернётся с 429.
   if (k) await new Promise(r => setTimeout(r, 1200));
-  if (await tg({ text: m.text, reply_markup: m.markup })) okCount++;
-  await sendNexusEvent(m.text);
+  if (await send(m.text, m.markup)) okCount++;
 }
-console.log('[notify] отправлено сообщений:', okCount, 'из', messages.length);
+console.log('[notify] отправлено в Telegram:', okCount, 'из', messages.length);

@@ -16,8 +16,13 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
+      # NEXUS здесь не для галочки: тест проверяет ОБА канала сразу. Раньше их можно было
+      # проверить только по отдельности, и молчащее зеркало обнаруживалось только тем,
+      # что на хабе не появлялось сообщение.
       - name: Отправить тестовое сообщение
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NEXUS_EVENTS_URL: ${{ vars.NEXUS_EVENTS_URL }}
+          NEXUS_INGEST_TOKEN: ${{ secrets.NEXUS_INGEST_TOKEN }}
         run: node scripts/notify.mjs --test
