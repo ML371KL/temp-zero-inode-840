@@ -93,6 +93,12 @@ input.rng[type=number] { -moz-appearance: textfield; }
   background: color-mix(in srgb, var(--c-buy) 16%, var(--surface));
   border-color: var(--c-buy); color: var(--ink); font-weight: 600;
 }
+/* Сравнительный фильтр: обгоняет свою корзину, но собственная альфа отрицательна.
+   Выделен иначе, чем проверенные наборы, чтобы не читался как «покупать». */
+.chip.relative {
+  background: color-mix(in srgb, var(--warn-bg) 70%, var(--surface));
+  border-color: var(--c-sell); color: var(--ink); border-style: dashed;
+}
 .chip.proven:hover { background: color-mix(in srgb, var(--c-buy) 26%, var(--surface)); }
 .chip.proven.active { background: var(--c-buy); color: var(--accent-ink); border-color: var(--c-buy); }
 .proven-label { color: var(--c-buy); font-size: 12.5px; font-weight: 600; }
