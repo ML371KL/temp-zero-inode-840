@@ -290,3 +290,9 @@ tr.muted-row td { color: var(--ink-2); }
   .hero-metrics .hm:nth-child(n+5) { display: none; }
 }
 
+
+/* «и ещё N» внутри строки: приглушено, но не уводится на отдельную строку */
+.sub2-inline { color: var(--ink-3); font-size: 11.5px; }
+
+/* Позиция открыта, но вход уже закрыт: не гасим как истёкшую, но и не выделяем */
+tr.row-hold td { opacity: .8; }

@@ -566,8 +566,13 @@ ok('entity: различение физлиц и юрлиц', () => {
   assert.equal(isEntityName('Vanguard Group Inc'), true);
   assert.equal(isEntityName('RA Capital Management, L.P.'), true);
   assert.equal(isEntityName('Ivanov Ivan'), false);
-  // Флаг officer/director первичен: юридическое имя не может быть офицером
-  assert.equal(isPersonOwner({ name: 'Smith Capital Trust', rel: 'DO' }), true);
+  // Имя первично, флаг вторичен. Прежнее правило «officer/director — всегда человек»
+  // опровергнуто данными: 30 402 строки с юрлицовым именем несут флаг директора
+  // («director by deputization»), и через них независимые физлица склеивались в одну
+  // группу, отключая гейт синхронных подач.
+  assert.equal(isPersonOwner({ name: 'Smith Capital Trust', rel: 'DO' }), false);
+  assert.equal(isPersonOwner({ name: 'TRIAN FUND MANAGEMENT, L.P.', rel: 'D' }), false);
+  assert.equal(isPersonOwner({ name: 'PELTZ NELSON', rel: 'DT' }), true);
   assert.equal(isPersonOwner({ name: 'RA Capital Management LP', rel: 'T' }), false);
   assert.equal(isFundOnly({ owners: [{ name: 'Baker Bros Advisors LP', rel: 'T' }] }), true);
   assert.equal(isFundOnly({ owners: [{ name: 'Baker Bros Advisors LP', rel: 'T' }, { name: 'Ivanov', rel: 'D' }] }), false);

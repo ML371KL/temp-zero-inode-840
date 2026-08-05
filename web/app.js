@@ -227,49 +227,112 @@ function renderSetHeader() {
     m(pctPlain(s.cagr, 1), `среднегодовая доходность${ref ? ` · индекс ${pctPlain(ref.cagr, 1)}` : ''}`,
       `Волатильность ${pctPlain(s.vol, 1)}, максимальная просадка ${pctPlain(s.dd, 1)}.`);
 }
-function setStatus(age, fresh) {
-  if (age <= fresh * 0.7) return ['ok', 'свежий'];
-  if (age <= fresh) return ['warn', 'на пределе'];
-  return ['dead', 'протух'];
+// Две РАЗНЫЕ вещи, которые прежний статус путал:
+//   успеваю ли я войти — сигнал живёт около месяца после подачи (проверено: вход через
+//     два месяца превращает +7.4% к индексу в +1.6%);
+//   держится ли позиция — три месяца от первой покупки независимо от того, поздно я
+//     узнал о сигнале или нет.
+// Позиция, открытая 60 дней назад, для нового участника закрыта, но у того, кто вошёл
+// вовремя, она ещё живёт — раньше такая строка помечалась «протух» и путала.
+function setStatus(age, fresh, holdDays) {
+  if (age <= fresh * 0.7) return ['ok', 'можно входить'];
+  if (age <= fresh) return ['warn', 'поздно входить'];
+  if (age <= holdDays) return ['hold', 'держим'];
+  return ['dead', 'окно закрыто'];
 }
+// Русское склонение после числа: 1 покупка, 2-4 покупки, 5+ покупок (и 11-14 — покупок).
+// Без этого в таблице появлялось «17 покупки».
+const plural = (n, one, few, many) => {
+  const a = Math.abs(n) % 100, b = a % 10;
+  return n + ' ' + (a > 10 && a < 20 ? many : b === 1 ? one : b >= 2 && b <= 4 ? few : many);
+};
+
+// Одна строка таблицы = одна ПОЗИЦИЯ, а не одна форма. Повторная покупка в той же бумаге
+// (другой инсайдер или тот же на следующей неделе) не требует второй покупки: позиция уже
+// открыта, и срок выхода отсчитывается от ПЕРВОГО сигнала. Проверено на истории — вариант
+// «входить только на первый сигнал» даёт тот же результат (+7.3% против +7.4% к индексу),
+// то есть повторные сигналы ничего не добавляют и покупать по ним второй раз незачем.
+function groupPositions(rows, holdMonths) {
+  const byTicker = new Map();
+  for (const r of rows) (byTicker.get(r.t) ?? byTicker.set(r.t, []).get(r.t)).push(r);
+  const out = [];
+  for (const [t, list] of byTicker) {
+    list.sort((a, b) => a.fdate < b.fdate ? -1 : 1);       // от старых к свежим
+    let pos = null;
+    for (const r of list) {
+      // Новая позиция начинается, если прежняя уже закрыта к моменту этого сигнала
+      const closed = pos && (Date.parse(r.fdate) - Date.parse(pos.first)) / 86400000 > holdMonths * 30.5;
+      if (!pos || closed) {
+        pos = { t, name: r.name, first: r.fdate, age: r.age, exit: r.exit, rows: [] };
+        out.push(pos);
+      }
+      pos.rows.push(r);
+      pos.last = r.fdate;
+    }
+  }
+  for (const p of out) {
+    p.val = p.rows.reduce((a, b) => a + (b.val ?? 0), 0);
+    p.n = p.rows.length;
+    p.who = [...new Set(p.rows.map(x => x.who))];
+    p.px = p.rows[0].px; p.cur = p.rows[0].cur;
+    p.chg = p.rows[0].chg; p.dd = p.rows[0].dd; p.dv = p.rows[0].dv;
+    p.role = p.rows[0].role; p.title = p.rows[0].title;
+  }
+  return out.sort((a, b) => a.first < b.first ? 1 : a.first > b.first ? -1 : b.val - a.val);
+}
+
 function renderSet() {
   const fresh = state.stats?.setDef?.freshDays ?? 45;
-  let rows = state.feed.filter(r => r.set === 1);
-  if (setAge === 'fresh') rows = rows.filter(r => r.age <= fresh);
-  rows = sortRows(rows);
-  $('#set-count').textContent = rows.length
-    ? `${rows.length} ${setAge === 'fresh' ? 'действующих сигналов' : 'сигналов за 200 дней'}`
+  const hold = state.stats?.setDef?.hold ?? 3;
+  const holdDays = Math.round(hold * 30.5);
+  const today = new Date().toISOString().slice(0, 10);
+  let pos = groupPositions(state.feed.filter(r => r.set === 1), hold);
+  // Открыта ли позиция — решает ДАТА ВЫХОДА, которую считает сборка, а не приблизительный
+  // возраст в днях: иначе строка с уже прошедшей датой выхода оставалась в списке.
+  if (setAge === 'fresh') pos = pos.filter(p => !p.exit || p.exit >= today);
+  pos = sortRows(pos);
+  const sig = pos.reduce((a, p) => a + p.n, 0);
+  const canEnter = pos.filter(p => p.age <= fresh).length;
+  $('#set-count').textContent = pos.length
+    ? (setAge === 'fresh'
+      ? `${plural(pos.length, 'открытая позиция', 'открытые позиции', 'открытых позиций')} · войти ещё можно в ${canEnter}`
+      : `${plural(pos.length, 'позиция', 'позиции', 'позиций')} за 200 дней`) +
+      (sig > pos.length ? ` · ${plural(sig, 'сигнал', 'сигнала', 'сигналов')}, повторные покупки второй позиции не требуют` : '')
     : '';
-  // Колонок меньше, чем в ленте, и вторая строка в ячейке вместо отдельного столбца:
-  // это экран решения, а не исследования, и он должен читаться без прокрутки.
   const th = `<tr>
-    <th>Бумага</th><th>Инсайдер</th>
-    <th class="num sortable" data-sort="age" title="Дней с подачи формы">Подана ⇅</th>
-    <th>Статус</th>
-    <th class="num sortable" data-sort="val">Сумма ⇅</th>
+    <th>Бумага</th><th>Покупали</th>
+    <th class="num sortable" data-sort="age" title="Дата первой покупки в позиции и сколько дней прошло">Открыта ⇅</th>
+    <th title="Успеваю ли я войти и держится ли позиция — это разные вещи">Статус</th>
+    <th class="num sortable" data-sort="val" title="Сумма всех покупок инсайдеров в этой позиции">Куплено ⇅</th>
     <th class="num">Цена сделки</th><th class="num">Сейчас</th>
     <th class="num sortable" data-sort="chg" title="Изменение с первого торгового дня после подачи">Изм. ⇅</th>
     <th class="num sortable" data-sort="dd" title="Насколько ниже 52-недельного максимума была цена на дату сделки">До макс. ⇅</th>
     <th class="num" title="Медианный дневной долларовый оборот бумаги">Оборот</th>
-    <th title="Ориентир выхода: три месяца от входа">Выход</th></tr>`;
-  $('#set-table').innerHTML = th + (rows.length ? rows.map(r => {
-    const [st, lab] = setStatus(r.age, fresh);
-    return `<tr class="${st === 'dead' ? 'row-dead' : ''}">
-      <td><a class="tick" href="#ticker/${encodeURIComponent(r.t)}">${esc(r.t)}</a>
-        <span class="sub2" title="${esc(r.name)}">${esc(trunc(r.name, 30))}</span></td>
-      <td>${esc(trunc(r.who, 24))}<span class="sub2">${esc(ROLE_LABEL[r.role] ?? r.role)}${r.title ? ' · ' + esc(trunc(r.title, 24)) : ''}</span></td>
-      <td class="num">${esc(fmtDate(r.fdate))}<span class="sub2">${r.age} дн. назад</span></td>
-      <td><span class="pill ${st === 'ok' ? 'buy' : st === 'warn' ? 'warn' : 'gray'}">${lab}</span></td>
-      <td class="num">${fmtMoney(r.val)}</td>
-      <td class="num">${fmtPrice(r.px)}</td>
-      <td class="num">${fmtPrice(r.cur)}</td>
-      <td class="num ${cls(r.chg)}">${fmtPct(r.chg)}</td>
-      <td class="num ${cls(r.dd)}">${fmtPct(r.dd, 0)}</td>
-      <td class="num">${fmtMoney(r.dv)}</td>
-      <td class="muted">${esc(fmtDate(r.exit))}</td>
+    <th title="Три месяца от первой покупки">Выход</th></tr>`;
+  $('#set-table').innerHTML = th + (pos.length ? pos.map(p => {
+    const [st, lab] = setStatus(p.age, fresh, holdDays);
+    const who = p.who.length === 1 ? esc(trunc(p.who[0], 24))
+      : `${esc(trunc(p.who[0], 20))} <span class="sub2-inline">и ещё ${p.who.length - 1}</span>`;
+    return `<tr class="${st === 'dead' ? 'row-dead' : st === 'hold' ? 'row-hold' : ''}">
+      <td><a class="tick" href="#ticker/${encodeURIComponent(p.t)}">${esc(p.t)}</a>
+        <span class="sub2" title="${esc(p.name)}">${esc(trunc(p.name, 30))}</span></td>
+      <td>${who}<span class="sub2">${esc(ROLE_LABEL[p.role] ?? p.role)}${p.n > 1 ? ' · ' + plural(p.n, 'покупка', 'покупки', 'покупок') : ''}</span></td>
+      <td class="num">${esc(fmtDate(p.first))}<span class="sub2">${p.age} дн. назад</span></td>
+      <td><span class="pill ${st === 'ok' ? 'buy' : st === 'warn' ? 'warn' : 'gray'}" title="${esc(
+        st === 'ok' ? 'Сигнал свежий — вход по правилу набора ещё уместен'
+          : st === 'warn' ? 'Месяц почти вышел: входить уже поздно, эффект затухает'
+            : st === 'hold' ? 'Входить поздно, но открытая позиция держится до даты выхода'
+              : 'Три месяца истекли — позиция закрыта')}">${lab}</span></td>
+      <td class="num">${fmtMoney(p.val)}</td>
+      <td class="num">${fmtPrice(p.px)}</td>
+      <td class="num">${fmtPrice(p.cur)}</td>
+      <td class="num ${cls(p.chg)}">${fmtPct(p.chg)}</td>
+      <td class="num ${cls(p.dd)}">${fmtPct(p.dd, 0)}</td>
+      <td class="num">${fmtMoney(p.dv)}</td>
+      <td class="muted">${esc(fmtDate(p.exit))}</td>
     </tr>`;
   }).join('') : `<tr><td colspan="11" class="empty">${setAge === 'fresh'
-      ? 'Действующих сигналов сейчас нет — и это нормально: набор даёт около восьми сигналов в месяц, а в отдельные месяцы не даёт ни одного. Нажмите «Все за 200 дней», чтобы увидеть недавние.'
+      ? 'Открытых позиций сейчас нет — и это нормально: набор даёт около восьми сигналов в месяц, а в отдельные месяцы не даёт ни одного. Нажмите «Все за 200 дней», чтобы увидеть недавние.'
       : 'За последние 200 дней в набор не попало ни одной сделки.'}</td></tr>`);
   bindSort('#set-table', renderSet);
 }
