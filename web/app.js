@@ -1,5 +1,5 @@
 // Инсайдерский радар — логика интерфейса. ES-модуль, без зависимостей.
-import { PriceChart, fmtPrice, fmtInt, fmtMoney, fmtPct } from './charts.js';
+import { PriceChart, fmtPrice, fmtInt, fmtMoney, fmtPct, fmtDate } from './charts.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -80,7 +80,7 @@ addEventListener('hashchange', route);
       `<span class="badge">EDGAR до <b>${esc(m.liveLastDay ?? '—')}</b></span>`,
       `<span class="badge">цены <b>${esc(m.pricesUpdated ?? '—')}</b></span>`,
       `<span class="badge" title="Покупок всего / прошли фильтры информативности">покупок <b>${fmtInt(m.trades?.buys)}</b> → <b>${fmtInt(m.gates?.ok)}</b> (${okPct}%)</span>`,
-      `<span class="badge">бэктест <b>${fmtInt(m.backtest?.rows)}</b></span>`,
+      m.set ? `<span class="badge" title="Сделок в рабочем наборе за всю историю / из них действующих прямо сейчас">набор <b>${fmtInt(m.set.rows)}</b> · сейчас <b>${fmtInt(m.set.live)}</b></span>` : '',
       m.universe?.noPrices > 200 ? `<span class="badge warn" title="Эмитенты без ценовых данных не входят в бэктест — остаточная ошибка выжившего">без цен: ${fmtInt(m.universe.noPrices)}</span>` : '',
     ].join('');
   } catch { $('#meta-badges').innerHTML = '<span class="badge warn">meta.json недоступен — данные ещё собираются</span>'; }
@@ -163,11 +163,13 @@ function renderFeatLegend() {
     `<span class="legend-item" title="${esc(why)}"><i class="pill ${style ?? 'gray'} feat">${esc(code)}</i>${esc(name)}</span>`).join('')}</div>`;
   const signal = ['high', 'first-ever', 'first-in-3y'].map(k => FEAT[k]);
   const info = ['pledge', 'trust', 'indirect', 'planned-mark', 'no-history', 'no-price'].map(k => FEAT[k]);
+  // Названия групп честные: «сигнальным» осталось одно условие набора, остальное —
+  // описание сделки, у которого предсказательной силы не нашлось
   const labels = state.meta?.gates?.labels ?? {};
   const drops = Object.entries(DROP_CODE)
     .filter(([k]) => labels[k])
     .map(([k, code]) => [code, labels[k], labels[k], 'warn']);
-  const html = group('Сигнальные:', signal) + group('Информационные:', info) +
+  const html = group('Ценовой контекст и поведение:', signal) + group('Описание сделки:', info) +
     (drops.length ? group('Причины отсева (видны при показе отсеянных):', drops) : '');
   for (const b of boxes) if (b.dataset.done !== '1') { b.innerHTML = html; b.dataset.done = '1'; }
 }
@@ -197,21 +199,33 @@ for (const b of document.querySelectorAll('#set-age .chip')) {
 function renderSetHeader() {
   const d = state.stats?.setDef, s = state.stats?.set;
   if (d) {
-    $('#set-rule').innerHTML =
-      `Инсайдер покупает, когда акция <b>не ниже ${Math.abs(Math.round(d.maxDd * 100))}%</b> от 52-недельного максимума, ` +
-      `на сумму <b>от ${fmtMoney(d.minVal)}</b>, в бумаге с оборотом <b>от ${fmtMoney(d.minDv)}</b> в день. ` +
-      `Держать <b>${d.hold} месяца</b>. Входить в течение месяца после подачи формы: дальше сигнала нет.`;
+    // Правило — не абзац, а список условий: его читают глазами перед каждой сделкой,
+    // и в такой форме видно, что условий ровно четыре.
+    $('#set-rule').innerHTML = [
+      ['цена', `не ниже ${Math.abs(Math.round(d.maxDd * 100))}% от 52-нед. максимума`],
+      ['сумма', `от ${fmtMoney(d.minVal)}`],
+      ['оборот', `от ${fmtMoney(d.minDv)} в день`],
+      ['держать', `${d.hold} месяца`],
+    ].map(([k, v]) => `<li><span>${esc(k)}</span>${esc(v)}</li>`).join('') +
+      `<li class="rule-warn"><span>входить</span>в течение месяца после подачи</li>`;
   }
-  if (s) {
-    const cell = (v, lab, hint) => `<div class="sn" title="${esc(hint)}"><b>${v}</b><span>${esc(lab)}</span></div>`;
-    $('#set-numbers').innerHTML =
-      cell(fmtPct(s.spy), 'к S&P 500 в год', `t = ${s.spyT}; информационный коэффициент ${s.ir}`) +
-      cell(fmtPct(s.net), 'нетто после издержек', `оборот ${(s.turnover * 100).toFixed(0)}% в год, ${fmtPct(state.stats.roundTrip)} на круг`) +
-      cell(String(s.sharpe), 'коэффициент Шарпа', 'у индекса за тот же период — см. таблицу эталонов') +
-      cell(fmtPct(s.a), 'альфа к 3 факторам', `рынок, размер, моментум; t = ${s.t}`) +
-      (s.control ? cell(fmtPct(s.control.ex), 'сверх бумаг у максимума', `t = ${s.control.t}; столько добавляет сам факт покупки инсайдера`) : '') +
-      cell(String(s.n), 'бумаг в портфеле', `в среднем за ${s.mo} месяцев`);
-  }
+  if (!s) return;
+  $('#set-headline').innerHTML =
+    `<div class="figure-val ${cls(s.spy)}">${fmtPct(s.spy)}</div>` +
+    `<div class="figure-lab">к S&P 500 в год</div>` +
+    `<div class="figure-note">t = ${s.spyT} · после издержек ${fmtPct(s.net)}</div>`;
+  const ref = (state.stats.reference ?? []).find(r => r.key === 'spy');
+  const m = (v, lab, hint) => `<div class="hm" title="${esc(hint)}"><b>${v}</b><span>${esc(lab)}</span></div>`;
+  $('#set-numbers').innerHTML =
+    m(String(s.sharpe), `коэффициент Шарпа${ref ? ` · у индекса ${ref.sharpe}` : ''}`,
+      'Доходность сверх безрисковой на единицу волатильности. Выше, чем у индекса, — значит набор лучше не только по доходности, но и по риску.') +
+    m(fmtPct(s.a), 'альфа к трём факторам',
+      `Рынок, размер и моментум. t = ${s.t}. Моментум обязателен: набор отбирает бумаги у максимума и по построению сидит в победителях моментума.`) +
+    (s.control ? m(fmtPct(s.control.ex), 'сверх бумаг у максимума',
+      `t = ${s.control.t}. Контроль — ${s.control.name}, собранные тем же способом. Столько добавляет сам факт покупки инсайдера.`) : '') +
+    m(String(s.n), 'бумаг в портфеле', `В среднем за ${s.mo} месяцев наблюдений.`) +
+    m(pctPlain(s.cagr, 1), `среднегодовая доходность${ref ? ` · индекс ${pctPlain(ref.cagr, 1)}` : ''}`,
+      `Волатильность ${pctPlain(s.vol, 1)}, максимальная просадка ${pctPlain(s.dd, 1)}.`);
 }
 function setStatus(age, fresh) {
   if (age <= fresh * 0.7) return ['ok', 'свежий'];
@@ -222,36 +236,42 @@ function renderSet() {
   const fresh = state.stats?.setDef?.freshDays ?? 45;
   let rows = state.feed.filter(r => r.set === 1);
   if (setAge === 'fresh') rows = rows.filter(r => r.age <= fresh);
+  rows = sortRows(rows);
   $('#set-count').textContent = rows.length
     ? `${rows.length} ${setAge === 'fresh' ? 'действующих сигналов' : 'сигналов за 200 дней'}`
     : '';
-  const th = `<tr><th>Тикер</th><th>Компания</th><th>Подана</th>
-    <th class="num" title="Дней с подачи формы. Сигнал живёт около месяца">Возраст</th>
-    <th>Статус</th><th>Инсайдер</th><th>Роль</th>
-    <th class="num">Сумма</th><th class="num">Цена сделки</th><th class="num">Тек. цена</th>
-    <th class="num" title="Изменение с первого торгового дня после подачи">Изм.</th>
-    <th class="num" title="Насколько ниже 52-недельного максимума на дату сделки">До макс.</th>
-    <th class="num">Оборот</th>
+  // Колонок меньше, чем в ленте, и вторая строка в ячейке вместо отдельного столбца:
+  // это экран решения, а не исследования, и он должен читаться без прокрутки.
+  const th = `<tr>
+    <th>Бумага</th><th>Инсайдер</th>
+    <th class="num sortable" data-sort="age" title="Дней с подачи формы">Подана ⇅</th>
+    <th>Статус</th>
+    <th class="num sortable" data-sort="val">Сумма ⇅</th>
+    <th class="num">Цена сделки</th><th class="num">Сейчас</th>
+    <th class="num sortable" data-sort="chg" title="Изменение с первого торгового дня после подачи">Изм. ⇅</th>
+    <th class="num sortable" data-sort="dd" title="Насколько ниже 52-недельного максимума была цена на дату сделки">До макс. ⇅</th>
+    <th class="num" title="Медианный дневной долларовый оборот бумаги">Оборот</th>
     <th title="Ориентир выхода: три месяца от входа">Выход</th></tr>`;
   $('#set-table').innerHTML = th + (rows.length ? rows.map(r => {
-    const [cl2, lab] = setStatus(r.age, fresh);
-    return `<tr class="${cl2 === 'dead' ? 'row-dead' : ''}">
-      <td><a class="tick" href="#ticker/${encodeURIComponent(r.t)}">${esc(r.t)}</a></td>
-      <td title="${esc(r.name)}">${esc(trunc(r.name, 24))}</td>
-      <td>${esc(r.fdate)}</td>
-      <td class="num">${r.age}</td>
-      <td><span class="pill ${cl2 === 'ok' ? 'buy' : cl2 === 'warn' ? 'warn' : 'gray'}">${lab}</span></td>
-      <td title="${esc(r.who)}">${esc(trunc(r.who, 22))}</td>
-      <td>${esc(ROLE_LABEL[r.role] ?? r.role)}</td>
+    const [st, lab] = setStatus(r.age, fresh);
+    return `<tr class="${st === 'dead' ? 'row-dead' : ''}">
+      <td><a class="tick" href="#ticker/${encodeURIComponent(r.t)}">${esc(r.t)}</a>
+        <span class="sub2" title="${esc(r.name)}">${esc(trunc(r.name, 30))}</span></td>
+      <td>${esc(trunc(r.who, 24))}<span class="sub2">${esc(ROLE_LABEL[r.role] ?? r.role)}${r.title ? ' · ' + esc(trunc(r.title, 24)) : ''}</span></td>
+      <td class="num">${esc(fmtDate(r.fdate))}<span class="sub2">${r.age} дн. назад</span></td>
+      <td><span class="pill ${st === 'ok' ? 'buy' : st === 'warn' ? 'warn' : 'gray'}">${lab}</span></td>
       <td class="num">${fmtMoney(r.val)}</td>
       <td class="num">${fmtPrice(r.px)}</td>
       <td class="num">${fmtPrice(r.cur)}</td>
       <td class="num ${cls(r.chg)}">${fmtPct(r.chg)}</td>
       <td class="num ${cls(r.dd)}">${fmtPct(r.dd, 0)}</td>
       <td class="num">${fmtMoney(r.dv)}</td>
-      <td class="muted">${esc(r.exit ?? '—')}</td>
+      <td class="muted">${esc(fmtDate(r.exit))}</td>
     </tr>`;
-  }).join('') : '<tr><td colspan="14" class="muted">Действующих сигналов сейчас нет. Это нормально: набор даёт около восьми сигналов в месяц, и в отдельные месяцы их не бывает вовсе.</td></tr>');
+  }).join('') : `<tr><td colspan="11" class="empty">${setAge === 'fresh'
+      ? 'Действующих сигналов сейчас нет — и это нормально: набор даёт около восьми сигналов в месяц, а в отдельные месяцы не даёт ни одного. Нажмите «Все за 200 дней», чтобы увидеть недавние.'
+      : 'За последние 200 дней в набор не попало ни одной сделки.'}</td></tr>`);
+  bindSort('#set-table', renderSet);
 }
 
 // ---------- ЛЕНТА ----------
@@ -431,7 +451,8 @@ async function openTicker(t) {
   $('#tc-badges').innerHTML = [
     d.exchange ? `<span class="pill gray">${esc(d.exchange)}</span>` : '',
     d.bucket ? `<span class="pill gray" title="Прокси размера по дневному обороту">${esc(d.bucket)}</span>` : '',
-    d.sellRatio !== null ? `<span class="pill gray" title="Продаж на одну покупку у этого эмитента: показывает, где продажи — рутина, а где событие">продаж/покупок ${d.sellRatio}</span>` : '',
+    d.setBuys ? `<span class="pill buy" title="Покупок этого эмитента, попавших в рабочий набор">в наборе: ${d.setBuys}</span>` : '',
+    d.nSells ? `<span class="pill gray" title="Продаж инсайдеров за всю историю. Показано как контекст: предсказательной силы у продаж не нашлось — портфель проданных бумаг неотличим от сопоставимых">продаж: ${fmtInt(d.nSells)}</span>` : '',
     d.cat === 'unknown' ? '<span class="pill warn" title="Эмитента нет в текущем справочнике SEC — возможен делистинг или смена структуры">возможен делистинг</span>' : '',
   ].join(' ');
   $('#tc-asof').textContent = d.asOf ? `цены до ${d.asOf} · покупок прошло фильтры: ${d.okBuys}` : 'цены недоступны';
@@ -462,7 +483,7 @@ function renderTickerTrades() {
   const th = `<tr>
     <th>Сделка</th><th>Подача</th><th>Тип</th><th>Инсайдер</th><th>Роль</th>
     <th class="num">Акции</th><th class="num">Цена</th><th class="num">Сумма</th>
-    <th class="num">Δ поз.</th><th class="num">Остаток</th><th>Признаки</th><th class="num">Скор</th></tr>`;
+    <th class="num">Δ поз.</th><th class="num">Остаток</th><th>Признаки</th><th title="Сделка прошла все условия рабочего набора">Набор</th></tr>`;
   $('#tc-trades').innerHTML = th + rows.map(r => `<tr class="${r.drop ? 'dropped' : ''}">
     <td>${esc(r.tdate)}</td>
     <td>${esc(r.fdate)}${r.form === '4/A' ? ' <span class="pill gray">A</span>' : ''}</td>
@@ -493,10 +514,18 @@ const tCell = t => {
 };
 const numCell = (v, warn) => `<td class="num ${v === null || v === undefined ? 'muted' : (warn && v < 0 ? 'warn-n' : cls(v))}">${fmtPct(v)}</td>`;
 
+// Загрузка данных и разовая инициализация — разные вещи. Раньше обе жили в одном
+// `if (!state.stats)`, и после того как Скринер начал подтягивать stats.json первым,
+// инициализация Статистики не выполнялась вовсе: пояснение оставалось пустым, а
+// обработчики селекторов не навешивались.
+let statsInited = false;
 async function loadStats() {
   if (!state.stats) {
     try { state.stats = await fetchJson('stats.json'); }
     catch { $('#stats-table').innerHTML = '<tr><td>Бэктест ещё не собран.</td></tr>'; return; }
+  }
+  if (!statsInited) {
+    statsInited = true;
     const s = state.stats, m = s.method ?? {};
     $('#stats-note').innerHTML =
       `<b>Что здесь считается.</b> Не «сколько принесла средняя сделка», а <b>сколько принёс бы портфель</b>: ` +

@@ -98,8 +98,10 @@ input.rng[type=number] { -moz-appearance: textfield; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th {
   text-align: left; padding: 8px 10px; color: var(--ink-2); font-weight: 600;
-  border-bottom: 1px solid var(--border); white-space: nowrap; position: sticky; top: 0;
+  white-space: nowrap; position: sticky; top: 0; z-index: 2;
   background: var(--surface); cursor: default;
+  /* Граница тенью, а не border: у липкого заголовка обычная рамка уезжает при прокрутке */
+  box-shadow: inset 0 -1px 0 var(--border);
 }
 th.sortable { cursor: pointer; }
 th.sortable:hover { color: var(--ink); }
@@ -196,19 +198,95 @@ footer { padding: 14px 20px; border-top: 1px solid var(--border); }
   .badges { display: none; }
 }
 
-/* ---- Скринер рабочего набора ---- */
-.set-head { margin-bottom: 10px; }
-.set-head h2 { font-size: 18px; margin: 0 0 4px; }
-.set-numbers { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 4px; }
-/* Каждое число — отдельная плитка: набор один, и его характеристики должны читаться
-   с первого взгляда, а не выкапываться из таблицы */
-.set-numbers .sn {
-  background: var(--surface); border: 1px solid var(--grid); border-radius: 8px;
-  padding: 7px 12px; min-width: 128px; cursor: help;
+
+/* ================= Скринер: карточка рабочего набора =================
+   Один экран решения, поэтому иерархия жёсткая: сначала главное число, потом правило,
+   потом всё остальное. Плоский список из шести равнозначных чисел (как было) не давал
+   понять, на что смотреть в первую очередь. */
+.hero {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 16px 18px; margin-bottom: 16px; box-shadow: var(--shadow);
 }
-.set-numbers .sn b { display: block; font-size: 17px; line-height: 1.25; }
-.set-numbers .sn span { font-size: 11.5px; color: var(--ink-2); }
+.hero-top { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+.hero-title { flex: 1 1 380px; min-width: 280px; }
+.hero-title h2 { font-size: 20px; margin: 0 0 4px; }
+.hero-title p { margin: 0; color: var(--ink-2); font-size: 13px; max-width: 62ch; }
+.hero-title a { color: var(--accent); }
+/* Главное число — единственный крупный элемент на экране */
+.hero-figure { text-align: right; margin-left: auto; }
+.figure-val { font-size: 34px; font-weight: 700; line-height: 1.05; font-variant-numeric: tabular-nums; }
+.figure-val.pos { color: var(--c-buy); }
+.figure-val.neg { color: var(--c-sell); }
+.figure-lab { font-size: 13px; color: var(--ink); font-weight: 600; }
+.figure-note { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+
+/* Правило набора: четыре условия и предупреждение о сроке входа */
+.rule-chips { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 14px 0 0; padding: 0; }
+.rule-chips li {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 4px 10px; font-size: 12.5px; color: var(--ink);
+}
+.rule-chips li span { color: var(--ink-3); margin-right: 6px; }
+/* Срок входа — не условие отбора, а требование к исполнению: выделен отдельно,
+   потому что именно он чаще всего нарушается */
+.rule-chips li.rule-warn { background: var(--warn-bg); border-color: transparent; }
+
+/* Вторичные метрики: ровная строка без рамок — рамки конкурировали бы с карточкой */
+.hero-metrics {
+  display: flex; flex-wrap: wrap; gap: 0 28px;
+  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--grid);
+}
+.hero-metrics .hm { cursor: help; padding: 2px 0; }
+.hero-metrics .hm b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; }
+.hero-metrics .hm span { font-size: 11.5px; color: var(--ink-2); }
+
+/* Таблица-карточки: вторая строка в ячейке вместо отдельной колонки */
+.sub2 { display: block; font-size: 11.5px; color: var(--ink-2); line-height: 1.3; }
+table.cards td { vertical-align: top; }
+table.cards td.num .sub2 { color: var(--ink-3); }
 /* Протухший сигнал не прячем, а гасим: видеть, что он был, полезно */
-tr.row-dead td { opacity: 0.5; }
+tr.row-dead td { opacity: .45; }
+td.empty {
+  color: var(--ink-2); padding: 18px 12px; line-height: 1.55;
+  white-space: normal; max-width: 72ch;
+}
+
+/* Статистика: эталонные строки бледнее, рабочий набор подсвечен */
 tr.row-strong td { background: var(--good-bg); }
 tr.muted-row td { color: var(--ink-2); }
+/* Заголовки разделов статистики: без них экран читался как одна длинная простыня */
+#tab-stats h3 {
+  font-size: 16px; margin: 26px 0 4px; padding-top: 14px;
+  border-top: 1px solid var(--grid);
+}
+#tab-stats h3:first-of-type { border-top: none; margin-top: 8px; padding-top: 0; }
+#set-proof h4 { font-size: 13px; margin: 16px 0 4px; color: var(--ink); }
+#set-proof .table-wrap { margin-bottom: 4px; }
+
+/* Узкий экран: карточка складывается в колонку, число уходит влево под заголовок.
+   Метрики — в две колонки: в один столбец карточка занимала бы три четверти экрана,
+   и до таблицы сигналов приходилось долистывать. */
+@media (max-width: 720px) {
+  main { padding: 12px; }
+  .hero { padding: 14px; }
+  .hero-figure { text-align: left; margin-left: 0; }
+  .figure-val { font-size: 28px; }
+  .hero-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+  .hero-metrics .hm b { font-size: 15px; }
+  /* Шапка на телефоне съедала треть первого экрана */
+  .topbar { padding: 10px 12px 8px; gap: 10px; }
+  .brand .sub { display: none; }
+  .badges { gap: 6px; }
+  .badge { font-size: 11px; padding: 2px 8px; }
+  .tabs { padding: 0 8px; }
+  .tabs a { padding: 8px 11px; font-size: 13px; }
+  #tab-stats h3 { margin-top: 20px; }
+  /* На телефоне карточка не должна съедать весь первый экран: убираем пояснение,
+     сжимаем условия и прячем метрику, дублирующую главное число */
+  .wide-only { display: none; }
+  .rule-chips { gap: 4px; margin-top: 10px; }
+  .rule-chips li { padding: 3px 8px; font-size: 12px; }
+  .hero-metrics { margin-top: 10px; padding-top: 10px; }
+  .hero-metrics .hm:nth-child(n+5) { display: none; }
+}
+

@@ -14,7 +14,7 @@
     <span class="brand-icon">📡</span>
     <div>
       <h1>Инсайдерский радар</h1>
-      <div class="sub">SEC EDGAR Form 4 · NYSE + Nasdaq · только информативные покупки</div>
+      <div class="sub">SEC EDGAR Form 4 · NYSE + Nasdaq · покупки инсайдеров на открытом рынке</div>
     </div>
   </div>
   <div class="badges" id="meta-badges" aria-live="polite"></div>
@@ -31,25 +31,36 @@
 <main>
   <!-- СКРИНЕР: рабочий набор -->
   <section id="tab-screener" class="tab-panel">
-    <div class="set-head">
-      <h2>Рабочий набор</h2>
-      <p id="set-rule" class="hint"></p>
-      <div id="set-numbers" class="set-numbers"></div>
+    <!-- Карточка набора: одно главное число, правило условиями и вторичные метрики.
+         Всё содержимое приходит из stats.json — страница не хранит ни одной цифры. -->
+    <div class="hero" id="set-hero">
+      <div class="hero-top">
+        <div class="hero-title">
+          <h2>Рабочий набор</h2>
+          <p>Единственная конфигурация, у которой превышение над индексом пережило проверку.<span
+            class="wide-only"> Полный разбор с доказательствами — на вкладке <a href="#stats">Статистика</a>.</span></p>
+        </div>
+        <div class="hero-figure" id="set-headline"></div>
+      </div>
+      <ul class="rule-chips" id="set-rule"></ul>
+      <div class="hero-metrics" id="set-numbers"></div>
     </div>
     <div class="filters">
       <div class="chip-group" id="set-age">
-        <button class="chip active" data-age="fresh">Свежие сигналы</button>
+        <button class="chip active" data-age="fresh">Действующие</button>
         <button class="chip" data-age="all">Все за 200 дней</button>
       </div>
       <span class="muted" id="set-count"></span>
     </div>
-    <div class="table-wrap"><table id="set-table"></table></div>
+    <div class="table-wrap"><table id="set-table" class="cards"></table></div>
   </section>
 
   <!-- ЛЕНТА -->
   <section id="tab-feed" class="tab-panel">
-    <p class="hint">Все покупки за 200 дней, включая отсеянные. Это окно наблюдения, а не
-      список к покупке: торговый набор — на вкладке <a href="#screener">Скринер</a>.</p>
+    <p class="hint">Все покупки инсайдеров за 200 дней, включая отсеянные фильтрами — с указанием
+      причины отсева. Это окно наблюдения и проверки, а не список к покупке: торговый набор
+      живёт на вкладке <a href="#screener">Скринер</a>. Колонка «Набор» помечает сделки,
+      прошедшие все его условия.</p>
     <div class="filters">
       <input type="search" id="f-search" placeholder="Тикер, компания, инсайдер…" autocomplete="off">
       <div class="chip-group" id="f-roles" title="Роль инсайдера">
@@ -59,13 +70,13 @@
         <button class="chip" data-role="D">Директор</button>
         <button class="chip" data-role="T">10%</button>
       </div>
-      <span class="rng-group" title="Сумма сделки в долларах. Отдельным признаком в скор не входит: штраф за крупные сделки был в скоре v3 и снят при пересборке — знак оказался неустойчивым. Мелкие суммы шумят.">
+      <span class="rng-group" title="Сумма сделки в долларах. Сама по себе почти ничего не решает, но ВНУТРИ рабочего набора важна: у покупок от $50 тыс. превышение над индексом заметно выше, чем у любых. Порог набора — $50 тыс.">
         <span class="rng-lbl">Сумма $</span>
-        <input type="number" class="rng" id="f-val-min" placeholder="25000" min="0" step="1000">
+        <input type="number" class="rng" id="f-val-min" placeholder="50000" min="0" step="1000">
         <span class="rng-dash">–</span>
         <input type="number" class="rng" id="f-val-max" placeholder="500000" min="0" step="1000">
       </span>
-      <span class="rng-group" title="Прирост позиции инсайдера в процентах. Предсказательной силы нет: докупка менее 5% даёт столько же, сколько 20% и больше. Показан как описание сделки. 9.99 означает позицию, открытую с нуля.">
+      <span class="rng-group" title="Прирост позиции инсайдера в процентах. Предсказательной силы нет: докупка менее 5% даёт столько же, сколько 20% и больше — поэтому в набор не входит и показана как описание сделки. Значение «новая» означает позицию, открытую с нуля.">
         <span class="rng-lbl">Δ поз. %</span>
         <input type="number" class="rng short" id="f-down-min" placeholder="5" step="1">
         <span class="rng-dash">–</span>
@@ -120,7 +131,9 @@
       </details>
       <div class="table-wrap"><table id="tc-trades"></table></div>
     </div>
-    <p id="ticker-empty" class="hint">Выберите тикер, чтобы увидеть график с отметками сделок инсайдеров и полную историю Form 4 — покупки и продажи в одной таблице.</p>
+    <p id="ticker-empty" class="hint">Выберите тикер, чтобы увидеть график с отметками сделок инсайдеров
+      и полную историю Form 4 — покупки и продажи в одной таблице. Продажи показаны как контекст:
+      предсказательной силы у них нет (портфель проданных бумаг неотличим от сопоставимых).</p>
   </section>
 
   <!-- СТАТИСТИКА -->
@@ -220,7 +233,8 @@
 
 <footer class="muted">
   Данные: SEC EDGAR (квартальные датасеты Forms 3/4/5 + daily-index) · Цены: Yahoo Finance (скорректированные) ·
-  <a href="https://github.com/ML371KL/temp-zero-inode-840/blob/main/docs/ПРОЕКТ.md">методология</a> · Не инвестиционная рекомендация
+  <a href="https://github.com/ML371KL/temp-zero-inode-840/blob/main/docs/%D0%A7%D0%A2%D0%9E-%D0%A0%D0%90%D0%91%D0%9E%D0%A2%D0%90%D0%95%D0%A2.md">что работает и что нет</a> ·
+  <a href="https://github.com/ML371KL/temp-zero-inode-840/blob/main/README.md">методология</a> · Не инвестиционная рекомендация
 </footer>
 
 <script type="module" src="app.js"></script>

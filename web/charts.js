@@ -204,13 +204,27 @@ export function fmtPrice(v) {
   return '$' + (v >= 1000 ? v.toLocaleString('en-US', { maximumFractionDigits: 0 }) : v.toFixed(2));
 }
 export function fmtInt(v) { return v === null || v === undefined ? '—' : Math.round(v).toLocaleString('en-US'); }
+// Круглые суммы печатаются без хвоста нулей: «$3 млн» вместо «$3.00 млн». Порог набора
+// и оборот бумаги стоят рядом в одном предложении, и лишние нули там читаются как точность,
+// которой нет.
+// Разделитель — точка: цены и проценты на панели уже с точкой, смешивать нельзя
+const trim = n => String(Number(n.toFixed(2)));
 export function fmtMoney(v) {
   if (v === null || v === undefined) return '—';
   const a = Math.abs(v);
-  if (a >= 1e9) return '$' + (v / 1e9).toFixed(2) + ' млрд';
-  if (a >= 1e6) return '$' + (v / 1e6).toFixed(2) + ' млн';
+  if (a >= 1e9) return '$' + trim(v / 1e9) + ' млрд';
+  if (a >= 1e6) return '$' + trim(v / 1e6) + ' млн';
   if (a >= 1e3) return '$' + (v / 1e3).toFixed(0) + ' тыс.';
   return '$' + Math.round(v);
+}
+// Короткая дата для таблиц: «3 авг» вместо «2026-08-03». Год добавляется, только если он
+// не текущий — иначе колонка растёт на четыре знака ради очевидного.
+const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+export function fmtDate(iso) {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return '—';
+  const [y, m, d] = iso.split('-');
+  const cur = String(new Date().getUTCFullYear());
+  return `${Number(d)} ${MONTHS_SHORT[Number(m) - 1]}${y === cur ? '' : ' ' + y}`;
 }
 export function fmtPct(v, digits = 1) {
   if (v === null || v === undefined || !Number.isFinite(v)) return '—';
