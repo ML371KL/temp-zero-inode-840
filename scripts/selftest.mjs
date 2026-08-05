@@ -10,6 +10,7 @@ import { zipCreate, zipExtract } from './lib/zip.mjs';
 import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, SHARD_VERSION } from './lib/edgar.mjs';
 import { mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo, trimFrozenTail } from './lib/prices.mjs';
 import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
+import { Panel, monthlyFromDaily, portfolioSeries, twoFactorAlpha, neweyWestT } from './lib/portfolio.mjs';
 import { scoreBuy, topRole, dOwnOf, freshness } from './lib/scoring.mjs';
 import { applyGates, isPlanned, isNonCommon, isImplausible } from './lib/gates.mjs';
 import { isEntityName, isPersonOwner, buildOwnerGroups, countIndependentPersons, isFundOnly } from './lib/entity.mjs';
@@ -321,6 +322,61 @@ ok('trimFrozenTail: достроенный хвост делистнутой б�
   assert.equal(trimFrozenTail(alive).trimmed, 0);
   // короткий ряд не трогаем вовсе
   assert.equal(trimFrozenTail(real.slice(0, 10)).trimmed, 0);
+});
+
+// ---------- календарно-временной портфель (главная метрика Статистики) ----------
+ok('portfolio: месячная панель берёт закрытие последнего дня и медианный оборот', () => {
+  const daily = [
+    ['2020-01-02', 10, 10, 100], ['2020-01-15', 11, 11, 300], ['2020-01-31', 12, 12, 200],
+    ['2020-02-03', 13, 13, 100], ['2020-02-28', 14, 14, 100],
+  ];
+  const m = monthlyFromDaily(daily);
+  assert.equal(m.px['2020-01'], 12, 'закрытие месяца — последний торговый день');
+  assert.equal(m.px['2020-02'], 14);
+  // обороты 10*100=1000, 11*300=3300, 12*200=2400 -> медиана 2400
+  assert.equal(m.dv['2020-01'], 2400, 'оборот — медианный дневной долларовый, не средний и не максимум');
+});
+
+ok('portfolio: равный вес ПО БУМАГАМ, окно удержания, порог ликвидности', () => {
+  const p = new Panel();
+  const mk = (a, b, c) => ({ px: { '2020-01': a, '2020-02': b, '2020-03': c }, dv: { '2020-01': 1e7, '2020-02': 1e7, '2020-03': 1e7 } });
+  p.add('AAA', mk(100, 110, 121));   // +10% каждый месяц
+  p.add('BBB', mk(100, 90, 81));     // -10% каждый месяц
+  p.add('THIN', { px: { '2020-01': 100, '2020-02': 200, '2020-03': 400 }, dv: { '2020-01': 1e5, '2020-02': 1e5, '2020-03': 1e5 } });
+  const sig = new Map([['2020-01', new Set(['AAA', 'BBB', 'THIN'])]]);
+  const ser = portfolioSeries(p, sig, { H: 12, minDv: 1e6, minNames: 2 });
+  assert.equal(ser.length, 2, 'месяцы удержания — февраль и март');
+  assert.equal(ser[0].n, 2, 'неликвидная бумага в портфель не входит');
+  assert.ok(Math.abs(ser[0].r - 0) < 1e-12, '+10% и -10% дают ноль при равном весе');
+  // одна и та же бумага с двумя подачами не должна весить вдвое
+  const sig2 = new Map([['2020-01', new Set(['AAA', 'BBB'])]]);
+  const ser2 = portfolioSeries(p, sig2, { H: 12, minDv: 1e6, minNames: 2 });
+  assert.deepEqual(ser2.map(x => x.n), ser.map(x => x.n));
+  // окно удержания короче — бумага выпадает из портфеля
+  const ser3 = portfolioSeries(p, sig, { H: 1, minDv: 1e6, minNames: 2 });
+  assert.equal(ser3.length, 1, 'при H=1 держим только следующий месяц');
+});
+
+ok('portfolio: альфа к двум факторам и поправка Ньюи–Уэста', () => {
+  // синтетика с известным ответом: y = 0.01 + 1.2*рынок + 0.5*размер
+  const months = [], spy = new Map(), iwm = new Map(), rows = [];
+  for (let i = 0; i < 60; i++) {
+    const m = `20${20 + Math.floor(i / 12)}-${String(i % 12 + 1).padStart(2, '0')}`;
+    const mk = 0.01 * Math.sin(i), sz = 0.005 * Math.cos(i);
+    months.push(m); spy.set(m, mk); iwm.set(m, mk + sz);
+    rows.push({ m, n: 50, r: 0.01 + 1.2 * mk + 0.5 * sz });
+  }
+  const a = twoFactorAlpha(rows, spy, iwm);
+  assert.ok(Math.abs(a.alpha - 0.01) < 1e-9, `альфа ${a.alpha}`);
+  assert.ok(Math.abs(a.beta - 1.2) < 1e-9, `бета ${a.beta}`);
+  assert.ok(Math.abs(a.size - 0.5) < 1e-9, `наклон размера ${a.size}`);
+  // ряд без шума -> остаток нулевой, t не определяется как конечное большое число
+  assert.ok(!Number.isFinite(a.t) || Math.abs(a.t) > 1e6, 'на безошибочной синтетике t вырождается');
+  // поправка НЬЮИ–УЭСТА должна СНИЖАТЬ t на автокоррелированном ряде
+  const iid = Array.from({ length: 120 }, (_, i) => (i % 2 ? 0.02 : -0.01));
+  const auto = Array.from({ length: 120 }, (_, i) => (i % 24 < 12 ? 0.02 : -0.01));
+  const tIid = Math.abs(neweyWestT(iid).t), tAuto = Math.abs(neweyWestT(auto).t);
+  assert.ok(tAuto < tIid, `на автокоррелированном ряде t должно быть меньше: ${tAuto} vs ${tIid}`);
 });
 
 // ---------- реестр биржевых символов ----------

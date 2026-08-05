@@ -191,6 +191,15 @@ table.mini th:first-child, table.mini td:first-child { text-align: left; }
 table.mini th { color: var(--ink-2); font-weight: 600; }
 /* Подсветка малой выборки: число, которому нельзя доверять как остальным */
 table.mini td.warn-n { color: var(--c-sell); font-weight: 600; }
+/* Предупреждение поверх блока с выводами прежней метрики: он остаётся на экране,
+   но читатель должен видеть, что числа в нём получены другим способом счёта */
+.warn-note {
+  background: var(--warn-bg);
+  border-left: 3px solid var(--c-sell);
+  padding: .6rem .8rem;
+  border-radius: 4px;
+  margin: 0 0 .8rem;
+}
 #howto { border-left: 3px solid var(--c-buy); padding-left: 12px; }
 #howto > summary { color: var(--c-buy); }
 footer { padding: 14px 20px; border-top: 1px solid var(--border); }

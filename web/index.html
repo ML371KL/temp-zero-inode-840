@@ -195,12 +195,29 @@
         <option value="year">По годам</option>
         <option value="all">Все прошедшие фильтры</option>
       </select>
-      <label class="check"><input type="checkbox" id="s-spy"> сравнивать с SPY вместо size-бенчмарка</label>
+      <select id="s-hold">
+        <option value="12">держать 12 месяцев</option>
+        <option value="6">держать 6 месяцев</option>
+        <option value="3">держать 3 месяца</option>
+      </select>
     </div>
     <div class="table-wrap"><table id="stats-table"></table></div>
+    <p class="hint" id="stats-legend"></p>
+
+    <details class="method" id="stats-events">
+      <summary>Средние по сделкам — прежняя метрика, оставлена как справка</summary>
+      <p id="stats-events-note"></p>
+      <div class="table-wrap"><table id="stats-event-table"></table></div>
+    </details>
 
     <details class="method" id="howto">
       <summary>На что ориентироваться: порядок приоритетов и практические поправки</summary>
+      <p class="warn-note"><b>Читайте вместе с таблицей выше.</b> Все числа этого блока получены
+        прежней метрикой — средним <i>по сделкам</i>. Она смещена вверх: на случайном отборе
+        бумаг той же ликвидности в те же даты она показывает около +2.5% там, где сигнала нет
+        по построению. Портфельные оценки тех же наборов заметно скромнее и в большинстве
+        случаев от нуля неотличимы. Блок оставлен как история проверок и будет пересобран
+        на новой метрике.</p>
       <p>Ниже — выжимка из проверки на расщеплённой выборке (обучение на подачах 2016–2021,
         подтверждение на 2022+). Полный разбор: <a href="https://github.com/ML371KL/temp-zero-inode-840/blob/main/docs/ЛУЧШИЕ-ФИЛЬТРЫ.md" target="_blank" rel="noopener">ЛУЧШИЕ-ФИЛЬТРЫ.md</a>.</p>
 

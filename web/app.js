@@ -609,39 +609,93 @@ async function loadStats() {
   if (!state.stats) {
     try { state.stats = await fetchJson('stats.json'); }
     catch { $('#stats-table').innerHTML = '<tr><td>Бэктест ещё не собран.</td></tr>'; return; }
+    const s = state.stats, m = s.method ?? {};
     $('#stats-note').innerHTML =
-      `Форвардные избыточные доходности после покупок инсайдеров с 2016 года: всего ${fmtInt(state.stats.n)} покупок, ` +
-      `из них ${fmtInt(state.stats.nOk)} прошли фильтры информативности. Вход — закрытие первого торгового дня после подачи Form 4. ` +
-      `Бенчмарк ${state.stats.iwm ? 'подобран по размеру (IWM для small/micro, SPY для mid/large)' : '— SPY'}.`;
+      `<b>Что здесь считается.</b> Не «сколько принесла средняя сделка», а <b>сколько принёс бы портфель</b>: ` +
+      `на конец каждого месяца берутся все бумаги с подходящей покупкой за последние N месяцев, ` +
+      `равный вес <b>по бумагам</b> (не по числу подач), держим месяц, повторяем с 2016 года. ` +
+      `Учитываются только имена с дневным оборотом от ${fmtMoney(m.minDv ?? 3e6)} на момент покупки — ` +
+      `остальное не торгуется в принципе. В расчёте ${fmtInt(s.n)} покупок, по которым есть котировки, ` +
+      `из них ${fmtInt(s.nOk)} прошли фильтры информативности.` +
+      (s.placebo ? `<br><b>Шумовой пол.</b> Если брать случайные бумаги той же ликвидности в те же даты, ` +
+        `прежняя метрика «среднее по сделкам» показывает ${fmtPct(s.placebo.med)} ` +
+        `(коридор ${fmtPct(s.placebo.lo)}…${fmtPct(s.placebo.hi)}) — <b>без всякого сигнала</b>. ` +
+        `Поэтому она и вынесена вниз как справочная.` : '');
     $('#s-dim').addEventListener('change', renderStats);
-    $('#s-spy').addEventListener('change', renderStats);
+    $('#s-hold').addEventListener('change', renderStats);
   }
   renderStats();
 }
 const GROUP_LABEL = { F: 'CFO', C: 'CEO/През', O: 'Офицер', D: 'Директор', T: '10%-владелец', X: 'Прочее' };
+const tCell = t => {
+  if (t === null || t === undefined) return '<td class="num muted">—</td>';
+  // Значимость показываем явно: без неё разница между ячейками выглядит осмысленной,
+  // хотя на подставных данных |t|>2 не встречается вовсе.
+  const strong = Math.abs(t) >= 2;
+  return `<td class="num ${strong ? cls(t) : 'muted'}" title="${strong ? 'отличие от нуля устойчиво' : 'от нуля неотличимо'}">${t.toFixed(2)}</td>`;
+};
 function renderStats() {
   const dim = $('#s-dim').value;
-  const useSpy = $('#s-spy').checked;
-  const agg = state.stats.agg[dim] ?? {};
+  const H = $('#s-hold').value;
+  const port = state.stats.portfolio?.[dim];
+  const m = state.stats.method ?? {};
+  if (!port) { $('#stats-table').innerHTML = '<tr><td>Портфельная метрика ещё не собрана.</td></tr>'; return; }
+  let html = '<tr><th>Группа</th>' +
+    '<th class="num" title="средний состав портфеля, бумаг в месяц">Бумаг</th>' +
+    '<th class="num" title="среднегодовая доходность самого портфеля">CAGR</th>' +
+    '<th class="num" title="годовая альфа к двум факторам: рынок и наклон размера">Альфа</th>' +
+    '<th class="num" title="t-статистика альфы с поправкой Ньюи–Уэста; |t|≥2 = устойчиво">t</th>' +
+    `<th class="num" title="альфа на первой половине выборки">до ${(m.split ?? '2021-01').slice(0, 4)}</th>` +
+    `<th class="num" title="альфа на второй половине: расхождение половин — мера доверия">с ${(m.split ?? '2021-01').slice(0, 4)}</th>` +
+    '<th class="num" title="превышение над равновзвешенной вселенной той же ликвидности">vs вселенной</th>' +
+    '<th class="num">t</th>' +
+    '<th class="num" title="рыночная бета">β</th>' +
+    '<th class="num" title="наклон на размер: 1 = ведёт себя как малая капитализация">размер</th></tr>';
+  const entries = Object.entries(port)
+    .map(([g, c]) => [g, c['h' + H]])
+    .filter(([, c]) => c)
+    .sort((a, b) => (b[1].n ?? 0) - (a[1].n ?? 0));
+  if (!entries.length) html += '<tr><td colspan="11" class="muted">На этом горизонте ни одна группа не набирает трёх лет истории.</td></tr>';
+  for (const [g, c] of entries) {
+    html += `<tr${c.thin ? ' class="dropped"' : ''}><td>${esc(GROUP_LABEL[g] ?? g)}${c.thin ? ' <span class="pill warn" title="средний состав меньше десяти бумаг: числа неустойчивы по построению">тонкая</span>' : ''}</td>` +
+      `<td class="num muted">${fmtInt(c.n)}</td>` +
+      `<td class="num">${fmtPct(c.cagr)}</td>` +
+      `<td class="num ${cls(c.a)}">${fmtPct(c.a)}</td>` + tCell(c.t) +
+      `<td class="num muted">${fmtPct(c.aT)}</td><td class="num muted">${fmtPct(c.aV)}</td>` +
+      `<td class="num ${cls(c.u)}">${fmtPct(c.u)}</td>` + tCell(c.ut) +
+      `<td class="num muted">${c.beta ?? '—'}</td><td class="num muted">${c.size ?? '—'}</td></tr>`;
+  }
+  $('#stats-table').innerHTML = html;
+  $('#stats-legend').innerHTML =
+    `Альфа — годовая, после вычета рыночной беты и наклона на размер: без второго фактора микрокапный ` +
+    `портфель показывал бы «мастерство» там, где это просто малая капитализация. ` +
+    `<b>Две колонки по половинам выборки важнее одной общей цифры</b>: если они расходятся на порядок, ` +
+    `общая оценка ничего не предсказывает. Порог значимости |t|≥2; на подставных данных такое не встречается ни разу. ` +
+    `Ячейки со средним составом меньше ${m.thin ?? 10} бумаг помечены как тонкие.`;
+  renderEventStats(dim);
+}
+// Прежняя метрика: оставлена, но понижена в статусе и снабжена честной подписью
+function renderEventStats(dim) {
+  const agg = state.stats.agg?.[dim] ?? {};
   const hs = state.stats.horizons;
-  let html = `<tr><th>Группа</th><th class="num">Покупок</th>` +
-    hs.map(h => `<th class="num" colspan="4">${h} мес</th>`).join('') + '</tr>';
-  html += '<tr><th></th><th></th>' + hs.map(() =>
-    `<th class="num" title="закрытых окон">N</th>` +
-    `<th class="num" title="медианная избыточная доходность">мед.</th>` +
-    `<th class="num" title="доля окон с положительным результатом">&gt;0</th>` +
-    `<th class="num" title="медиана с учётом делистнутых / их число">с делист.</th>`).join('') + '</tr>';
-  const entries = Object.entries(agg).sort((a, b) => (b[1].total ?? 0) - (a[1].total ?? 0));
-  for (const [g, cell] of entries) {
+  const p = state.stats.placebo;
+  $('#stats-events-note').innerHTML =
+    `Среднее и медиана избыточной доходности <b>по сделкам</b>. Отвечает на другой вопрос, чем таблица выше: ` +
+    `имя с восемью подачами весит в восемь раз больше одного, окна перекрываются, ошибки нет. ` +
+    (p ? `На случайном отборе той же ликвидности эта метрика даёт ${fmtPct(p.med)}, поэтому сравнивать её надо не с нулём, а с этим уровнем. ` : '') +
+    `Сохранена для сопоставимости с прежними разборами.`;
+  let html = '<tr><th>Группа</th><th class="num">Покупок</th>' +
+    hs.map(h => `<th class="num" colspan="3">${h} мес</th>`).join('') + '</tr>' +
+    '<tr><th></th><th></th>' + hs.map(() =>
+      '<th class="num" title="закрытых окон">N</th><th class="num" title="среднее избыточное">сред.</th>' +
+      '<th class="num" title="медиана">мед.</th>').join('') + '</tr>';
+  for (const [g, cell] of Object.entries(agg).sort((a, b) => (b[1].total ?? 0) - (a[1].total ?? 0))) {
     html += `<tr><td>${esc(GROUP_LABEL[g] ?? g)}</td><td class="num">${fmtInt(cell.total)}</td>` +
       hs.map(h => {
         const c = cell['h' + h] ?? {};
-        const med = useSpy ? c.medSpy : c.med;
-        return `<td class="num muted">${fmtInt(c.n)}</td>` +
-          `<td class="num ${cls(med)}">${fmtPct(med)}</td>` +
-          `<td class="num">${c.pos === null || c.pos === undefined ? '—' : Math.round(c.pos * 100) + '%'}</td>` +
-          `<td class="num ${cls(c.medD)}">${fmtPct(c.medD)}<span class="muted">/${c.nd ?? 0}</span></td>`;
+        return `<td class="num muted">${fmtInt(c.n)}</td><td class="num ${cls(c.mean)}">${fmtPct(c.mean)}</td>` +
+          `<td class="num ${cls(c.med)}">${fmtPct(c.med)}</td>`;
       }).join('') + '</tr>';
   }
-  $('#stats-table').innerHTML = html;
+  $('#stats-event-table').innerHTML = html;
 }

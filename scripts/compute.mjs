@@ -9,6 +9,10 @@
 import { readJson, writeJson, readJsonGz, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
 import { readPriceCache, nominalFactor, readStats } from './lib/prices.mjs';
 import { loadSymbolRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
+import {
+  Panel, monthlyFromDaily, portfolioSeries, universeSeries,
+  twoFactorAlpha, pathStats, neweyWestT, annualize,
+} from './lib/portfolio.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
 import { scoreBuy, topRole, dOwnOf, freshness } from './lib/scoring.mjs';
 import { applyGates, isPlanned, DROP_LABELS } from './lib/gates.mjs';
@@ -202,6 +206,11 @@ const noPriceTickers = new Set(), pricedTickers = new Set();
 const unitsMismatch = new Set();
 // Счётчики честности ценового слоя (уходят в meta.json и на экран Статистики).
 const quality = { reassigned: 0, reassignedTickers: new Set(), noEntry: 0, unknownSymbol: 0 };
+// Месячная панель для календарно-временного портфеля (lib/portfolio.mjs). Собирается
+// попутно, в том же проходе по ценам: второй проход стоил бы ещё одного чтения всего кэша.
+const panel = new Panel();
+panel.add('SPY', monthlyFromDaily(spy));
+if (iwm?.length) panel.add('IWM', monthlyFromDaily(iwm));
 for (const [t, rows] of byTicker) {
   const s = series(t);
   const n = s?.length ?? 0;
@@ -210,6 +219,7 @@ for (const [t, rows] of byTicker) {
   // потому что ему передавался null вместо реальной длины истории. Именно так участие
   // в IPO попадало в сигнал.
   const has = n > 0;
+  if (has) panel.add(t, monthlyFromDaily(s));
   if (n > 100) pricedTickers.add(t); else noPriceTickers.add(t);
   const cur = has ? s[s.length - 1][1] : null;
   const lastAdj = has ? s[s.length - 1][2] : null;
@@ -562,8 +572,120 @@ function aggregate(rows) {
   }
   return out;
 }
+// ---------- Календарно-временной портфель: ГЛАВНАЯ метрика Статистики ----------
+// Обоснование замены и цифры шумового пола — в шапке lib/portfolio.mjs.
+const PORT_MIN_DV = 3e6;      // ниже этого оборота портфель неторгуем, а сравнение бессмысленно
+const PORT_HOLD = [3, 6, 12]; // месяцев удержания
+const PORT_SPLIT = '2021-01'; // граница половин: расхождение оценки видно прямо на экране
+const PORT_MIN_MONTHS = 36;   // меньше трёх лет — не оценка, а пересказ пары кварталов
+const PORT_THIN = 10;         // средний состав ниже этого: ячейка помечается как тонкая
+const retMap = t => {
+  const m = new Map();
+  for (const mm of panel.months) { const r = panel.ret(t, mm); if (r !== null) m.set(mm, r); }
+  return m;
+};
+const spyRet = retMap('SPY');
+const iwmRet = iwm?.length ? retMap('IWM') : spyRet;
+const univRet = universeSeries(panel, { minDv: PORT_MIN_DV });
+
+function portfolioCell(rows, H) {
+  const byM = new Map();
+  for (const r of rows) {
+    const m = r.fdate.slice(0, 7);
+    (byM.get(m) ?? byM.set(m, new Set()).get(m)).add(r.t);
+  }
+  const ser = portfolioSeries(panel, byM, { H, minDv: PORT_MIN_DV });
+  // Три года — минимум, на котором альфа вообще имеет смысл; ниже это пересказ пары
+  // удачных кварталов. Ячейки с малым составом не прячем, а помечаем: пусть видно, что
+  // «+46.8 на train и −46.7 на valid» получены на семи бумагах.
+  if (ser.length < PORT_MIN_MONTHS) return null;
+  const a = twoFactorAlpha(ser, spyRet, iwmRet);
+  const p = pathStats(ser);
+  // Превышение над равновзвешенной вселенной той же ликвидности: «а если брать всё подряд»
+  const ex = ser.filter(x => univRet.has(x.m)).map(x => x.r - univRet.get(x.m));
+  const u = neweyWestT(ex);
+  const half = w => {
+    const s = ser.filter(w);
+    const h = s.length >= 24 ? twoFactorAlpha(s, spyRet, iwmRet) : null;
+    return h ? rnd(annualize(h.alpha)) : null;
+  };
+  return {
+    n: p.avgN, mo: ser.length, thin: p.avgN < PORT_THIN ? 1 : 0,
+    cagr: rnd(p.cagr), vol: rnd(p.vol), dd: rnd(p.dd),
+    a: a ? rnd(annualize(a.alpha)) : null,
+    t: a?.t !== null && a?.t !== undefined ? rnd(a.t, 2) : null,
+    beta: a ? rnd(a.beta, 2) : null, size: a ? rnd(a.size, 2) : null,
+    aT: half(x => x.m < PORT_SPLIT), aV: half(x => x.m >= PORT_SPLIT),
+    u: u.mean !== null ? rnd(annualize(u.mean)) : null,
+    ut: u.t !== null && u.t !== undefined ? rnd(u.t, 2) : null,
+  };
+}
+function portfolioAggregate(rows) {
+  const out = {};
+  for (const [dim, fn] of Object.entries(DIMS)) {
+    const src = ALL_ROWS_DIMS.has(dim) ? rows : rows.filter(r => r.gate === 'ok');
+    const groups = new Map();
+    for (const r of src) (groups.get(fn(r)) ?? groups.set(fn(r), []).get(fn(r))).push(r);
+    out[dim] = {};
+    for (const [g, rs] of [...groups.entries()].sort()) {
+      const cell = {};
+      for (const H of PORT_HOLD) cell['h' + H] = portfolioCell(rs, H);
+      if (cell.h12 || cell.h6 || cell.h3) out[dim][g] = cell;
+    }
+  }
+  return out;
+}
+
+// Шумовой пол событийной метрики: даты сигналов сохраняем, тикеры берём случайные из той же
+// вселенной той же ликвидности. Показывает, сколько «избытка» даёт метрика БЕЗ всякого отбора.
+// На полной выборке это около +5%, то есть заявленные «+8%» стоят на три пункта выше нуля.
+function placeboFloor(rows, draws = 24) {
+  const months = rows.filter(r => r.e12 !== undefined).map(r => r.fdate.slice(0, 7));
+  if (months.length < 500) return null;
+  const pool = new Map();
+  const eligible = m => {
+    if (pool.has(m)) return pool.get(m);
+    const a = [];
+    for (const t of panel.px.keys()) if ((panel.adv(t, m) ?? 0) >= PORT_MIN_DV) a.push(t);
+    pool.set(m, a);
+    return a;
+  };
+  let seed = 20260805;
+  const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  const res = [];
+  for (let d = 0; d < draws; d++) {
+    const v = [];
+    for (const m of months) {
+      const cand = eligible(m);
+      if (!cand.length) continue;
+      const t = cand[Math.floor(rand() * cand.length)];
+      const i = panel.idx(m), j = i + 12;
+      const mj = panel.at(j);
+      if (!mj) continue;
+      const a = panel.px.get(t)?.[m], b = panel.px.get(t)?.[mj];
+      if (!(a > 0) || !(b > 0)) continue;
+      const bench = (panel.adv(t, m) ?? 0) < 3e7 ? iwmRet : spyRet;
+      let br = 1;
+      for (let k = i + 1; k <= j; k++) { const r = bench.get(panel.at(k)); if (r !== null && r !== undefined) br *= 1 + r; }
+      v.push((b / a - 1) - (br - 1));
+    }
+    if (v.length > 100) res.push(v.reduce((x, y) => x + y, 0) / v.length);
+  }
+  if (res.length < 8) return null;
+  res.sort((a, b) => a - b);
+  const q = p => res[Math.min(res.length - 1, Math.floor(p * res.length))];
+  return { draws: res.length, med: rnd(q(0.5)), lo: rnd(q(0.05)), hi: rnd(q(0.95)) };
+}
+
+const portAgg = portfolioAggregate(backtestRows);
+const placebo = placeboFloor(backtestRows.filter(r => r.gate === 'ok'));
 W('stats.json', {
   built: today, horizons: Object.keys(HORIZONS).map(Number),
+  // Главный блок: то, что портфель реально заработал бы
+  portfolio: portAgg,
+  method: { minDv: PORT_MIN_DV, hold: PORT_HOLD, split: PORT_SPLIT, minNames: 5, minMonths: PORT_MIN_MONTHS, thin: PORT_THIN },
+  placebo,
+  // Вторичный блок: средние ПО СДЕЛКАМ. Оставлены как справка, но отвечают на другой вопрос
   agg: aggregate(backtestRows), n: backtestRows.length,
   nOk: backtestRows.filter(r => r.gate === 'ok').length,
   iwm: !!iwm?.length,
