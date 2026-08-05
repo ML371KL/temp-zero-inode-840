@@ -89,19 +89,8 @@ input.rng[type=number] { -moz-appearance: textfield; }
 }
 .chip.active { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 /* Наборы, прошедшие проверку на расщеплённой выборке — выделены как самые полезные */
-.chip.proven {
-  background: color-mix(in srgb, var(--c-buy) 16%, var(--surface));
-  border-color: var(--c-buy); color: var(--ink); font-weight: 600;
-}
 /* Сравнительный фильтр: обгоняет свою корзину, но собственная альфа отрицательна.
    Выделен иначе, чем проверенные наборы, чтобы не читался как «покупать». */
-.chip.relative {
-  background: color-mix(in srgb, var(--warn-bg) 70%, var(--surface));
-  border-color: var(--c-sell); color: var(--ink); border-style: dashed;
-}
-.chip.proven:hover { background: color-mix(in srgb, var(--c-buy) 26%, var(--surface)); }
-.chip.proven.active { background: var(--c-buy); color: var(--accent-ink); border-color: var(--c-buy); }
-.proven-label { color: var(--c-buy); font-size: 12.5px; font-weight: 600; }
 .check { display: flex; gap: 5px; align-items: center; color: var(--ink-2); font-size: 13px; cursor: pointer; }
 .hint { color: var(--ink-2); font-size: 13px; max-width: 900px; }
 
@@ -127,14 +116,6 @@ a.tick:hover { text-decoration: underline; }
 .pill.sell { background: var(--bad-bg); color: var(--c-sell); }
 .pill.gray { background: var(--grid); color: var(--ink-2); }
 .pill.warn { background: var(--warn-bg); color: var(--ink-2); }
-.score { font-weight: 700; cursor: pointer; border-bottom: 1px dotted var(--ink-3); }
-/* Развёрнутый разбор компонент: тот же элемент, поэтому клик возвращает число */
-.score.score-open {
-  font-weight: 400; font-size: 12px; color: var(--ink-2);
-  white-space: normal; border-bottom: none; display: inline-block; text-align: left;
-  min-width: 150px;
-}
-.score-detail { font-size: 12px; color: var(--ink-2); white-space: normal; }
 th.sorted { color: var(--ink); }
 
 /* Компактные метки признаков: одно-двухбуквенный код вместо слова */
@@ -184,7 +165,6 @@ tr.dropped:hover td { opacity: 1; }
 .stale-bar a { color: var(--accent); }
 .sec-h { font-size: 15px; margin: 18px 0 6px; }
 .chart-box.card { padding: 10px 14px 4px; margin-bottom: 6px; }
-#market-now { margin-bottom: 12px; }
 .method { margin-top: 14px; color: var(--ink-2); font-size: 13px; max-width: 900px; }
 .method summary { cursor: pointer; font-weight: 600; color: var(--ink); }
 .method h4 { font-size: 13.5px; margin: 14px 0 4px; color: var(--ink); }
@@ -215,3 +195,20 @@ footer { padding: 14px 20px; border-top: 1px solid var(--border); }
   main { padding: 10px 12px; }
   .badges { display: none; }
 }
+
+/* ---- Скринер рабочего набора ---- */
+.set-head { margin-bottom: 10px; }
+.set-head h2 { font-size: 18px; margin: 0 0 4px; }
+.set-numbers { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 4px; }
+/* Каждое число — отдельная плитка: набор один, и его характеристики должны читаться
+   с первого взгляда, а не выкапываться из таблицы */
+.set-numbers .sn {
+  background: var(--surface); border: 1px solid var(--grid); border-radius: 8px;
+  padding: 7px 12px; min-width: 128px; cursor: help;
+}
+.set-numbers .sn b { display: block; font-size: 17px; line-height: 1.25; }
+.set-numbers .sn span { font-size: 11.5px; color: var(--ink-2); }
+/* Протухший сигнал не прячем, а гасим: видеть, что он был, полезно */
+tr.row-dead td { opacity: 0.5; }
+tr.row-strong td { background: var(--good-bg); }
+tr.muted-row td { color: var(--ink-2); }
