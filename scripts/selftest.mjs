@@ -886,5 +886,77 @@ ok('compute: лента, признак набора, карточка тике�
   assert.ok(tick.weekly.length > 50);
 });
 
+// ---------- уведомления ----------
+// Единица письма — ПОЗИЦИЯ, а не форма: докупка в уже открытой позиции второго письма
+// порождать не должна. Проверяем сквозным прогоном скрипта на синтетическом фиде.
+const NTMP = join(ROOT, '.selftest-notify');
+rmSync(NTMP, { recursive: true, force: true });
+mkdirSync(join(NTMP, 'site', 'data'), { recursive: true });
+mkdirSync(join(NTMP, 'data', 'state'), { recursive: true });
+writeJson(join(NTMP, 'site', 'data', 'stats.json'), { setDef: { hold: 3, freshDays: 45 } });
+
+const nDay = n => addDaysIso(isoToday(), n);
+const nRow = (t, fdate, who, val, extra = {}) => ({
+  t, name: t + ' HOLDINGS INC', fdate, who, role: 'D', sh: 1000, px: val / 1000, val,
+  dd: -0.012, dv: 6e6, set: 1, exit: addDaysIso(fdate, 91), cur: val / 1000, chg: 0.02, ...extra,
+});
+function notify(feed) {
+  writeJson(join(NTMP, 'site', 'data', 'feed.json'), feed);
+  return execFileSync(process.execPath,
+    [join(ROOT, 'scripts', 'notify.mjs'), '--dry-run', '--site', join(NTMP, 'site'), '--data', join(NTMP, 'data')],
+    { encoding: 'utf8' });
+}
+
+ok('notify: первый прогон молча пересевает состояние', () => {
+  const out = notify([nRow('AAA', nDay(-2), 'Smith John', 3e5)]);
+  assert.match(out, /состояние пересеяно/);
+  assert.ok(!out.includes('новая позиция'), 'при пересеве письма не шлются');
+});
+ok('notify: новая позиция даёт ровно одну карточку', () => {
+  const out = notify([nRow('AAA', nDay(-2), 'Smith John', 3e5), nRow('BBB', nDay(-1), 'Lee Anna', 4e5)]);
+  assert.match(out, /новых позиций: 1/);
+  assert.equal((out.match(/— новая позиция/g) ?? []).length, 1);
+  assert.match(out, /BBB — новая позиция/);
+  assert.match(out, /вход до .+ выход /, 'в карточке есть срок входа и дата выхода');
+});
+ok('notify: докупка в открытой позиции письма не даёт', () => {
+  const out = notify([
+    nRow('AAA', nDay(-2), 'Smith John', 3e5), nRow('BBB', nDay(-1), 'Lee Anna', 4e5),
+    nRow('BBB', nDay(0), 'Park Wu', 2e5),
+  ]);
+  assert.match(out, /новых позиций нет/);
+});
+ok('notify: повторная покупка после закрытия окна — новая позиция', () => {
+  const dir = join(NTMP, 'data2');
+  mkdirSync(join(dir, 'state'), { recursive: true });
+  const run = feed => {
+    writeJson(join(NTMP, 'site', 'data', 'feed.json'), feed);
+    return execFileSync(process.execPath,
+      [join(ROOT, 'scripts', 'notify.mjs'), '--dry-run', '--site', join(NTMP, 'site'), '--data', dir],
+      { encoding: 'utf8' });
+  };
+  const first = nRow('CCC', nDay(-100), 'Smith John', 3e5);
+  run([first]);                                                    // пересев
+  assert.match(run([first, nRow('CCC', nDay(-95), 'Smith John', 1e5)]), /новых позиций нет/);
+  assert.match(run([first, nRow('CCC', nDay(0), 'Smith John', 3e5)]), /CCC — новая позиция/);
+});
+ok('notify: залп больше четырёх позиций сворачивается в сводку', () => {
+  const dir = join(NTMP, 'data3');
+  mkdirSync(join(dir, 'state'), { recursive: true });
+  const run = feed => {
+    writeJson(join(NTMP, 'site', 'data', 'feed.json'), feed);
+    return execFileSync(process.execPath,
+      [join(ROOT, 'scripts', 'notify.mjs'), '--dry-run', '--site', join(NTMP, 'site'), '--data', dir],
+      { encoding: 'utf8' });
+  };
+  run([nRow('ZZZ', nDay(-2), 'Old Man', 3e5)]);                     // пересев
+  const five = ['D1', 'D2', 'D3', 'D4', 'D5'].map((t, i) => nRow(t, nDay(0), 'Buyer ' + i, 1e5 * (i + 1)));
+  const out = run([nRow('ZZZ', nDay(-2), 'Old Man', 3e5), ...five]);
+  assert.match(out, /новых позиций: 5/);
+  assert.match(out, /Рабочий набор: 5 новых позиций/);
+  assert.ok(!out.includes('— новая позиция'), 'вместо пяти карточек одна сводка');
+});
+rmSync(NTMP, { recursive: true, force: true });
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);
