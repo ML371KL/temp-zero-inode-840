@@ -1,7 +1,7 @@
-// Различение физлиц и юрлиц + склейка связанных филеров.
+// Различение физлиц и юрлиц, склейка связанных филеров, роль и прирост позиции.
 // Зачем: одна форма может подаваться совместно фондом, его GP, управляющей компанией и
 // партнёром-физлицом — это ОДИН экономический участник. Наивный подсчёт «уникальных CIK»
-// превращает такую подачу в «кластер ×4» и завышает скор на пустом месте.
+// превращает такую подачу в несколько независимых покупателей — это ломает гейты sync и fund.
 
 const ENTITY_RE = /\b(L\.?P\.?|LLC|L\.L\.C\.|LLP|INC\.?|CORP\.?|CORPORATION|COMPANY|CO\.|LTD\.?|GMBH|PLC|N\.?V\.?|S\.?A\.?|TRUST|FUND[S]?|CAPITAL|PARTNERS?|ADVISORS?|ADVISERS?|MANAGEMENT|HOLDINGS?|GROUP|ASSOCIATES|VENTURES?|EQUITY|INVESTMENTS?|ASSET|BANCORP|BANK|FOUNDATION|ENDOWMENT|SOCIETY|LIMITED|MASTER|OFFSHORE|SPV)\b/i;
 
@@ -59,15 +59,33 @@ export function buildOwnerGroups(trades) {
   return groups;
 }
 
-// Сколько НЕЗАВИСИМЫХ физлиц стоит за набором сделок (участники кластера).
-export function countIndependentPersons(rows, groups) {
-  const seen = new Set();
-  for (const r of rows)
-    for (const o of r.owners ?? []) {
-      if (!isPersonOwner(o)) continue;
-      seen.add(groups.get(o.cik) ?? o.cik);
-    }
-  return seen.size;
+// Роль подателя. Порядок значим: CFO и CEO выводятся из титула, остальное — из флагов
+// формы. Роль X («иное») и O (офицер не первого эшелона) системно хуже индекса, D и F —
+// лучше вселенной; в остальном роль ничего не решает (docs/ЧТО-РАБОТАЕТ.md).
+export const ROLE_ORDER = ['F', 'C', 'D', 'O', 'T', 'X'];
+export function topRole(rels) {
+  for (const c of ROLE_ORDER) if (rels.some(x => (x ?? '').includes(c))) return c;
+  return 'X';
+}
+
+// Прирост позиции: куплено / остаток до сделки. 9.99 = позиция открыта с нуля.
+//
+// Остаток в Form 4 относится к форме владения (прямой пакет или конкретный косвенный),
+// а не к лицу. У смешанной строки (di='M') сопоставим с покупкой только прямой пакет —
+// берём его. Отрицательный остаток «до» арифметически невозможен для одной формы
+// владения и означает, что остаток и покупка относятся к разным пакетам (у одного лица
+// бывает несколько косвенных: траст, супруга, LLC — Form 4 не даёт им ключа).
+// Такие строки честнее отдать как «неизвестно», чем как правдоподобное число.
+// Показывается в ленте как описание сделки: предсказательной силы у прироста нет
+// (докупка <5% даёт столько же, сколько ≥20%).
+export function dOwnOf(r) {
+  const mixed = r.di === 'M';
+  const sh = mixed ? r.shD : r.sh;
+  const own = mixed ? r.ownD : r.own;
+  if (own === null || own === undefined || !sh) return null;
+  const before = own - sh;
+  if (before < 0) return null;
+  return before > 0 ? Math.round((sh / before) * 1e4) / 1e4 : 9.99;
 }
 
 // Есть ли среди подателей хотя бы одно физлицо-инсайдер (officer/director)

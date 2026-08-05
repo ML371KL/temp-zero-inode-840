@@ -1,22 +1,26 @@
-// Вычислительное ядро v2: вселенная -> конвейер гейтов G1–G8 -> честные кластеры ->
-// трек-рекорд (point-in-time) -> скоринг -> форварды vs SPY и size-бенчмарка -> payload.
-// Чистая функция от data/: без сети.
+// Вычислительное ядро: вселенная -> конвейер гейтов G1–G8 -> рабочий набор -> форварды и
+// календарно-временные портфели -> payload. Чистая функция от data/: без сети.
+//
+// В августе 2026 ядро сокращено до того, что пережило независимую проверку. Убраны кластеры
+// (альфы не дают ни в одном срезе, внутри рабочего набора мешают), скор (к индексу не
+// выводит), рейтинг инсайдеров по трек-рекорду (≥60% и <40% успеха дают одинаковый
+// результат) и агрегатный рыночный индикатор (за 10 лет ни одного месяца в сигнальной зоне).
+// Обоснование с числами — docs/ЧТО-РАБОТАЕТ.md.
 //
 // Порядок фаз важен и продиктован памятью: ценовые ряды всех ~6 тыс. тикеров одновременно
 // не помещаются в раннер, поэтому всё, что требует цен, сгруппировано по тикеру с вытеснением
-// кэша, а фазы без цен (гейты, кластеры, скоринг) идут отдельными проходами.
+// кэша, а фазы без цен (гейты, признаки) идут отдельными проходами.
 // Использование: node scripts/compute.mjs [--data data] [--site site]
 import { readJson, writeJson, readJsonGz, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
 import { readPriceCache, nominalFactor, readStats, listedThrough } from './lib/prices.mjs';
 import { loadSymbolRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import {
   Panel, monthlyFromDaily, portfolioSeries, universeSeries, pairedDiff, turnover,
-  twoFactorAlpha, pathStats, neweyWestT, annualize,
+  factorAlpha, factorSeries, vsBenchmark, pathStats, neweyWestT, annualize, rfOf,
 } from './lib/portfolio.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
-import { scoreBuy, topRole, dOwnOf, freshness, SCORE_CUTS } from './lib/scoring.mjs';
 import { applyGates, isPlanned, DROP_LABELS } from './lib/gates.mjs';
-import { buildOwnerGroups, isPersonOwner, isFundOnly, countIndependentPersons } from './lib/entity.mjs';
+import { buildOwnerGroups, isPersonOwner, isFundOnly, topRole, dOwnOf } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './lib/routine.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -29,10 +33,17 @@ const SITE = argVal('--site', 'site');
 const today = isoToday();
 const HORIZONS = { 3: 63, 6: 126, 12: 252, 24: 504 };  // месяцы -> торговые дни
 const PERF_COLS = { d1: 1, w1: 5, m1: 21, m6: 126 };   // короткие колонки ленты
-const CLUSTER_GAP_DAYS = 30;    // разрыв внутри цепочки покупок
-const CLUSTER_DENSE_DAYS = 14;  // плотное ядро — именно оно даёт документированный эффект
-const ACTIVE_WINDOW_DAYS = 90;
 const FEED_DAYS = 200;
+// РАБОЧИЙ НАБОР. Единственная конфигурация, у которой альфа к S&P 500 пережила все проверки:
+// покупка при цене не ниже 5% от 52-недельного максимума, на существенную сумму, в бумаге
+// с торгуемым оборотом; удержание три месяца. Пороги не на ножевом крае — по близости к
+// максимуму эффект монотонен (−1% → +9.3%, −5% → +7.4%, −20% → 0.0%), по сумме плато от
+// $10 тыс. до $150 тыс. Подробности и проверки — docs/ЧТО-РАБОТАЕТ.md.
+const SET_MAX_DD = -0.05;      // не ниже 5% от 52-недельного максимума
+const SET_MIN_VAL = 5e4;       // сумма сделки
+const SET_MIN_DV = 3e6;        // дневной долларовый оборот бумаги
+const SET_HOLD_MONTHS = 3;     // срок удержания — часть набора, а не настройка
+const SET_FRESH_DAYS = 45;     // после этого срока сигнал считается протухшим (см. ниже)
 const STALE_PRICE_DAYS = 14;
 const SERIES_CACHE_MAX = 150;   // ограничение памяти на ценовые ряды
 const rnd = (v, k = 4) => Math.round(v * 10 ** k) / 10 ** k;
@@ -42,24 +53,6 @@ const ref = loadTickerRef(DATA);
 if (!ref.size) throw new Error('reference/tickers.json пуст — сначала запустите prices.mjs');
 const { trades: tradesAll, stats: loadStats } = loadAllTrades(DATA);
 if (!tradesAll.length) throw new Error('нет сделок — сначала backfill/live');
-
-// Даты 10-Q/10-K по эмитентам (scripts/earnings.mjs): признак «перед отчётом» и
-// «окно только что открылось». Отсутствие кэша не блокирует сборку — признаки будут null.
-const reportsRaw = readJsonGz(join(DATA, 'reference', 'reports.json.gz'), {});
-const reports = new Map(Object.entries(reportsRaw).map(([cik, dates]) => [Number(cik), dates]));
-function reportGaps(cik, iso) {
-  const dates = reports.get(cik);
-  if (!dates?.length) return { next: null, prev: null };
-  let lo = 0, hi = dates.length;
-  while (lo < hi) { const m = (lo + hi) >> 1; if (dates[m] <= iso) lo = m + 1; else hi = m; }
-  const day = 86400000;
-  return {
-    next: lo < dates.length ? Math.round((Date.parse(dates[lo]) - Date.parse(iso)) / day) : null,
-    prev: lo > 0 ? Math.round((Date.parse(iso) - Date.parse(dates[lo - 1])) / day) : null,
-  };
-}
-const PRE_REPORT_DAYS = 21;   // покупка в пределах 3 недель ПЕРЕД отчётом (Ali–Hirshleifer)
-const WINDOW_OPEN_DAYS = 7;   // покупка в первую неделю ПОСЛЕ отчёта — рутинный window-open поток
 
 const spy = readPriceCache(DATA, 'SPY');
 if (!spy || spy.length < 500) throw new Error('нет ряда SPY — бенчмарк обязателен, compute остановлен');
@@ -321,9 +314,6 @@ for (const r of buys) {
   const po = primaryOwner(r);
   const hist = po ? (history.get(po.cik) ?? []) : [];
   r._routine = isRoutineCMP(hist, r.tdate);
-  const gaps = reportGaps(r.cik, r.tdate);
-  r._pre = gaps.next !== null && gaps.next <= PRE_REPORT_DAYS ? 1 : 0;
-  r._wo = gaps.prev !== null && gaps.prev <= WINDOW_OPEN_DAYS ? 1 : 0;
   r._gate = applyGates(r, {
     close: r._close,
     reassigned: !!r._reassigned,
@@ -341,98 +331,19 @@ for (const r of buys) {
   });
 }
 
-// ---------- Фаза C: честные кластеры (только по прошедшим гейты) ----------
-const clustersByTicker = new Map();
-const clusterOfRow = new Map();
-for (const [t, rows] of byTicker) {
-  const ok = rows.filter(r => r.code === 'P' && r._gate.ok).sort((a, b) => a.tdate < b.tdate ? -1 : 1);
-  const chains = [];
-  let chain = [];
-  for (const b of ok) {
-    if (chain.length && addDaysIso(chain[chain.length - 1].tdate, CLUSTER_GAP_DAYS) < b.tdate) { chains.push(chain); chain = []; }
-    chain.push(b);
-  }
-  if (chain.length) chains.push(chain);
-  const clusters = [];
-  for (const c of chains) {
-    const persons = countIndependentPersons(c, ownerGroups);
-    if (persons < 2) continue;
-    // Плотное ядро: максимум независимых физлиц в скользящем окне 14 дней
-    let dense = 1;
-    for (let i = 0; i < c.length; i++) {
-      const end = addDaysIso(c[i].tdate, CLUSTER_DENSE_DAYS);
-      const win = c.filter(x => x.tdate >= c[i].tdate && x.tdate <= end);
-      dense = Math.max(dense, countIndependentPersons(win, ownerGroups));
-    }
-    const cl = { rows: c, persons, dense };
-    clusters.push(cl);
-    for (const r of c) clusterOfRow.set(r, cl);
-  }
-  if (clusters.length) clustersByTicker.set(t, clusters);
-
-  // Point-in-time размер кластера: сколько независимых физлиц было ВИДНО на момент подачи
-  // именно этой формы. Полный размер цепочки включает покупки, поданные позже, и годится
-  // для живого скринера («что известно сегодня»), но в бэктесте это утечка будущего.
-  for (const r of ok) {
-    const from = addDaysIso(r.tdate, -CLUSTER_DENSE_DAYS);
-    const known = ok.filter(x => x.fdate <= r.fdate && x.tdate <= r.tdate && x.tdate >= from);
-    r._clPit = countIndependentPersons(known, ownerGroups);
-  }
-}
-
-// ---------- Фаза D: трек-рекорд (point-in-time) и скоринг ----------
-// Для сделки, поданной в момент F, используются только прошлые покупки того же лица,
-// чей 6-месячный горизонт УЖЕ закрылся до F. Иначе скоринг знал бы будущее.
-const ownerBuys = new Map();
-for (const r of buys) {
-  if (!r._fw?.mat6 || r._fw.e6 === undefined) continue;
-  for (const o of (r.owners ?? []).filter(isPersonOwner)) {
-    const g = ownerGroups.get(o.cik) ?? o.cik;
-    (ownerBuys.get(g) ?? ownerBuys.set(g, []).get(g)).push({ mat: r._fw.mat6, e: r._fw.e6, pre: r._pre });
-  }
-}
-for (const list of ownerBuys.values()) list.sort((a, b) => a.mat < b.mat ? -1 : 1);
-
-// Два трек-рекорда, оба строго point-in-time:
-// общий (все прошлые покупки) и «перед отчётом» (только покупки за ≤21 день до 10-Q/K —
-// признак оппортунизма по Ali–Hirshleifer: такие сделки требуют либо смелости, либо знания).
-function trackRecord(row) {
-  let n = 0, hits = 0, preN = 0, preHits = 0;
-  const seen = new Set();
-  for (const o of (row.owners ?? []).filter(isPersonOwner)) {
-    const g = ownerGroups.get(o.cik) ?? o.cik;
-    if (seen.has(g)) continue;
-    seen.add(g);
-    for (const p of ownerBuys.get(g) ?? []) {
-      if (p.mat >= row.fdate) break;   // список отсортирован — дальше только будущее
-      n++; if (p.e > 0) hits++;
-      if (p.pre) { preN++; if (p.e > 0) preHits++; }
-    }
-  }
-  return {
-    all: n ? { n, hit: rnd(hits / n, 3) } : null,
-    pre: preN ? { n: preN, hit: rnd(preHits / preN, 3) } : null,
-  };
-}
-
+// ---------- Признаки строки и рабочий набор ----------
+// Роль, прирост позиции и инфлексия — это описание сделки, а не оценка: они показываются
+// в ленте и участвуют в срезах Статистики, но ни во что не агрегируются. Скор убран.
 for (const r of buys) {
   const po = primaryOwner(r);
   const hist = po ? (history.get(po.cik) ?? []) : [];
   r._role = topRole((r.owners ?? []).filter(isPersonOwner).map(o => o.rel));
   r._dOwn = dOwnOf(r);
-  if (!r._gate.ok) { r._score = null; continue; }
-  const cl = clusterOfRow.get(r);
-  const tr = trackRecord(r);
-  r._track = tr.all;
-  r._trackPre = tr.pre;
-  r._inflect = inflection(hist, r.tdate);
-  // Скор v4 берёт только признаки на дату сделки, поэтому «живая» и point-in-time версии
-  // совпадают: расхождение в v3 создавал кластер, которого в скоре больше нет.
-  r._score = scoreBuy({
-    role: r._role, dd: r._dd, adv: r._dv ?? null,
-    routine: r._routine, inflect: r._inflect,
-  });
-  r._scorePit = r._score;
+  r._inflect = r._gate.ok ? inflection(hist, r.tdate) : null;
+  // Принадлежность к рабочему набору. Все три условия известны на дату сделки, поэтому
+  // «живой» и исторический признак совпадают — отдельной point-in-time версии не нужно.
+  r._set = r._gate.ok && r._dd !== null && r._dd >= SET_MAX_DD
+    && r.val >= SET_MIN_VAL && (r._dv ?? 0) >= SET_MIN_DV ? 1 : 0;
 }
 
 // ---------- Payload ----------
@@ -452,80 +363,36 @@ const daysAgo = iso => Math.round((Date.parse(today) - Date.parse(iso)) / 864000
 // Лента: показываем ВСЕ покупки, включая отсеянные, но с причиной отсева —
 // пользователь видит и сигнал, и то, что именно было отфильтровано и почему.
 const feedCut = addDaysIso(today, -FEED_DAYS);
-const feedRows = buys.filter(r => r.fdate >= feedCut).map(r => {
-  const cl = clusterOfRow.get(r);
-  return {
-    t: r.T, name: ref.get(r.cik)?.name ?? r.t, fdate: r.fdate, tdate: r.tdate, form: r.form,
-    who: (r.owners ?? []).map(o => o.name).join('; '),
-    ciks: (r.owners ?? []).filter(isPersonOwner).map(o => ownerGroups.get(o.cik) ?? o.cik),
-    role: r._role, title: r.owners?.[0]?.title || '',
-    sh: r.sh, px: r.px, val: r.val, own: r.own, dOwn: r._dOwn, di: r.di,
-    delay: busDays(r.tdate, r.fdate),
-    cl: cl ? cl.dense : 1, dd: r._dd, dv: r._dv ?? null, bucket: r._bucket,
-    score: r._score?.total ?? null, parts: r._score?.parts ?? null,
-    fresh: freshness(daysAgo(r.fdate)),
-    drop: r._gate.drop, tags: r._gate.tags,
-    track: r._track ?? null, inflect: r._inflect ?? null,
-    b5: isPlanned(r) ? 1 : 0, routine: r._routine,
-    wo: r._wo ?? 0, pre: r._pre ?? 0,
-    cur: r._cur ?? null, chg: r._chg ?? null, chgT: r._chgT ?? null,
-    w1: r._fw?.w1 ?? null, m1: r._fw?.m1 ?? null, m6: r._fw?.m6 ?? null,
-  };
-});
-feedRows.sort((a, b) => b.fdate < a.fdate ? -1 : b.fdate > a.fdate ? 1 : (b.score ?? -1) - (a.score ?? -1));
+const feedRows = buys.filter(r => r.fdate >= feedCut).map(r => ({
+  t: r.T, name: ref.get(r.cik)?.name ?? r.t, fdate: r.fdate, tdate: r.tdate, form: r.form,
+  who: (r.owners ?? []).map(o => o.name).join('; '),
+  role: r._role, title: r.owners?.[0]?.title || '',
+  sh: r.sh, px: r.px, val: r.val, own: r.own, dOwn: r._dOwn, di: r.di,
+  delay: busDays(r.tdate, r.fdate),
+  dd: r._dd, dv: r._dv ?? null, bucket: r._bucket,
+  // Рабочий набор и его срок: подписчику нужны обе даты — когда покупать и когда выходить
+  set: r._set, age: daysAgo(r.fdate),
+  exit: r._fw?.entry ? addDaysIso(r._fw.entry, SET_HOLD_MONTHS * 30) : null,
+  drop: r._gate.drop, tags: r._gate.tags,
+  inflect: r._inflect ?? null,
+  b5: isPlanned(r) ? 1 : 0, routine: r._routine,
+  cur: r._cur ?? null, chg: r._chg ?? null, chgT: r._chgT ?? null,
+  w1: r._fw?.w1 ?? null, m1: r._fw?.m1 ?? null, m6: r._fw?.m6 ?? null,
+}));
+// Сортировка: сначала свежие, внутри дня — крупные по сумме. Прежняя сортировка по скору
+// исчезла вместе со скором, а «свежесть» и есть главное: сигнал живёт около месяца.
+feedRows.sort((a, b) => (a.fdate < b.fdate ? 1 : a.fdate > b.fdate ? -1 : b.val - a.val));
 W('feed.json', feedRows);
-
-// Активные кластеры
-const activeCut = addDaysIso(today, -ACTIVE_WINDOW_DAYS);
-const activeClusters = [];
-for (const [t, clusters] of clustersByTicker) {
-  for (const c of clusters) {
-    const last = c.rows[c.rows.length - 1];
-    if (last.tdate < activeCut) continue;
-    const totalVal = c.rows.reduce((a, b) => a + b.val, 0);
-    const totalSh = c.rows.reduce((a, b) => a + b.sh, 0);
-    const best = c.rows.reduce((a, b) => (b._score?.total ?? 0) > (a._score?.total ?? 0) ? b : a, c.rows[0]);
-    const ownersMap = new Map();
-    for (const r of c.rows)
-      for (const o of (r.owners ?? []).filter(isPersonOwner)) {
-        const g = ownerGroups.get(o.cik) ?? o.cik;
-        if (!ownersMap.has(g)) ownersMap.set(g, { cik: g, name: o.name, rel: o.rel, title: o.title });
-      }
-    activeClusters.push({
-      t, name: ref.get(c.rows[0].cik)?.name ?? c.rows[0].t,
-      n: c.persons, dense: c.dense, buyers: [...ownersMap.values()],
-      first: c.rows[0].tdate, last: last.tdate, nTrades: c.rows.length,
-      totalVal: Math.round(totalVal), vwap: totalSh > 0 ? rnd(totalVal / totalSh, 2) : null,
-      dd: last._dd, bucket: last._bucket, role: topRole(c.rows.map(r => r._role)),
-      score: best._score?.total ?? 0, parts: best._score?.parts ?? {},
-      fresh: freshness(daysAgo(last.fdate)),
-      cur: last._cur ?? null, chg: c.rows[0]._chg ?? null,
-      inflect: c.rows.some(r => r._inflect) ? 1 : 0,
-      track: Math.max(...c.rows.map(r => r._track?.hit ?? -1)) >= 0.6 ? 1 : 0,
-    });
-  }
-}
-activeClusters.sort((a, b) => (b.score * b.fresh) - (a.score * a.fresh) || b.totalVal - a.totalVal);
-W('clusters.json', activeClusters);
-
-// Наборы, проверенные на расщеплённой выборке (docs/ЛУЧШИЕ-ФИЛЬТРЫ.md), применяются
-// фильтром прямо в ленте: это признаки конкретной сделки, а не свойства кластера, и лента
-// как раз список сделок. Отдельный payload для них не нужен — в feed.json уже есть все
-// нужные поля (wo, dd, role, cl, dOwn, bucket).
 
 // Бэктест: ВСЕ покупки с ценами, включая отсеянные (с причиной) — экран «Статистика»
 // проверяет на собственных данных, что гейты режут именно шум, а не сигнал.
 // В бэктест идут ТОЛЬКО point-in-time версии кластера и скора (см. фазу C)
 const backtestRows = buys.filter(r => r._fw).map(r => ({
   t: r.T, fdate: r.fdate, tdate: r.tdate, val: r.val, role: r._role,
-  cl: r._clPit ?? 1,
   b5: isPlanned(r) ? 1 : 0, routine: r._routine, dd: r._dd, dOwn: r._dOwn,
-  score: r._scorePit?.total ?? null, bucket: r._bucket,
+  bucket: r._bucket, set: r._set,
   gate: r._gate.ok ? 'ok' : r._gate.drop,
-  inflect: r._inflect ?? null, track: r._track?.hit ?? null,
-  og: (r.owners ?? []).filter(isPersonOwner).map(o => ownerGroups.get(o.cik) ?? o.cik)[0] ?? null,
-  pre: r._pre ?? null, wo: r._wo ?? null,
-  aehN: r._trackPre?.n ?? null, aehHit: r._trackPre?.hit ?? null,
+  inflect: r._inflect ?? null,
   ...r._fw,
 }));
 const years = [...new Set(backtestRows.map(r => r.fdate.slice(0, 4)))].sort();
@@ -536,59 +403,25 @@ W('backtest/index.json', { years });
 // Агрегаты
 const bucketSizeLabel = v => v >= 1e6 ? '≥$1M' : v >= 2.5e5 ? '$250k–1M' : v >= 5e4 ? '$50–250k' : '<$50k';
 const bucketDdLabel = d => d === null ? 'н/д' : d <= -0.30 ? 'просадка >30%' : d <= -0.15 ? 'просадка 15–30%' : d >= -0.05 ? 'у максимума' : 'просадка <15%';
+// Срезы Статистики — это диагностика, а не меню наборов. Каждый отвечает на вопрос
+// «что здесь на самом деле есть», и по каждому уже известен ответ (docs/ЧТО-РАБОТАЕТ.md).
+// Срез «кластер» убран вместе с кластерами, срез «скор» — вместе со скором.
 const DIMS = {
+  set: r => r.set ? '✓ рабочий набор' : 'вне набора',
   gate: r => r.gate === 'ok' ? '✓ прошли гейты' : (DROP_LABELS[r.gate] ?? r.gate),
   all: () => 'прошедшие гейты',
-  cluster: r => r.cl >= 3 ? 'кластер ≥3' : r.cl === 2 ? 'кластер 2' : 'одиночная',
   role: r => r.role,
   size: r => bucketSizeLabel(r.val),
   liquidity: r => r.bucket,
   routine: r => r.routine === true ? 'рутинная (CMP)' : r.routine === false ? 'оппортунистическая' : 'нет истории',
   inflect: r => r.inflect ?? 'обычная',
   dd: r => bucketDdLabel(r.dd),
-  // Границы взяты из scoring.mjs: на held-out половине лестница по ним монотонна
-  score: r => r.score === null ? 'отсеяна'
-    : r.score >= SCORE_CUTS[0] ? `скор ${SCORE_CUTS[0]}+`
-    : r.score >= SCORE_CUTS[1] ? `скор ${SCORE_CUTS[1]}–${SCORE_CUTS[0] - 1}`
-    : r.score >= SCORE_CUTS[2] ? `скор ${SCORE_CUTS[2]}–${SCORE_CUTS[1] - 1}`
-    : r.score >= SCORE_CUTS[3] ? `скор ${SCORE_CUTS[3]}–${SCORE_CUTS[2] - 1}`
-    : `скор <${SCORE_CUTS[3]}`,
   year: r => r.fdate.slice(0, 4),
 };
 // Срезы, кроме 'gate' и 'routine', считаются только по прошедшим гейты:
 // иначе PIPE-размещения и плановые сделки размывают картину сигнала.
 const ALL_ROWS_DIMS = new Set(['gate', 'routine']);
-function aggregate(rows) {
-  const out = {};
-  for (const [dim, fn] of Object.entries(DIMS)) {
-    const src = ALL_ROWS_DIMS.has(dim) ? rows : rows.filter(r => r.gate === 'ok');
-    const groups = new Map();
-    for (const r of src) (groups.get(fn(r)) ?? groups.set(fn(r), []).get(fn(r))).push(r);
-    out[dim] = {};
-    for (const [g, rs] of [...groups.entries()].sort()) {
-      const cell = { total: rs.length };
-      for (const m of Object.keys(HORIZONS)) {
-        const done = rs.filter(x => x['s' + m] === 'c');
-        const dead = rs.filter(x => x['s' + m] === 'd');
-        const exc = done.map(x => x['e' + m]).filter(v => v !== undefined).sort((a, b) => a - b);
-        const excSpy = done.map(x => x['x' + m]).filter(v => v !== undefined).sort((a, b) => a - b);
-        const withDead = exc.concat(dead.map(x => x['e' + m]).filter(v => v !== undefined)).sort((a, b) => a - b);
-        const med = a => a.length ? a[(a.length - 1) >> 1] : null;
-        cell['h' + m] = {
-          n: done.length, nd: dead.length,
-          med: med(exc) !== null ? rnd(med(exc)) : null,
-          medSpy: med(excSpy) !== null ? rnd(med(excSpy)) : null,
-          mean: exc.length ? rnd(exc.reduce((a, b) => a + b, 0) / exc.length) : null,
-          pos: exc.length ? rnd(exc.filter(x => x > 0).length / exc.length) : null,
-          medD: med(withDead) !== null ? rnd(med(withDead)) : null,
-        };
-      }
-      out[dim][g] = cell;
-    }
-  }
-  return out;
-}
-// ---------- Календарно-временной портфель: ГЛАВНАЯ метрика Статистики ----------
+// ---------- Календарно-временной портфель: ЕДИНСТВЕННАЯ метрика Статистики ----------
 // Обоснование замены и цифры шумового пола — в шапке lib/portfolio.mjs.
 const PORT_MIN_DV = 3e6;      // ниже этого оборота портфель неторгуем, а сравнение бессмысленно
 const PORT_HOLD = [3, 6, 12]; // месяцев удержания
@@ -601,8 +434,13 @@ const retMap = t => {
   return m;
 };
 const spyRet = retMap('SPY');
-const iwmRet = iwm?.length ? retMap('IWM') : spyRet;
 const univRet = universeSeries(panel, { minDv: PORT_MIN_DV });
+// Факторы размера и моментума строятся из той же вселенной. Моментум добавлен в августе
+// 2026: без него набор «у 52-недельного максимума» показывал завышенную альфу — он по
+// построению сидит в победителях моментума. С фактором альфа набора сохраняется, у широких
+// инсайдерских срезов исчезает, и это ровно то, что метрика обязана различать.
+const FACTORS = factorSeries(panel, { minDv: PORT_MIN_DV });
+const FMODEL = { market: spyRet, size: FACTORS.size, mom: FACTORS.mom };
 
 function portfolioCell(rows, H) {
   const byM = new Map();
@@ -615,22 +453,30 @@ function portfolioCell(rows, H) {
   // удачных кварталов. Ячейки с малым составом не прячем, а помечаем: пусть видно, что
   // «+46.8 на train и −46.7 на valid» получены на семи бумагах.
   if (ser.length < PORT_MIN_MONTHS) return null;
-  const a = twoFactorAlpha(ser, spyRet, iwmRet);
+  const a = factorAlpha(ser, FMODEL);
   const p = pathStats(ser);
-  // Превышение над равновзвешенной вселенной той же ликвидности: «а если брать всё подряд»
+  // ГЛАВНАЯ колонка экрана — превышение над S&P 500. Равновзвешенная вселенная ADV≥$3М
+  // сама проигрывает индексу около 3%/год, поэтому «альфа к вселенной» и «альфа к индексу» —
+  // это два РАЗНЫХ ответа, и путать их нельзя: сигналу нужно набрать 3–5% сверх вселенной
+  // просто чтобы сравняться с SPY.
+  const v = vsBenchmark(ser, spyRet);
   const ex = ser.filter(x => univRet.has(x.m)).map(x => x.r - univRet.get(x.m));
   const u = neweyWestT(ex);
   const half = w => {
     const s = ser.filter(w);
-    const h = s.length >= 24 ? twoFactorAlpha(s, spyRet, iwmRet) : null;
-    return h ? rnd(annualize(h.alpha)) : null;
+    const h = s.length >= 24 ? vsBenchmark(s, spyRet) : null;
+    return h ? rnd(annualize(h.ex)) : null;
   };
   return {
     n: p.avgN, mo: ser.length, thin: p.avgN < PORT_THIN ? 1 : 0,
     cagr: rnd(p.cagr), vol: rnd(p.vol), dd: rnd(p.dd),
+    spy: v ? rnd(annualize(v.ex)) : null,
+    spyT: v?.t !== null && v?.t !== undefined ? rnd(v.t, 2) : null,
+    ir: v?.ir !== null && v?.ir !== undefined ? rnd(v.ir, 2) : null,
+    sharpe: v?.sharpe !== null && v?.sharpe !== undefined ? rnd(v.sharpe, 2) : null,
     a: a ? rnd(annualize(a.alpha)) : null,
     t: a?.t !== null && a?.t !== undefined ? rnd(a.t, 2) : null,
-    beta: a ? rnd(a.beta, 2) : null, size: a ? rnd(a.size, 2) : null,
+    beta: a ? rnd(a.betas[0], 2) : null, size: a ? rnd(a.betas[1], 2) : null, mom: a ? rnd(a.betas[2], 2) : null,
     aT: half(x => x.m < PORT_SPLIT), aV: half(x => x.m >= PORT_SPLIT),
     u: u.mean !== null ? rnd(annualize(u.mean)) : null,
     ut: u.t !== null && u.t !== undefined ? rnd(u.t, 2) : null,
@@ -652,313 +498,174 @@ function portfolioAggregate(rows) {
   return out;
 }
 
-// Шумовой пол событийной метрики: даты сигналов сохраняем, тикеры берём случайные из той же
-// вселенной той же ликвидности. Показывает, сколько «избытка» даёт метрика БЕЗ всякого отбора.
-// На полной выборке это около +5%, то есть заявленные «+8%» стоят на три пункта выше нуля.
-function placeboFloor(rows, draws = 24) {
-  const months = rows.filter(r => r.e12 !== undefined).map(r => r.fdate.slice(0, 7));
-  if (months.length < 500) return null;
-  const pool = new Map();
-  const eligible = m => {
-    if (pool.has(m)) return pool.get(m);
-    const a = [];
-    for (const t of panel.names()) if ((panel.adv(t, m) ?? 0) >= PORT_MIN_DV) a.push(t);
-    pool.set(m, a);
-    return a;
-  };
-  let seed = 20260805;
-  const rand = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
-  const res = [];
-  for (let d = 0; d < draws; d++) {
-    const v = [];
-    for (const m of months) {
-      const cand = eligible(m);
-      if (!cand.length) continue;
-      const t = cand[Math.floor(rand() * cand.length)];
-      const i = panel.idx(m), j = i + 12;
-      const mj = panel.at(j);
-      if (!mj) continue;
-      const a = panel.px.get(t)?.[m], b = panel.px.get(t)?.[mj];
-      if (!(a > 0) || !(b > 0)) continue;
-      const bench = (panel.adv(t, m) ?? 0) < 3e7 ? iwmRet : spyRet;
-      let br = 1;
-      for (let k = i + 1; k <= j; k++) { const r = bench.get(panel.at(k)); if (r !== null && r !== undefined) br *= 1 + r; }
-      v.push((b / a - 1) - (br - 1));
-    }
-    if (v.length > 100) res.push(v.reduce((x, y) => x + y, 0) / v.length);
-  }
-  if (res.length < 8) return null;
-  res.sort((a, b) => a - b);
-  const q = p => res[Math.min(res.length - 1, Math.floor(p * res.length))];
-  return { draws: res.length, med: rnd(q(0.5)), lo: rnd(q(0.05)), hi: rnd(q(0.95)) };
-}
-
-// ---------- Наборы: те же определения, что в ленте (web/app.js RECIPES) ----------
-// Раньше числа наборов лежали в index.html строками и считались вручную скриптом, которого
-// в репозитории нет. Они успели разойтись с движком (у «скор 38+» в подписи стояло +5.1%
-// при t=2.06, движок на тех же данных давал +5.7% при t=2.64), а проверить их было нечем.
-// Теперь набор — это определение в коде, а все его числа считает сборка.
+// ---------- РАБОЧИЙ НАБОР и ЧЁРНЫЙ СПИСОК ----------
+// Один торговый набор вместо прежних четырёх: остальные проверку не прошли. Всё, что
+// считается здесь, страница только показывает — числа в разметке не хранятся.
 //
-// Ключевая колонка — «сверх контроля»: для ценового набора берётся портфель ВСЕХ бумаг в
-// том же ценовом контексте, собранный тем же способом и на тот же срок. Без него набор
-// «у 52-недельного максимума» описывает моментум, а не инсайдера.
+// Колонка «сверх контроля» обязательна для ценового набора: контроль — ВСЕ бумаги,
+// побывавшие в том же ценовом контексте в том же месяце, собранные тем же способом и на
+// тот же срок. Без него набор описывал бы моментум, а не инсайдера.
 const ROUND_TRIP = 0.005;    // издержки на круг, доля
-const RECIPE_DEFS = [
-  {
-    key: 'high', name: 'У 52-нед максимума', H: 3,
-    f: r => r.dd !== null && r.dd >= -0.05,
-    control: { name: 'все бумаги, побывавшие у максимума', pred: (t, m) => panel.wasNearHigh(t, m, -0.05) },
-    // Монотонность порога — главный довод, что это признак, а не подгонка под отсечку.
-    // Раньше лестница стояла в тексте страницы числами; теперь считается здесь.
-    ladder: [-0.02, -0.05, -0.10, -0.20].map(th => ({ th, f: r => r.dd !== null && r.dd >= th })),
-  },
-  { key: 'score38', name: 'Скор 38+', H: 12, f: r => r.score !== null && r.score >= 38 },
-  { key: 'score28', name: 'Скор 28+', H: 12, f: r => r.score !== null && r.score >= 28 },
-  {
-    key: 'deep', name: 'В просадке >30%', H: 12,
-    f: r => r.dd !== null && r.dd < -0.3,
-    control: { name: 'все, побывавшие в просадке глубже 30%', pred: (t, m) => panel.wasBelow(t, m, -0.3) },
-  },
-  { key: 'base', name: 'справка: все прошедшие гейты', H: 12, f: () => true },
+const liquidRow = r => r.bucket !== 'н/д' && r.bucket !== 'micro';
+const SET_DEF = {
+  key: 'set', name: 'Рабочий набор', H: SET_HOLD_MONTHS,
+  f: r => r.set === 1,
+  control: { name: 'все бумаги, побывавшие у максимума', pred: (t, m) => panel.wasNearHigh(t, m, SET_MAX_DD) },
+  // Две лестницы — по близости к максимуму и по сумме сделки. Обе нужны как доказательство,
+  // что пороги не подогнаны: эффект меняется плавно, а не скачком на выбранной отсечке.
+  ladders: [
+    {
+      name: 'близость к 52-нед максимуму', vals: [-0.01, -0.02, -0.05, -0.10, -0.20, -0.35],
+      lab: v => 'не ниже ' + Math.abs(Math.round(v * 100)) + '%',
+      f: v => r => r.gate === 'ok' && r.dd !== null && r.dd >= v && r.val >= SET_MIN_VAL && liquidRow(r),
+    },
+    {
+      name: 'сумма сделки', vals: [0, 1e4, 5e4, 1e5, 2.5e5, 5e5],
+      lab: v => v ? 'от $' + Math.round(v / 1e3) + 'k' : 'любая',
+      f: v => r => r.gate === 'ok' && r.dd !== null && r.dd >= SET_MAX_DD && r.val >= v && liquidRow(r),
+    },
+  ],
+};
+// Чёрный список: срезы, которые системно ХУЖЕ индекса. Показываются рядом с набором, потому
+// что «чего не покупать» — такая же часть результата, как «что покупать».
+const AVOID_DEFS = [
+  { key: 'routine', name: 'рутинные по календарю (CMP)', H: 12, f: r => r.gate === 'routine' },
+  { key: 'planned', name: 'плановые 10b5-1', H: 12, f: r => r.gate === 'planned' },
+  { key: 'deep', name: 'покупки в просадке глубже 30%', H: 3, f: r => r.gate === 'ok' && r.dd !== null && r.dd < -0.3 },
+  { key: 'roleX', name: 'роль «иное» (X)', H: 12, f: r => r.gate === 'ok' && r.role === 'X' },
+  { key: 'roleO', name: 'офицер не CEO/CFO', H: 12, f: r => r.gate === 'ok' && r.role === 'O' },
+  { key: 'dropped', name: 'всё, что отсеяли гейты', H: 12, f: r => r.gate !== 'ok' },
 ];
-const controlCache = new Map();
 const signalMonths = f => {
   const byM = new Map();
   for (const r of backtestRows) {
-    if (r.gate !== 'ok' || !f(r)) continue;
+    if (!f(r)) continue;
     const m = r.fdate.slice(0, 7);
     (byM.get(m) ?? byM.set(m, new Set()).get(m)).add(r.t);
   }
   return byM;
 };
-function recipeCell(def) {
-  const rows = backtestRows.filter(r => r.gate === 'ok' && def.f(r));
+function setCell(def, { withExtras = false } = {}) {
   const byM = signalMonths(def.f);
   const ser = portfolioSeries(panel, byM, { H: def.H, minDv: PORT_MIN_DV });
   if (ser.length < PORT_MIN_MONTHS) return null;
-  const a = twoFactorAlpha(ser, spyRet, iwmRet);
+  const a = factorAlpha(ser, FMODEL);
+  const v = vsBenchmark(ser, spyRet);
   const p = pathStats(ser);
   const half = w => {
     const s = ser.filter(w);
-    const h = s.length >= 24 ? twoFactorAlpha(s, spyRet, iwmRet) : null;
-    return h ? rnd(annualize(h.alpha)) : null;
+    const h = s.length >= 24 ? vsBenchmark(s, spyRet) : null;
+    return h ? rnd(annualize(h.ex)) : null;
   };
   const to = turnover(panel, byM, { H: def.H, minDv: PORT_MIN_DV });
   const cost = to === null ? null : (to / 2) * 12 * ROUND_TRIP;   // один круг на смену бумаги
-  let ctrl = null;
-  if (def.control) {
-    const ck = def.key + '|' + def.H;
-    if (!controlCache.has(ck)) controlCache.set(ck, universeSeries(panel, { minDv: PORT_MIN_DV, pred: def.control.pred, H: def.H }));
-    const d = pairedDiff(ser, controlCache.get(ck));
-    if (d) ctrl = { name: def.control.name, ex: rnd(annualize(d.ex)), t: rnd(d.t, 2), mo: d.months };
-  }
-  let ladder = null;
-  if (def.ladder) {
-    ladder = [];
-    for (const v of def.ladder) {
-      const s = portfolioSeries(panel, signalMonths(v.f), { H: def.H, minDv: PORT_MIN_DV });
-      if (s.length < PORT_MIN_MONTHS) continue;
-      const av = twoFactorAlpha(s, spyRet, iwmRet);
-      ladder.push({ th: v.th, n: pathStats(s).avgN, a: av ? rnd(annualize(av.alpha)) : null, t: av?.t !== undefined && av?.t !== null ? rnd(av.t, 2) : null });
-    }
-  }
-  return {
-    ladder,
-    key: def.key, name: def.name, hold: def.H, n: p.avgN, mo: ser.length, signals: rows.length,
+  const cell = {
+    key: def.key, name: def.name, hold: def.H, n: p.avgN, mo: ser.length,
+    signals: backtestRows.filter(def.f).length,
     cagr: rnd(p.cagr), vol: rnd(p.vol), dd: rnd(p.dd),
+    spy: v ? rnd(annualize(v.ex)) : null,
+    spyT: v?.t !== null && v?.t !== undefined ? rnd(v.t, 2) : null,
+    ir: v?.ir !== null && v?.ir !== undefined ? rnd(v.ir, 2) : null,
+    sharpe: v?.sharpe !== null && v?.sharpe !== undefined ? rnd(v.sharpe, 2) : null,
     a: a ? rnd(annualize(a.alpha)) : null,
     t: a?.t !== null && a?.t !== undefined ? rnd(a.t, 2) : null,
+    beta: a ? rnd(a.betas[0], 2) : null, mom: a ? rnd(a.betas[2], 2) : null,
     aT: half(x => x.m < PORT_SPLIT), aV: half(x => x.m >= PORT_SPLIT),
     turnover: to === null ? null : rnd(to * 12),
     cost: cost === null ? null : rnd(cost),
-    net: a && cost !== null ? rnd(annualize(a.alpha) - cost) : null,
-    control: ctrl,
+    net: v && cost !== null ? rnd(annualize(v.ex) - cost) : null,
   };
-}
-const recipes = RECIPE_DEFS.map(recipeCell).filter(Boolean);
-
-// Ориентиры за ТОТ ЖЕ период, что и базовый набор: без них «14.6% годовых» не с чем
-// сравнить, а именно сравнение и решает, стоит ли вообще следовать за инсайдерами.
-const baseSer = portfolioSeries(panel, signalMonths(() => true), { H: 12, minDv: PORT_MIN_DV });
-const baseMonths = new Set(baseSer.map(x => x.m));
-const benchPath = map => {
-  const rows = [...map.entries()].filter(([m]) => baseMonths.has(m)).map(([m, r]) => ({ m, r, n: 1 }));
-  if (rows.length < PORT_MIN_MONTHS) return null;
-  const p = pathStats(rows);
-  return { cagr: rnd(p.cagr), vol: rnd(p.vol), dd: rnd(p.dd), mo: rows.length };
-};
-const benchmarks = { spy: benchPath(spyRet), iwm: iwm?.length ? benchPath(iwmRet) : null, universe: benchPath(univRet) };
-
-const portAgg = portfolioAggregate(backtestRows);
-const placebo = placeboFloor(backtestRows.filter(r => r.gate === 'ok'));
-W('stats.json', {
-  built: today, horizons: Object.keys(HORIZONS).map(Number),
-  // Главный блок: то, что портфель реально заработал бы
-  portfolio: portAgg,
-  // Наборы ленты со своими сроками удержания, издержками и контролем — считаются здесь,
-  // сайт их только показывает
-  recipes, roundTrip: ROUND_TRIP, benchmarks,
-  method: { minDv: PORT_MIN_DV, hold: PORT_HOLD, split: PORT_SPLIT, minNames: 5, minMonths: PORT_MIN_MONTHS, thin: PORT_THIN },
-  placebo,
-  // Вторичный блок: средние ПО СДЕЛКАМ. Оставлены как справка, но отвечают на другой вопрос
-  agg: aggregate(backtestRows), n: backtestRows.length,
-  nOk: backtestRows.filter(r => r.gate === 'ok').length,
-  iwm: !!iwm?.length,
-});
-
-// ---------- Агрегатный рыночный индикатор ----------
-// Проверено на нашей истории (docs/АГРЕГАТ.md): линейной связи почти нет, но ХВОСТ
-// работает — недели с экстремальной кластерной активностью предшествовали заметно
-// лучшей доходности рынка, причём сверх факта «рынок только что упал».
-// Метрика — число эмитентов, у которых за неделю купили ≥2 независимых инсайдера.
-// Долларовое ратио сознательно НЕ используется: на наших данных его знак обратный.
-const AGG_BASELINE_WEEKS = 104;   // окно нормировки — два года, строго прошлое
-const AGG_WARN = 2, AGG_STRONG = 3;
-function weekStart(iso) {
-  const d = new Date(iso + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
-  return d.toISOString().slice(0, 10);
-}
-// Продажа как «решение инсайдера»: физлицо, не по плану, без механических сносок.
-// Без этой очистки ратио двигают вестинги и налоговые удержания, а не настроение.
-function isCleanSell(r) {
-  if (r.code !== 'S') return false;
-  const fn = r.fn ?? {};
-  if (fn.offering || fn.drip || fn.espp || fn.forced) return false;
-  if (isPlanned(r)) return false;
-  return (r.owners ?? []).some(o => (o.rel ?? '').includes('D') || (o.rel ?? '').includes('O'))
-    && !isFundOnly(r);
-}
-const wk = new Map();
-const wkGet = k => wk.get(k) ?? wk.set(k, { b: 0, s: 0, bv: 0, sv: 0, iss: new Set(), cp: new Map() }).get(k);
-for (const r of buys) {
-  if (!r._gate.ok) continue;
-  const w = wkGet(weekStart(r.fdate));
-  w.b++; w.bv += r.val; w.iss.add(r.T);
-  for (const o of (r.owners ?? []).filter(isPersonOwner)) {
-    const g = ownerGroups.get(o.cik) ?? o.cik;
-    (w.cp.get(r.T) ?? w.cp.set(r.T, new Set()).get(r.T)).add(g);
+  if (!withExtras) return cell;
+  if (def.control) {
+    const ctrl = universeSeries(panel, { minDv: PORT_MIN_DV, pred: def.control.pred, H: def.H });
+    const d = pairedDiff(ser, ctrl);
+    if (d) cell.control = { name: def.control.name, ex: rnd(annualize(d.ex)), t: rnd(d.t, 2), mo: d.months };
   }
+  // Год за годом против индекса: концентрация видна сразу, без пересказа
+  const byY = new Map();
+  for (const x of ser) {
+    if (!spyRet.has(x.m)) continue;
+    const y = x.m.slice(0, 4);
+    (byY.get(y) ?? byY.set(y, []).get(y)).push(x.r - spyRet.get(x.m));
+  }
+  cell.years = [...byY.entries()].sort().map(([y, vs]) => ({ y, ex: rnd(vs.reduce((q, w) => q + w, 0)) }));
+  if (def.ladders) {
+    cell.ladders = def.ladders.map(L => ({
+      name: L.name,
+      rows: L.vals.map(val => {
+        const sr = portfolioSeries(panel, signalMonths(L.f(val)), { H: def.H, minDv: PORT_MIN_DV });
+        if (sr.length < PORT_MIN_MONTHS) return null;
+        const vv = vsBenchmark(sr, spyRet);
+        return { lab: L.lab(val), n: pathStats(sr).avgN, spy: vv ? rnd(annualize(vv.ex)) : null, t: vv ? rnd(vv.t, 2) : null };
+      }).filter(Boolean),
+    }));
+  }
+  // Задержка входа: сигнал живёт около месяца, и это надо показывать, а не описывать словами
+  cell.lag = [0, 1, 2].map(lag => {
+    const shifted = new Map();
+    const ms = panel.months;
+    for (const [m, set] of byM) {
+      const i = panel.idx(m);
+      if (i === undefined || !ms[i + lag]) continue;
+      const k = ms[i + lag];
+      shifted.set(k, new Set([...(shifted.get(k) ?? []), ...set]));
+    }
+    const sr = portfolioSeries(panel, shifted, { H: def.H, minDv: PORT_MIN_DV });
+    if (sr.length < PORT_MIN_MONTHS) return null;
+    const vv = vsBenchmark(sr, spyRet);
+    return { lag, spy: vv ? rnd(annualize(vv.ex)) : null, t: vv ? rnd(vv.t, 2) : null };
+  }).filter(Boolean);
+  return cell;
 }
-for (const r of trades) {
-  if (!isCleanSell(r)) continue;
-  const w = wkGet(weekStart(r.fdate));
-  w.s++; w.sv += r.val;
-}
-const wkKeys = [...wk.keys()].sort();
-const ciSeries = wkKeys.map(k => {
-  let n = 0;
-  for (const s of wk.get(k).cp.values()) if (s.size >= 2) n++;
-  return n;
-});
-function zAt(i) {
-  const from = Math.max(0, i - AGG_BASELINE_WEEKS);
-  const hist = ciSeries.slice(from, i);
-  if (hist.length < 52) return null;
-  const m = hist.reduce((a, b) => a + b, 0) / hist.length;
-  const s = Math.sqrt(hist.reduce((a, b) => a + (b - m) ** 2, 0) / hist.length);
-  return s > 0 ? rnd((ciSeries[i] - m) / s, 2) : null;
-}
-// Конец недели по календарю рынка: пятница (или последний торговый день до неё)
-function weekEndIdx(k) {
-  const d = new Date(k + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() + 4);
-  return idxAtOrBefore(spy, d.toISOString().slice(0, 10));
-}
-const weeksOut = [];
-for (let i = 0; i < wkKeys.length; i++) {
-  const k = wkKeys[i], w = wk.get(k);
-  const ei = weekEndIdx(k);
-  weeksOut.push({
-    w: k, b: w.b, s: w.s, ci: ciSeries[i], iss: w.iss.size,
-    ratio: w.b ? rnd(w.s / w.b, 2) : null,
-    z: zAt(i),
-    spy: ei >= 0 ? spy[ei][1] : null,
+const workingSet = setCell(SET_DEF, { withExtras: true });
+const avoid = AVOID_DEFS.map(d => setCell(d)).filter(Boolean);
+const reference = [setCell({ key: 'all', name: 'все покупки, прошедшие гейты', H: 12, f: r => r.gate === 'ok' })].filter(Boolean);
+// Вселенная и индекс — эталоны, с которыми сравнивается всё остальное. Главное число
+// панели: равновзвешенная вселенная ADV≥$3М сама проигрывает S&P 500, поэтому «лучше
+// вселенной» и «лучше индекса» — разные утверждения.
+{
+  const all = new Map();
+  for (const m of panel.months) {
+    const set = new Set();
+    for (const t of panel.names()) if ((panel.adv(t, m) ?? 0) >= PORT_MIN_DV) set.add(t);
+    if (set.size) all.set(m, set);
+  }
+  const ser = portfolioSeries(panel, all, { H: 1, minDv: PORT_MIN_DV });
+  const v = vsBenchmark(ser, spyRet), p = pathStats(ser), a = factorAlpha(ser, FMODEL);
+  reference.push({
+    key: 'universe', name: 'вся вселенная ADV≥$3М (равный вес)', hold: 1, n: p.avgN, mo: ser.length,
+    cagr: rnd(p.cagr), vol: rnd(p.vol), dd: rnd(p.dd),
+    spy: v ? rnd(annualize(v.ex)) : null, spyT: v ? rnd(v.t, 2) : null,
+    ir: v?.ir ? rnd(v.ir, 2) : null, sharpe: v?.sharpe ? rnd(v.sharpe, 2) : null,
+    a: a ? rnd(annualize(a.alpha)) : null, t: a ? rnd(a.t, 2) : null,
+    beta: a ? rnd(a.betas[0], 2) : null, mom: a ? rnd(a.betas[2], 2) : null,
+  });
+  const spySer = [...spyRet.entries()].map(([m, r]) => ({ m, r, n: 1 }));
+  const sp = pathStats(spySer);
+  const sharpe = sp.vol > 0
+    ? (spySer.reduce((q, x) => q + x.r - rfOf(x.m), 0) / spySer.length * 12) / sp.vol : null;
+  reference.push({
+    key: 'spy', name: 'S&P 500 (SPY)', hold: null, n: 1, mo: spySer.length,
+    cagr: rnd(sp.cagr), vol: rnd(sp.vol), dd: rnd(sp.dd),
+    spy: 0, spyT: null, ir: null, sharpe: sharpe === null ? null : rnd(sharpe, 2),
+    a: 0, t: null, beta: 1, mom: 0,
   });
 }
-// Самопроверка индикатора: форвардная доходность рынка по порогам z (пересчитывается
-// при каждой сборке, поэтому не «застывает» с ростом данных)
-const AGG_HOR = { 3: 63, 6: 126, 12: 252 };
-function spyFwd(k, days) {
-  const i = weekEndIdx(k);
-  return i < 0 || i + days >= spy.length ? null : spy[i + days][1] / spy[i][1] - 1;
-}
-function aggStats(filter) {
-  const out = {};
-  for (const [m, d] of Object.entries(AGG_HOR)) {
-    const f = weeksOut.filter(x => x.z !== null && filter(x)).map(x => spyFwd(x.w, d)).filter(v => v !== null);
-    out['h' + m] = f.length
-      ? { n: f.length, mean: rnd(f.reduce((a, b) => a + b, 0) / f.length), pos: rnd(f.filter(v => v > 0).length / f.length, 3) }
-      : { n: 0, mean: null, pos: null };
-  }
-  return out;
-}
-const lastZ = [...weeksOut].reverse().find(x => x.z !== null)?.z ?? null;
-W('market.json', {
-  built: today,
-  weeks: weeksOut,
-  baselineWeeks: AGG_BASELINE_WEEKS,
-  thresholds: { warn: AGG_WARN, strong: AGG_STRONG },
-  now: {
-    z: lastZ,
-    state: lastZ === null ? 'н/д' : lastZ >= AGG_STRONG ? 'вспышка' : lastZ >= AGG_WARN ? 'повышенная' : lastZ <= -1 ? 'затишье' : 'норма',
-  },
-  // Историческая доходность SPY после недель с разным уровнем индикатора
-  validation: {
-    all: aggStats(() => true),
-    z1: aggStats(x => x.z >= 1),
-    z2: aggStats(x => x.z >= AGG_WARN),
-    // Зона 2–3σ отдельно от накопительной: без этого разделения кажется, будто «повышенная»
-    // активность сама по себе что-то значит, тогда как весь эффект даёт «вспышка» ≥3σ
-    z23: aggStats(x => x.z >= AGG_WARN && x.z < AGG_STRONG),
-    z3: aggStats(x => x.z >= AGG_STRONG),
-    quiet: aggStats(x => x.z < -1),
-    // Контроль: вспышка добавляет ли что-то сверх просадки рынка
-    ddSurge: aggStats(x => x.z >= 1.5 && spyDrawdownAt(x.w) <= -0.1),
-    ddOnly: aggStats(x => x.z < 1.5 && spyDrawdownAt(x.w) <= -0.1),
-  },
-});
-function spyDrawdownAt(k) {
-  const i = weekEndIdx(k);
-  if (i < 252) return 0;
-  let hi = 0;
-  for (let q = i - 252; q <= i; q++) hi = Math.max(hi, spy[q][2]);
-  return hi > 0 ? spy[i][2] / hi - 1 : 0;
-}
 
-// Рейтинг инсайдеров: у бесплатных инструментов отсутствует, у платных — ключевая фича.
-// Считается по закрытым 6-месячным окнам прошедших гейты покупок.
-const insiderAgg = new Map();
-for (const r of buys) {
-  if (!r._gate.ok) continue;
-  for (const o of (r.owners ?? []).filter(isPersonOwner)) {
-    const g = ownerGroups.get(o.cik) ?? o.cik;
-    let e = insiderAgg.get(g);
-    if (!e) { e = { cik: g, name: o.name, roles: new Set(), tickers: new Set(), n: 0, val: 0, last: '', wins: 0, closed: 0, exc: [] }; insiderAgg.set(g, e); }
-    if (o.name) e.name = o.name;
-    e.roles.add(topRole([o.rel]));
-    e.tickers.add(r.T);
-    e.n++; e.val += r.val;
-    if (r.fdate > e.last) e.last = r.fdate;
-    if ((r._fw?.s6 === 'c' || r._fw?.s6 === 'd') && r._fw.e6 !== undefined) {
-      e.closed++; if (r._fw.e6 > 0) e.wins++; e.exc.push(r._fw.e6);
-    }
-  }
-}
-const insiders = [...insiderAgg.values()]
-  .filter(e => e.n >= 3 && e.closed >= 3)
-  .map(e => {
-    const sorted = e.exc.slice().sort((a, b) => a - b);
-    return {
-      cik: e.cik, name: e.name, roles: [...e.roles], nTickers: e.tickers.size,
-      tickers: [...e.tickers].slice(0, 6), n: e.n, val: Math.round(e.val), last: e.last,
-      closed: e.closed, hit: rnd(e.wins / e.closed, 3),
-      med: sorted.length ? rnd(sorted[(sorted.length - 1) >> 1]) : null,
-    };
-  })
-  .sort((a, b) => (b.hit - a.hit) || (b.closed - a.closed))
-  .slice(0, 1500);
-W('insiders.json', insiders);
+const portAgg = portfolioAggregate(backtestRows);
+W('stats.json', {
+  built: today,
+  // Рабочий набор со всеми доказательствами: лестницы порогов, контроль, год за годом,
+  // затухание при задержке входа. Страница показывает, но не считает.
+  set: workingSet, avoid, reference, roundTrip: ROUND_TRIP,
+  setDef: { maxDd: SET_MAX_DD, minVal: SET_MIN_VAL, minDv: SET_MIN_DV, hold: SET_HOLD_MONTHS, freshDays: SET_FRESH_DAYS },
+  // Диагностические срезы: что на самом деле лежит в каждой группе сделок
+  portfolio: portAgg,
+  method: { minDv: PORT_MIN_DV, hold: PORT_HOLD, split: PORT_SPLIT, minNames: 5, minMonths: PORT_MIN_MONTHS, thin: PORT_THIN },
+  n: backtestRows.length,
+  nOk: backtestRows.filter(r => r.gate === 'ok').length,
+  nSet: backtestRows.filter(r => r.set === 1).length,
+});
 
 // Карточки тикеров (второй проход по ценам — ряды уже вытеснены из кэша)
 mkdirSync(join(dataOut, 'tickers'), { recursive: true });
@@ -992,9 +699,11 @@ for (const [t, rows] of byTicker) {
     t, name: ref.get(cik0)?.name ?? rows[0].t, exchange: ref.get(cik0)?.exchange ?? null,
     cat: rows[0].cat, asOf: s?.length ? s[s.length - 1][0] : null,
     bucket: buysHere[buysHere.length - 1]._bucket ?? null,
-    // «Культура продаж» эмитента (паттерн VerityData): где продажи — рутина, а где событие
-    sellRatio: rnd(sells.length / buysHere.length, 2),
+    // Доля продаж НЕ показывается: проверено — продажи инсайдеров не несут информации
+    // (портфель проданных бумаг даёт +0.1% к сопоставимым, t=0.19). Держим только счётчики.
+    nSells: sells.length,
     okBuys: buysHere.filter(r => r._gate.ok).length,
+    setBuys: buysHere.filter(r => r._set === 1).length,
     trades: rows.map(r => ({
       fdate: r.fdate, tdate: r.tdate, form: r.form, code: r.code,
       who: (r.owners ?? []).map(o => o.name).join('; '),
@@ -1003,9 +712,8 @@ for (const [t, rows] of byTicker) {
       // Цена сделки в той же системе координат, что и график: номинал / сплит-фактор
       pxAdj: r.px && r._split ? rnd(r.px / r._split, 4) : r.px,
       b5: isPlanned(r) ? 1 : 0,
-      cl: r.code === 'P' ? (clusterOfRow.get(r)?.dense ?? 1) : null,
       drop: r.code === 'P' ? (r._gate?.drop ?? null) : null,
-      score: r._score?.total ?? null,
+      set: r.code === 'P' ? (r._set ?? 0) : null,
     })).sort((a, b) => a.tdate < b.tdate ? 1 : -1),
     weekly, daily,
   });
@@ -1065,8 +773,7 @@ W('meta.json', {
   survival,
   backtest: { rows: backtestRows.length, years },
   feed: { rows: feedRows.length, days: FEED_DAYS },
-  clusters: { active: activeClusters.length },
-  insiders: { ranked: insiders.length },
+  set: { rows: backtestRows.filter(r => r.set === 1).length, live: feedRows.filter(r => r.set === 1).length },
   quartersDone: backfillState.done ?? [], liveLastDay: liveState.lastDay ?? null,
   pricesUpdated: priceState.updated ?? null, pricesMissing: Object.keys(priceState.missing ?? {}).length,
   spyLast: spy[spy.length - 1][0], iwm: !!iwm?.length,
@@ -1074,8 +781,12 @@ W('meta.json', {
 
 console.log(`[compute] сделок ${trades.length}, покупок ${buys.length}, прошли гейты ${okN} (${Math.round(okN / Math.max(1, buys.length) * 100)}%)`);
 console.log(`[compute] отсев: ${Object.entries(dropCounts).sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k}=${v}`).join(', ') || 'нет'}`);
-console.log(`[compute] кластеров активных ${activeClusters.length}, бэктест ${backtestRows.length}, инсайдеров ${insiders.length}, карточек ${tickerFiles}`);
+console.log(`[compute] бэктест ${backtestRows.length}, в рабочем наборе ${backtestRows.filter(r => r.set === 1).length}, карточек ${tickerFiles}`);
 console.log(`[compute] без цен: ${noPriceTickers.size} тикеров; OTC отсечено строк: ${cntOtc} (из них по реестру символов: ${cntOtcByRegistry})`);
 console.log(`[compute] качество: чужой тикер ${quality.reassigned} строк в ${quality.reassignedTickers.size} тикерах; символ вне реестра ${quality.unknownSymbol}; вход невозможен ${quality.noEntry}; снято выбросов ${readStats.droppedBars} в ${readStats.dirtySeries} рядах; обрезано замороженных хвостов ${readStats.frozenBars} баров в ${readStats.frozenSeries} рядах`);
 console.log(`[compute] ремонт рядов: пересчитано по сплитам ${readStats.splitFixed}; обрезано по реестру ${readStats.clippedBars} баров в ${readStats.clippedSeries} рядах; срезано по разрыву данных ${readStats.brokenBars} баров в ${readStats.brokenSeries} рядах; устаревших рядов (не делистинг) ${stalePrices.size}`);
-console.log(`[compute] наборы: ${recipes.map(r => `${r.key} α=${(r.a * 100).toFixed(1)}% t=${r.t}${r.control ? ` сверх контроля ${(r.control.ex * 100).toFixed(1)}% t=${r.control.t}` : ''}`).join('; ')}`);
+if (workingSet) {
+  console.log(`[compute] рабочий набор: ${workingSet.n} бумаг, к SPY ${(workingSet.spy * 100).toFixed(1)}% (t=${workingSet.spyT}), `
+    + `α к 3 факторам ${(workingSet.a * 100).toFixed(1)}% (t=${workingSet.t}), Шарп ${workingSet.sharpe}, `
+    + `сверх контроля ${workingSet.control ? (workingSet.control.ex * 100).toFixed(1) + '% (t=' + workingSet.control.t + ')' : 'н/д'}, нетто ${(workingSet.net * 100).toFixed(1)}%`);
+} else console.log('[compute] рабочий набор: недостаточно месяцев для оценки');

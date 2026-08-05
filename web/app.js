@@ -1,5 +1,5 @@
 // Инсайдерский радар — логика интерфейса. ES-модуль, без зависимостей.
-import { PriceChart, MarketChart, fmtPrice, fmtInt, fmtMoney, fmtPct } from './charts.js';
+import { PriceChart, fmtPrice, fmtInt, fmtMoney, fmtPct } from './charts.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -7,23 +7,16 @@ const trunc = (s, n) => String(s ?? '').length > n ? String(s).slice(0, n - 1) +
 const cls = v => v === null || v === undefined ? '' : v > 0 ? 'pos' : v < 0 ? 'neg' : '';
 
 const ROLE_LABEL = { F: 'CFO', C: 'CEO/През', O: 'Офицер', D: 'Директор', T: '10%', X: 'Прочее' };
-// Компоненты скора v4 (scripts/lib/scoring.mjs). Кластера, прироста позиции, трек-рекорда
-// и штрафа за размер здесь больше нет — они не пережили портфельную проверку.
-const PART_LABEL = {
-  oppo: 'оппортунистическая, не рутина', near: 'у 52-недельного максимума',
-  role: 'роль', small: 'малое имя', firstEver: 'первая покупка',
-};
 // Признаки в Ленте обозначаются одно-двухбуквенными кодами, чтобы таблица не требовала
 // горизонтальной прокрутки. Расшифровка — в легенде под фильтрами и в подсказке каждой метки.
 // Формат: код -> [название, пояснение, стиль метки]. Коды не должны повторяться —
 // проверяется самотестом (scripts/selftest.mjs, «легенда признаков без коллизий»).
 export const FEAT = {
-  wo:            ['О',  'После отчёта', 'Покупка в первую неделю после публикации 10-Q/10-K — на свежей публичной информации', 'buy'],
-  high:          ['М',  'У максимума', 'Акция не более чем на 5% ниже 52-недельного максимума: инсайдер платит высокую цену', 'buy'],
-  'first-ever':  ['1',  'Первая покупка', 'Первая покупка этого инсайдера в наших данных', 'buy'],
+  high:          ['М',  'У максимума', 'Акция не более чем на 5% ниже 52-недельного максимума: инсайдер платит высокую цену. Ключевое условие рабочего набора', 'buy'],
+  'first-ever':  ['1',  'Первая покупка', 'Первая покупка этого инсайдера в наших данных. Лучше сопоставимых бумаг, но индекс не обгоняет', 'gray'],
   // Помечен нейтрально сознательно: на проверке вне выборки признак дал отрицательный
   // эффект (−2.4%) и в скоринг v3 не вошёл — зелёная метка вводила бы в заблуждение
-  'first-in-3y': ['3г', 'Не покупал 3 года', 'Первая покупка за три года. Проверку вне выборки признак НЕ прошёл (−2.4%) и в скор не входит — показан справочно', 'gray'],
+  'first-in-3y': ['3г', 'Не покупал 3 года', 'Первая покупка за три года. Предсказательной силы не показала — метка справочная', 'gray'],
   pledge:        ['З',  'Залог', 'Акции инсайдера в залоге — риск принудительной продажи', 'gray'],
   trust:         ['Т',  'Траст', 'Покупка через траст или на супруга — деньги того же инсайдера', 'gray'],
   indirect:      ['Кс', 'Косвенное владение', 'Бумаги записаны не напрямую на инсайдера', 'gray'],
@@ -53,8 +46,8 @@ $('#theme-toggle').addEventListener('click', () => {
 
 // ---------- Состояние ----------
 const state = {
-  feed: null, clusters: null, stats: null, meta: null, insiders: null,
-  tickersIndex: null, tickerData: null, chart: null, feedShown: 100, sort: null, preset: 'all',
+  feed: null, stats: null, meta: null,
+  tickersIndex: null, tickerData: null, chart: null, feedShown: 100, sort: null,
 };
 async function fetchJson(path) {
   const res = await fetch('data/' + path, { cache: 'no-cache' });
@@ -64,7 +57,7 @@ async function fetchJson(path) {
 
 // ---------- Роутинг ----------
 const tabs = document.querySelectorAll('.tabs a');
-const TABS = ['screener', 'feed', 'ticker', 'insiders', 'market', 'stats'];
+const TABS = ['screener', 'feed', 'ticker', 'stats'];
 function route() {
   const hash = location.hash || '#screener';
   let [tab, arg] = hash.slice(1).split('/');
@@ -73,8 +66,6 @@ function route() {
   for (const p of document.querySelectorAll('.tab-panel')) p.classList.toggle('active', p.id === 'tab-' + tab);
   if (tab === 'screener') loadScreener();
   if (tab === 'feed') loadFeed(arg);
-  if (tab === 'insiders') loadInsiders();
-  if (tab === 'market') loadMarket();
   if (tab === 'stats') loadStats();
   if (tab === 'ticker') { loadTickerIndex(); if (arg) openTicker(decodeURIComponent(arg)); }
 }
@@ -123,30 +114,6 @@ function checkStale() {
 }
 
 // ---------- Общие компоненты ----------
-function scoreCell(score, parts) {
-  if (score === null || score === undefined) return '<span class="muted">—</span>';
-  return `<span class="score" data-score="${score}" data-parts='${esc(JSON.stringify(parts ?? {}))}' title="Клик — разбор компонент, повторный клик — обратно">${score}</span>`;
-}
-// Разбор компонент разворачивается и сворачивается по клику: элемент не заменяется,
-// а меняет содержимое, поэтому число всегда можно вернуть.
-function bindScoreTips(sel) {
-  for (const s of document.querySelectorAll(sel + ' .score')) {
-    s.addEventListener('click', () => {
-      if (s.dataset.open === '1') {
-        s.textContent = s.dataset.score;
-        s.classList.remove('score-open');
-        s.dataset.open = '0';
-        return;
-      }
-      const parts = JSON.parse(s.dataset.parts);
-      const txt = Object.entries(parts).filter(([, v]) => v !== 0)
-        .map(([k, v]) => `${PART_LABEL[k] ?? k} ${v > 0 ? '+' : ''}${v}`).join(' · ');
-      s.textContent = txt || 'нет компонент';
-      s.classList.add('score-open');
-      s.dataset.open = '1';
-    });
-  }
-}
 // Сортировка по трём состояниям: убывание → возрастание → исходный порядок.
 // Направление показывается стрелкой в заголовке.
 function bindSort(sel, rerender) {
@@ -183,7 +150,6 @@ function featureCell(r) {
     const code = DROP_CODE[r.drop] ?? r.drop.slice(0, 2);
     out.push(`<span class="pill warn feat" title="${esc('Отсеяна: ' + dropLabel(r.drop))}">${esc(code)}</span>`);
   }
-  if (r.wo) out.push(featPill('wo'));
   if (r.dd !== null && r.dd >= -0.05) out.push(featPill('high'));
   if (r.inflect) out.push(featPill(r.inflect));
   for (const t of r.tags ?? []) out.push(featPill(t));
@@ -195,7 +161,7 @@ function renderFeatLegend() {
   if (!boxes.length) return;
   const group = (title, items) => `<div class="legend-group"><b>${esc(title)}</b>${items.map(([code, name, why, style]) =>
     `<span class="legend-item" title="${esc(why)}"><i class="pill ${style ?? 'gray'} feat">${esc(code)}</i>${esc(name)}</span>`).join('')}</div>`;
-  const signal = ['wo', 'high', 'first-ever', 'first-in-3y'].map(k => FEAT[k]);
+  const signal = ['high', 'first-ever', 'first-in-3y'].map(k => FEAT[k]);
   const info = ['pledge', 'trust', 'indirect', 'planned-mark', 'no-history', 'no-price'].map(k => FEAT[k]);
   const labels = state.meta?.gates?.labels ?? {};
   const drops = Object.entries(DROP_CODE)
@@ -206,74 +172,94 @@ function renderFeatLegend() {
   for (const b of boxes) if (b.dataset.done !== '1') { b.innerHTML = html; b.dataset.done = '1'; }
 }
 
-// ---------- СКРИНЕР ----------
-const PRESETS = {
-  all: { f: () => true, hint: 'Активные кластеры: ≥2 независимых инсайдера покупали в одной цепочке (разрыв ≤30 дней), последняя покупка за 90 дней. Участники склеены по совместным подачам, поэтому фонд с его партнёрами считается одним покупателем, а не тремя.' },
-  strong: { f: c => c.dense >= 3, hint: 'Кластеры из ≥3 независимых инсайдеров в окне 14 дней — сильнейший из документированных паттернов (Alldredge, 2019).' },
-  cfo: { f: c => c.role === 'F' || c.role === 'C', hint: 'Кластеры с участием CFO или CEO. Покупки CFO исторически информативнее покупок CEO (Wang, Shin, Francis, 2012).' },
-  inflect: { f: c => c.inflect, hint: 'Кластеры, где хотя бы один инсайдер сломал собственный паттерн — первая покупка за три года или вообще первая.' },
-  track: { f: c => c.track, hint: 'Кластеры с участием инсайдера, чьи прошлые покупки обгоняли бенчмарк в ≥60% случаев (трек-рекорд считается только по закрытым окнам до даты этой сделки).' },
-  dip: { f: c => c.dd !== null && c.dd <= -0.3, hint: 'Покупки при просадке ≥30% от 52-недельного максимума — контрарианская ставка инсайдера против рынка.' },
-  high: { f: c => c.dd !== null && c.dd >= -0.05, hint: 'Покупки вблизи 52-недельного максимума — инсайдер платит высокую цену, что редко бывает случайным (паттерн InsideArbitrage).' },
-  small: { f: c => c.bucket === 'small' || c.bucket === 'micro', hint: 'Малоликвидные имена: исторически именно здесь эффект сильнее всего — но и проскальзывание выше, а ёмкость мала.' },
-};
-for (const b of document.querySelectorAll('#preset-group .chip')) {
+// ---------- СКРИНЕР: рабочий набор ----------
+// Единственный торговый экран. Показывает сделки, попавшие в набор, и главное для решения:
+// сколько дней сигналу и когда выходить. Сигнал живёт около месяца — после этого позиция
+// уже не окупается, поэтому возраст вынесен в отдельную колонку со статусом.
+let setAge = 'fresh';
+async function loadScreener() {
+  if (!state.feed) {
+    try { state.feed = await fetchJson('feed.json'); }
+    catch { $('#set-table').innerHTML = '<tr><td>Данные ещё не собраны.</td></tr>'; return; }
+  }
+  if (!state.stats) { try { state.stats = await fetchJson('stats.json'); } catch { /* числа появятся позже */ } }
+  renderSetHeader();
+  renderSet();
+}
+for (const b of document.querySelectorAll('#set-age .chip')) {
   b.addEventListener('click', () => {
-    for (const x of document.querySelectorAll('#preset-group .chip')) x.classList.remove('active');
+    for (const x of document.querySelectorAll('#set-age .chip')) x.classList.remove('active');
     b.classList.add('active');
-    state.preset = b.dataset.preset;
-    state.sort = null;
-    renderClusters();
+    setAge = b.dataset.age;
+    renderSet();
   });
 }
-async function loadScreener() {
-  if (!state.clusters) {
-    try { state.clusters = await fetchJson('clusters.json'); }
-    catch { $('#clusters-table').innerHTML = '<tr><td>Данные ещё не собраны.</td></tr>'; return; }
+function renderSetHeader() {
+  const d = state.stats?.setDef, s = state.stats?.set;
+  if (d) {
+    $('#set-rule').innerHTML =
+      `Инсайдер покупает, когда акция <b>не ниже ${Math.abs(Math.round(d.maxDd * 100))}%</b> от 52-недельного максимума, ` +
+      `на сумму <b>от ${fmtMoney(d.minVal)}</b>, в бумаге с оборотом <b>от ${fmtMoney(d.minDv)}</b> в день. ` +
+      `Держать <b>${d.hold} месяца</b>. Входить в течение месяца после подачи формы: дальше сигнала нет.`;
   }
-  renderClusters();
+  if (s) {
+    const cell = (v, lab, hint) => `<div class="sn" title="${esc(hint)}"><b>${v}</b><span>${esc(lab)}</span></div>`;
+    $('#set-numbers').innerHTML =
+      cell(fmtPct(s.spy), 'к S&P 500 в год', `t = ${s.spyT}; информационный коэффициент ${s.ir}`) +
+      cell(fmtPct(s.net), 'нетто после издержек', `оборот ${(s.turnover * 100).toFixed(0)}% в год, ${fmtPct(state.stats.roundTrip)} на круг`) +
+      cell(String(s.sharpe), 'коэффициент Шарпа', 'у индекса за тот же период — см. таблицу эталонов') +
+      cell(fmtPct(s.a), 'альфа к 3 факторам', `рынок, размер, моментум; t = ${s.t}`) +
+      (s.control ? cell(fmtPct(s.control.ex), 'сверх бумаг у максимума', `t = ${s.control.t}; столько добавляет сам факт покупки инсайдера`) : '') +
+      cell(String(s.n), 'бумаг в портфеле', `в среднем за ${s.mo} месяцев`);
+  }
 }
-function renderClusters() {
-  const p = PRESETS[state.preset] ?? PRESETS.all;
-  $('#screener-hint').textContent = p.hint;
-  const rows = sortRows(state.clusters.filter(p.f));
-  const th = `<tr>
-    <th>Тикер</th><th>Компания</th><th class="num" title="Независимых физлиц в плотном окне 14 дней">Инсайдеров</th>
-    <th class="num">Покупок</th><th>Период</th>
-    <th class="num sortable" data-sort="totalVal">Объём ⇅</th><th class="num">Ср. цена</th>
-    <th class="num">Тек. цена</th><th class="num sortable" data-sort="chg">Изм. ⇅</th>
-    <th class="num sortable" data-sort="dd" title="Просадка от 52-недельного максимума на дату последней покупки">Контекст ⇅</th>
-    <th>Ликвидность</th><th>Признаки</th>
-    <th class="num sortable" data-sort="score" title="Скор сигнала; клик по значению раскрывает компоненты">Скор ⇅</th>
-    <th>Покупатели</th></tr>`;
-  $('#clusters-table').innerHTML = th + (rows.length ? rows.map(c => `<tr>
-    <td><a class="tick" href="#ticker/${encodeURIComponent(c.t)}">${esc(c.t)}</a></td>
-    <td title="${esc(c.name)}">${esc(trunc(c.name, 26))}</td>
-    <td class="num"><span class="pill buy">×${c.dense}</span>${c.n > c.dense ? `<span class="muted"> /${c.n}</span>` : ''}</td>
-    <td class="num">${c.nTrades}</td>
-    <td>${esc(c.first)} → ${esc(c.last)}</td>
-    <td class="num">${fmtMoney(c.totalVal)}</td>
-    <td class="num">${fmtPrice(c.vwap)}</td>
-    <td class="num">${fmtPrice(c.cur)}</td>
-    <td class="num ${cls(c.chg)}">${fmtPct(c.chg)}</td>
-    <td class="num ${cls(c.dd)}">${fmtPct(c.dd, 0)}</td>
-    <td>${esc(c.bucket)}</td>
-    <td>${c.inflect ? '<span class="pill buy" title="Инсайдер сломал собственный паттерн">слом</span> ' : ''}${c.track ? '<span class="pill buy" title="Среди покупателей — инсайдер с успешным трек-рекордом">трек</span>' : ''}</td>
-    <td class="num">${scoreCell(c.score, c.parts)}</td>
-    <td class="score-detail">${c.buyers.slice(0, 4).map(b => `${esc(b.name)} <span class="muted">(${esc(ROLE_LABEL[topRoleOf(b.rel)] ?? '')})</span>`).join('; ')}${c.buyers.length > 4 ? ' …' : ''}</td>
-  </tr>`).join('') : '<tr><td colspan="14" class="muted">Под этот фильтр сейчас нет активных кластеров.</td></tr>');
-  $('#screener-count').textContent = rows.length ? `${rows.length} активных кластеров` : '';
-  bindSort('#clusters-table', renderClusters);
-  bindScoreTips('#clusters-table');
+function setStatus(age, fresh) {
+  if (age <= fresh * 0.7) return ['ok', 'свежий'];
+  if (age <= fresh) return ['warn', 'на пределе'];
+  return ['dead', 'протух'];
 }
-function topRoleOf(rel) { for (const c of ['F', 'C', 'O', 'D', 'T', 'X']) if ((rel ?? '').includes(c)) return c; return 'X'; }
+function renderSet() {
+  const fresh = state.stats?.setDef?.freshDays ?? 45;
+  let rows = state.feed.filter(r => r.set === 1);
+  if (setAge === 'fresh') rows = rows.filter(r => r.age <= fresh);
+  $('#set-count').textContent = rows.length
+    ? `${rows.length} ${setAge === 'fresh' ? 'действующих сигналов' : 'сигналов за 200 дней'}`
+    : '';
+  const th = `<tr><th>Тикер</th><th>Компания</th><th>Подана</th>
+    <th class="num" title="Дней с подачи формы. Сигнал живёт около месяца">Возраст</th>
+    <th>Статус</th><th>Инсайдер</th><th>Роль</th>
+    <th class="num">Сумма</th><th class="num">Цена сделки</th><th class="num">Тек. цена</th>
+    <th class="num" title="Изменение с первого торгового дня после подачи">Изм.</th>
+    <th class="num" title="Насколько ниже 52-недельного максимума на дату сделки">До макс.</th>
+    <th class="num">Оборот</th>
+    <th title="Ориентир выхода: три месяца от входа">Выход</th></tr>`;
+  $('#set-table').innerHTML = th + (rows.length ? rows.map(r => {
+    const [cl2, lab] = setStatus(r.age, fresh);
+    return `<tr class="${cl2 === 'dead' ? 'row-dead' : ''}">
+      <td><a class="tick" href="#ticker/${encodeURIComponent(r.t)}">${esc(r.t)}</a></td>
+      <td title="${esc(r.name)}">${esc(trunc(r.name, 24))}</td>
+      <td>${esc(r.fdate)}</td>
+      <td class="num">${r.age}</td>
+      <td><span class="pill ${cl2 === 'ok' ? 'buy' : cl2 === 'warn' ? 'warn' : 'gray'}">${lab}</span></td>
+      <td title="${esc(r.who)}">${esc(trunc(r.who, 22))}</td>
+      <td>${esc(ROLE_LABEL[r.role] ?? r.role)}</td>
+      <td class="num">${fmtMoney(r.val)}</td>
+      <td class="num">${fmtPrice(r.px)}</td>
+      <td class="num">${fmtPrice(r.cur)}</td>
+      <td class="num ${cls(r.chg)}">${fmtPct(r.chg)}</td>
+      <td class="num ${cls(r.dd)}">${fmtPct(r.dd, 0)}</td>
+      <td class="num">${fmtMoney(r.dv)}</td>
+      <td class="muted">${esc(r.exit ?? '—')}</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="14" class="muted">Действующих сигналов сейчас нет. Это нормально: набор даёт около восьми сигналов в месяц, и в отдельные месяцы их не бывает вовсе.</td></tr>');
+}
 
 // ---------- ЛЕНТА ----------
 const ff = {
-  roles: new Set(), cluster: false, gate: 'ok', q: '', recipe: null,
+  roles: new Set(), setOnly: false, gate: 'ok', q: '',
   // Диапазоны «от/до»: пустое поле = граница не задана. Подсказки в placeholder
   // показывают рекомендованные значения, но сами по себе не применяются.
-  valMin: null, valMax: null, scoreMin: null, scoreMax: null, downMin: null, downMax: null,
+  valMin: null, valMax: null, downMin: null, downMax: null,
 };
 // Значение поля диапазона: пусто или не число -> граница снята
 const rngVal = id => {
@@ -304,8 +290,6 @@ function bindRange(id, key, scale = 1) {
 }
 bindRange('#f-val-min', 'valMin');
 bindRange('#f-val-max', 'valMax');
-bindRange('#f-score-min', 'scoreMin');
-bindRange('#f-score-max', 'scoreMax');
 bindRange('#f-down-min', 'downMin', 0.01);   // проценты -> доля
 bindRange('#f-down-max', 'downMax', 0.01);
 
@@ -330,28 +314,6 @@ bindRange('#f-down-max', 'downMax', 0.01);
 // Каждый пресет включает СВОЙ порог оборота и подразумевает СВОЙ срок удержания —
 // вне этой конфигурации его числа не воспроизводятся. Сроки указаны в подписях чипов
 // и в блоке «Наборы» на вкладке Статистика.
-const RECIPE_MIN_DV = 3e6;
-const liquid = r => r.dv !== null && r.dv >= RECIPE_MIN_DV;
-const RECIPES = {
-  // держать 3 месяца: +9.1% альфы (t=3.45), сверх момент-контроля +6.6% (t=2.67)
-  high: r => liquid(r) && r.dd !== null && r.dd >= -0.05,
-  // держать 12 месяцев: +5.1% (t=2.06), концентрированный вариант — около 83 бумаг
-  score38: r => liquid(r) && r.score !== null && r.score >= 38,
-  // держать 12 месяцев: +3.1% (t=2.14), широкий вариант — около 245 бумаг
-  score28: r => liquid(r) && r.score !== null && r.score >= 28,
-  // СРАВНИТЕЛЬНЫЙ: собственная альфа −0.9%, но это на 5.9 п.п. (t=2.27) лучше такой же
-  // просевшей вселенной. Инструмент отбора внутри контрарианской корзины, не покупка.
-  deep: r => liquid(r) && r.dd !== null && r.dd < -0.3,
-};
-for (const b of document.querySelectorAll('#f-recipes .chip')) {
-  b.addEventListener('click', () => {
-    const key = b.dataset.recipe;
-    for (const x of document.querySelectorAll('#f-recipes .chip')) x.classList.remove('active');
-    if (key === 'reset' || ff.recipe === key) ff.recipe = null;
-    else { ff.recipe = key; b.classList.add('active'); }
-    renderFeed(true);
-  });
-}
 for (const b of document.querySelectorAll('#f-roles .chip')) {
   b.addEventListener('click', () => {
     b.classList.toggle('active');
@@ -360,7 +322,7 @@ for (const b of document.querySelectorAll('#f-roles .chip')) {
   });
 }
 $('#f-gate').addEventListener('change', e => { ff.gate = e.target.value; renderFeed(true); });
-$('#f-cluster').addEventListener('change', e => { ff.cluster = e.target.checked; renderFeed(true); });
+$('#f-set').addEventListener('change', e => { ff.setOnly = e.target.checked; renderFeed(true); });
 {
   let deb;
   $('#f-search').addEventListener('input', e => {
@@ -370,35 +332,21 @@ $('#f-cluster').addEventListener('change', e => { ff.cluster = e.target.checked;
 }
 $('#feed-more').addEventListener('click', () => { state.feedShown += 200; renderFeed(false); });
 
-async function loadFeed(arg) {
+async function loadFeed() {
   if (!state.feed) {
     try { state.feed = await fetchJson('feed.json'); }
     catch { $('#feed-table').innerHTML = '<tr><td>Данные ленты ещё не собраны.</td></tr>'; return; }
   }
-  // Подписи наборов живут в stats.json — подтягиваем их и на Ленте, не дожидаясь,
-  // пока пользователь откроет Статистику. Ошибка загрузки не мешает ленте работать.
-  if (!state.stats) {
-    try { state.stats = await fetchJson('stats.json'); } catch { /* подписи останутся краткими */ }
-  }
-  renderRecipes();
   renderFeatLegend();
-  if (arg) {   // переход из рейтинга инсайдеров: #feed/cik:12345
-    const m = /^cik:(\d+)$/.exec(arg);
-    if (m) { ff.cikFilter = Number(m[1]); ff.gate = 'all'; $('#f-gate').value = 'all'; }
-  } else ff.cikFilter = null;
   renderFeed(true);
 }
 function feedFiltered() {
-  const recipe = ff.recipe ? RECIPES[ff.recipe] : null;
   return state.feed.filter(r =>
-    (!recipe || recipe(r)) &&
     (ff.gate === 'all' || (ff.gate === 'ok' ? !r.drop : !!r.drop)) &&
-    (!ff.cikFilter || (r.ciks ?? []).includes(ff.cikFilter)) &&
     (!ff.roles.size || ff.roles.has(r.role)) &&
     inRange(r.val, ff.valMin, ff.valMax) &&
-    inRange(r.score, ff.scoreMin, ff.scoreMax) &&
     inRange(r.dOwn, ff.downMin, ff.downMax) &&
-    (!ff.cluster || r.cl >= 2) &&
+    (!ff.setOnly || r.set === 1) &&
     (!ff.q || r.t.toLowerCase().includes(ff.q) || r.name.toLowerCase().includes(ff.q) || r.who.toLowerCase().includes(ff.q)));
 }
 function renderFeed(reset) {
@@ -412,8 +360,7 @@ function renderFeed(reset) {
     <th class="num sortable" data-sort="chgT" title="Изменение цены с ДАТЫ СДЕЛКИ — результат самого инсайдера. При просроченной подаче отличается от колонки «с подачи»">с сделки ⇅</th>
     <th class="num sortable" data-sort="val">Сумма ⇅</th>
     <th class="num" title="Прирост позиции инсайдера">Δ поз.</th>
-    <th class="num">Класт.</th><th>Признаки</th>
-    <th class="num sortable" data-sort="score" title="Клик по значению раскрывает компоненты">Скор ⇅</th>
+    <th title="Попала ли сделка в рабочий набор">Набор</th><th>Признаки</th>
     <th class="num" title="Через неделю после того, как сигнал стал публичным">1н</th>
     <th class="num" title="Через месяц">1м</th>
     <th class="num" title="Через 6 месяцев">6м</th>
@@ -431,21 +378,17 @@ function renderFeed(reset) {
     <td class="num ${cls(r.chgT)}">${fmtPct(r.chgT)}</td>
     <td class="num">${fmtMoney(r.val)}</td>
     <td class="num">${r.dOwn === null ? '—' : (r.dOwn >= 9.99 ? 'новая' : fmtPct(r.dOwn, 0))}</td>
-    <td class="num">${r.cl >= 2 ? `<span class="pill buy">×${r.cl}</span>` : ''}</td>
+    <td>${r.set === 1 ? '<span class="pill buy" title="Входит в рабочий набор">✓</span>' : ''}</td>
     <td>${featureCell(r)}</td>
-    <td class="num">${scoreCell(r.score, r.parts)}</td>
     <td class="num ${cls(r.w1)}">${fmtPct(r.w1)}</td>
     <td class="num ${cls(r.m1)}">${fmtPct(r.m1)}</td>
     <td class="num ${cls(r.m6)}">${fmtPct(r.m6)}</td>
     <td class="num">${fmtPrice(r.cur)}</td>
     <td class="num ${cls(r.chg)}">${fmtPct(r.chg)}</td>
-  </tr>`).join('') : `<tr><td colspan="19" class="muted">${ff.cikFilter
-      ? 'У этого инсайдера нет сделок за последние 200 дней — лента хранит только свежий период, а рейтинг считается по всей истории.'
-      : 'Ничего не найдено.'}</td></tr>`);
-  $('#feed-count').textContent = `${Math.min(state.feedShown, rows.length)} из ${rows.length}` + (ff.cikFilter ? ' · фильтр по инсайдеру' : '');
+  </tr>`).join('') : '<tr><td colspan="18" class="muted">Ничего не найдено.</td></tr>');
+  $('#feed-count').textContent = `${Math.min(state.feedShown, rows.length)} из ${rows.length}`;
   $('#feed-more').disabled = state.feedShown >= rows.length;
   bindSort('#feed-table', renderFeed);
-  bindScoreTips('#feed-table');
 }
 const dropLabel = d => state.meta?.gates?.labels?.[d] ?? d;
 
@@ -531,111 +474,25 @@ function renderTickerTrades() {
     <td class="num">${fmtMoney(r.val)}</td>
     <td class="num">${r.code !== 'P' || r.dOwn === null ? '—' : (r.dOwn >= 9.99 ? 'новая' : fmtPct(r.dOwn, 0))}</td>
     <td class="num">${fmtInt(r.own)}</td>
-    <td>${r.drop ? `<span class="pill warn feat" title="${esc('Отсеяна: ' + dropLabel(r.drop))}">${esc(DROP_CODE[r.drop] ?? r.drop.slice(0, 2))}</span> ` : ''}${r.b5 ? featPill('planned-mark') : ''}${r.di === 'I' ? featPill('indirect') : ''}${r.sec && !/^common\b/i.test(r.sec) ? `<span class="pill gray feat" title="${esc('Класс бумаги: ' + r.sec)}">Пф</span> ` : ''}${r.cl >= 2 ? `<span class="pill buy" title="Независимых инсайдеров в плотном окне">×${r.cl}</span>` : ''}</td>
-    <td class="num">${r.score ?? ''}</td>
+    <td>${r.drop ? `<span class="pill warn feat" title="${esc('Отсеяна: ' + dropLabel(r.drop))}">${esc(DROP_CODE[r.drop] ?? r.drop.slice(0, 2))}</span> ` : ''}${r.b5 ? featPill('planned-mark') : ''}${r.di === 'I' ? featPill('indirect') : ''}${r.sec && !/^common\b/i.test(r.sec) ? `<span class="pill gray feat" title="${esc('Класс бумаги: ' + r.sec)}">Пф</span> ` : ''}</td>
+    <td>${r.set === 1 ? '<span class="pill buy">✓</span>' : ''}</td>
   </tr>`).join('');
 }
 
-// ---------- ИНСАЙДЕРЫ ----------
-async function loadInsiders() {
-  if (!state.insiders) {
-    try { state.insiders = await fetchJson('insiders.json'); }
-    catch { $('#insiders-table').innerHTML = '<tr><td>Рейтинг ещё не собран.</td></tr>'; return; }
-    let deb;
-    $('#i-search').addEventListener('input', e => {
-      clearTimeout(deb); deb = setTimeout(renderInsiders, 200);
-    });
-    $('#i-minclosed').addEventListener('change', renderInsiders);
-  }
-  renderInsiders();
-}
-function renderInsiders() {
-  const q = $('#i-search').value.trim().toLowerCase();
-  const minClosed = +$('#i-minclosed').value;
-  const rows = sortRows(state.insiders.filter(r =>
-    r.closed >= minClosed && (!q || r.name.toLowerCase().includes(q) || r.tickers.some(t => t.toLowerCase().includes(q)))));
-  const th = `<tr>
-    <th>Инсайдер</th><th>Роли</th><th class="num">Покупок</th><th class="num">Компаний</th>
-    <th>Тикеры</th><th class="num">Объём</th>
-    <th class="num sortable" data-sort="hit" title="Доля покупок, обогнавших бенчмарк за 6 месяцев">Доля удачных ⇅</th>
-    <th class="num sortable" data-sort="med" title="Медианная избыточная доходность за 6 месяцев">Медиана 6м ⇅</th>
-    <th class="num">Закрытых</th><th>Последняя</th></tr>`;
-  $('#insiders-table').innerHTML = th + (rows.length ? rows.slice(0, 300).map(r => `<tr>
-    <td><a class="tick" href="#feed/cik:${r.cik}" title="Показать сделки этого инсайдера">${esc(trunc(r.name, 30))}</a></td>
-    <td>${r.roles.map(x => esc(ROLE_LABEL[x] ?? x)).join(', ')}</td>
-    <td class="num">${r.n}</td>
-    <td class="num">${r.nTickers}</td>
-    <td class="score-detail">${r.tickers.map(t => `<a class="tick" href="#ticker/${encodeURIComponent(t)}">${esc(t)}</a>`).join(' ')}</td>
-    <td class="num">${fmtMoney(r.val)}</td>
-    <td class="num ${r.hit >= 0.6 ? 'pos' : r.hit <= 0.3 ? 'neg' : ''}">${Math.round(r.hit * 100)}%</td>
-    <td class="num ${cls(r.med)}">${fmtPct(r.med)}</td>
-    <td class="num">${r.closed}</td>
-    <td>${esc(r.last)}</td>
-  </tr>`).join('') : '<tr><td colspan="10" class="muted">Ничего не найдено.</td></tr>');
-  bindSort('#insiders-table', renderInsiders);
-}
-
-// ---------- РЫНОК (агрегатный индикатор) ----------
-const STATE_LABEL = {
-  'вспышка': ['pill sell', 'Кластерная активность вышла за 3σ — единственная зона, где индикатор исторически давал заметное преимущество (SPY +28.5% за год против базовых +13.7%)'],
-  'повышенная': ['pill buy', 'Активность 2–3σ: ранний сигнал. Сама по себе эта зона по средней доходности от базы не отличается — смотреть стоит на переход к «вспышке»'],
-  'норма': ['pill gray', 'Активность в пределах двухлетней нормы — индикатор молчит'],
-  'затишье': ['pill gray', 'Инсайдеры покупают меньше обычного. Это НЕ медвежий сигнал: доходность рынка после таких недель совпадала с базовой'],
-  'н/д': ['pill gray', 'Недостаточно истории для нормировки'],
-};
-async function loadMarket() {
-  if (!state.market) {
-    try { state.market = await fetchJson('market.json'); }
-    catch { $('#market-now').textContent = 'Индикатор ещё не собран.'; return; }
-  }
-  const m = state.market;
-  const [cls, title] = STATE_LABEL[m.now.state] ?? STATE_LABEL['н/д'];
-  const last = m.weeks.filter(w => w.z !== null).slice(-1)[0];
-  $('#market-now').innerHTML =
-    `<div class="card-head"><div><span class="tc-name">Инсайдеры сейчас:</span> ` +
-    `<span class="${cls}" title="${esc(title)}" style="font-size:14px">${esc(m.now.state)}</span> ` +
-    `<span class="muted">${m.now.z >= 0 ? '+' : ''}${m.now.z}σ от двухлетней нормы</span></div>` +
-    `<div class="muted">неделя ${esc(last?.w ?? '—')} · порог сигнала ${m.thresholds.warn}σ</div></div>` +
-    `<p class="hint">За неделю ${esc(last?.w ?? '')}: покупок, прошедших фильтры — <b>${fmtInt(last?.b)}</b>, ` +
-    `эмитентов с кластером (≥2 независимых покупателя) — <b>${fmtInt(last?.ci)}</b>, ` +
-    `очищенных продаж — <b>${fmtInt(last?.s)}</b>.</p>`;
-  if (!state.mkChart) state.mkChart = new MarketChart($('#mk-chart'));
-  state.mkChart.set(m.weeks, m.thresholds);
-  renderMarketTable();
-}
-function renderMarketTable() {
-  const v = state.market.validation;
-  const t = state.market.thresholds;
-  const rows = [
-    ['Все недели (база)', v.all, 'безусловная доходность SPY за период данных'],
-    ['Затишье (ниже −1σ)', v.quiet, 'индикатор молчит — это не медвежий сигнал'],
-    ['Активность ≥1σ', v.z1, ''],
-    [`Активность ${t.warn}–${t.strong}σ`, v.z23, 'зона «повышенная» отдельно: сама по себе не выделяется'],
-    [`Активность ≥${t.strong}σ`, v.z3, 'зона «вспышка» — здесь весь эффект'],
-    ['Просадка SPY ≥10% И активность ≥1.5σ', v.ddSurge, 'ключевое сравнение'],
-    ['Просадка SPY ≥10% БЕЗ активности', v.ddOnly, 'контроль: одна просадка без инсайдеров'],
-  ];
-  let html = '<tr><th>Состояние на конец недели</th>' +
-    [3, 6, 12].map(h => `<th class="num" colspan="3">SPY через ${h} мес</th>`).join('') + '</tr>';
-  html += '<tr><th></th>' + [3, 6, 12].map(() =>
-    '<th class="num" title="число наблюдений (недели перекрываются)">N</th>' +
-    '<th class="num" title="средняя доходность SPY">сред.</th>' +
-    '<th class="num" title="доля случаев с положительной доходностью">&gt;0</th>').join('') + '</tr>';
-  for (const [label, cell, note] of rows) {
-    if (!cell) continue;
-    html += `<tr${note === 'ключевое сравнение' ? ' style="font-weight:600"' : ''}>` +
-      `<td title="${esc(note)}">${esc(label)}${note ? ' <span class="muted">· ' + esc(note) + '</span>' : ''}</td>` +
-      [3, 6, 12].map(h => {
-        const c = cell['h' + h] ?? {};
-        return `<td class="num muted">${fmtInt(c.n)}</td>` +
-          `<td class="num ${cls(c.mean)}">${fmtPct(c.mean)}</td>` +
-          `<td class="num">${c.pos === null || c.pos === undefined ? '—' : Math.round(c.pos * 100) + '%'}</td>`;
-      }).join('') + '</tr>';
-  }
-  $('#mk-table').innerHTML = html;
-}
-
 // ---------- СТАТИСТИКА ----------
+// Всё, что здесь показано, считает сборка (scripts/compute.mjs). Страница не хранит ни
+// одной цифры о результатах: захардкоженные числа в разметке однажды уже разошлись с
+// движком, и проверить их было нечем.
+const pctPlain = (v, d = 0) => v === null || v === undefined || !Number.isFinite(v) ? '—' : (v * 100).toFixed(d) + '%';
+const tCell = t => {
+  if (t === null || t === undefined) return '<td class="num muted">—</td>';
+  // Значимость показываем явно: без неё разница между ячейками выглядит осмысленной,
+  // хотя на подставных данных |t|>2 не встречается вовсе.
+  const strong = Math.abs(t) >= 2;
+  return `<td class="num ${strong ? cls(t) : 'muted'}" title="${strong ? 'отличие от нуля устойчиво' : 'от нуля неотличимо'}">${t.toFixed(2)}</td>`;
+};
+const numCell = (v, warn) => `<td class="num ${v === null || v === undefined ? 'muted' : (warn && v < 0 ? 'warn-n' : cls(v))}">${fmtPct(v)}</td>`;
+
 async function loadStats() {
   if (!state.stats) {
     try { state.stats = await fetchJson('stats.json'); }
@@ -645,15 +502,12 @@ async function loadStats() {
       `<b>Что здесь считается.</b> Не «сколько принесла средняя сделка», а <b>сколько принёс бы портфель</b>: ` +
       `на конец каждого месяца берутся все бумаги с подходящей покупкой за последние N месяцев, ` +
       `равный вес <b>по бумагам</b> (не по числу подач), держим месяц, повторяем с 2016 года. ` +
-      `Учитываются только имена с дневным оборотом от ${fmtMoney(m.minDv ?? 3e6)} на момент покупки — ` +
-      `остальное не торгуется в принципе. В расчёте ${fmtInt(s.n)} покупок, по которым есть котировки, ` +
-      `из них ${fmtInt(s.nOk)} прошли фильтры информативности.` +
-      (s.placebo ? `<br><b>Шумовой пол.</b> Если брать случайные бумаги той же ликвидности в те же даты, ` +
-        `прежняя метрика «среднее по сделкам» показывает ${fmtPct(s.placebo.med)} ` +
-        `(коридор ${fmtPct(s.placebo.lo)}…${fmtPct(s.placebo.hi)}) — <b>без всякого сигнала</b>. ` +
-        `Поэтому она и вынесена вниз как справочная.` : '') + survivalNote();
-    // Выживаемость — главное ограничение любого бэктеста по инсайдерам, и оно молчаливое:
-    // ряды исчезают вместе с компаниями, которых больше нет. Показываем масштаб прямо здесь.
+      `Учитываются только имена с дневным оборотом от ${fmtMoney(m.minDv ?? 3e6)} на момент покупки. ` +
+      `В расчёте ${fmtInt(s.n)} покупок с котировками, из них ${fmtInt(s.nOk)} прошли фильтры ` +
+      `и ${fmtInt(s.nSet)} попали в рабочий набор.` +
+      `<br><b>Альфа считается к трём факторам</b> — рынок, размер и моментум. Моментум обязателен: ` +
+      `набор отбирает бумаги у 52-недельного максимума, то есть по построению сидит в победителях ` +
+      `моментума, и без этого фактора его результат был бы завышен.` + survivalNote();
     function survivalNote() {
       const sv = state.meta?.survival;
       if (!sv) return '';
@@ -667,98 +521,94 @@ async function loadStats() {
         `компании, которых больше нет. Смещение от этого не устраняется, оно только сокращается ` +
         `по мере дозагрузки истории делистнутых бумаг.`;
     }
-    $('#s-dim').addEventListener('change', renderStats);
+    // Срез «рабочий набор» — трёхмесячная конструкция: показывать его на двенадцати месяцах
+    // значит показывать другой портфель под тем же именем.
+    $('#s-dim').addEventListener('change', () => {
+      if ($('#s-dim').value === 'set') $('#s-hold').value = '3';
+      renderStats();
+    });
     $('#s-hold').addEventListener('change', renderStats);
   }
-  renderRecipes();
+  renderSetBlock();
   renderStats();
 }
 
-// ---------- НАБОРЫ: всё считает сборка, страница только показывает ----------
-// Раньше числа наборов стояли в index.html строками и считались скриптом вне репозитория.
-// Они разошлись с движком (у «скор 38+» в подписи было +5.1% при t=2.06, движок на тех же
-// данных давал +5.7% при t=2.64) и проверить их было нечем. Теперь единственный источник —
-// stats.json, а страница не хранит ни одной цифры о результатах.
-const RECIPE_HOLD = { 3: 'ДЕРЖАТЬ 3 МЕСЯЦА', 6: 'ДЕРЖАТЬ 6 МЕСЯЦЕВ', 12: 'ДЕРЖАТЬ 12 МЕСЯЦЕВ' };
-// Оборот, издержки и доли — величины без знака: «+735% оборота» читается как рост оборота
-const pctPlain = (v, d = 0) => v === null || v === undefined || !Number.isFinite(v) ? '—' : (v * 100).toFixed(d) + '%';
-function recipeById(key) { return (state.stats?.recipes ?? []).find(r => r.key === key) ?? null; }
-function recipeTitle(key) {
-  const r = recipeById(key);
-  if (!r) return '';
-  const parts = [
-    `${RECIPE_HOLD[r.hold] ?? `ДЕРЖАТЬ ${r.hold} МЕС`}.`,
-    `Альфа ${fmtPct(r.a)} годовых (t=${r.t}), в половинах выборки ${fmtPct(r.aT)} до 2021 и ${fmtPct(r.aV)} после.`,
-    `Средний состав ${r.n} бумаг, оборот ${pctPlain(r.turnover)} в год.`,
-    `После издержек ${pctPlain(state.stats.roundTrip, 1)} на круг остаётся ${fmtPct(r.net)}.`,
-  ];
-  if (r.control) parts.push(`Сверх контроля «${r.control.name}»: ${fmtPct(r.control.ex)} (t=${r.control.t}) — столько добавляет сам факт покупки инсайдера.`);
-  return parts.join(' ');
+// Главная таблица: рабочий набор рядом с эталонами. Строки эталонов нужны, чтобы «+7%»
+// читалось в контексте — сама вселенная инсайдерских имён проигрывает индексу.
+function mainRow(r, strong) {
+  return `<tr class="${strong ? 'row-strong' : 'muted-row'}">
+    <td>${strong ? '<b>' + esc(r.name) + '</b>' : esc(r.name)}</td>
+    <td class="num">${r.hold ? r.hold + ' мес' : '—'}</td>
+    <td class="num ${r.n < 15 ? 'warn-n' : ''}">${r.n}</td>
+    ${numCell(r.cagr)}<td class="num">${pctPlain(r.vol, 1)}</td>${numCell(r.dd)}
+    <td class="num">${r.sharpe ?? '—'}</td>
+    ${numCell(r.spy, true)}${tCell(r.spyT)}<td class="num">${r.ir ?? '—'}</td>
+    ${numCell(r.a, true)}${tCell(r.t)}
+    <td class="num">${r.beta ?? '—'}</td><td class="num">${r.mom ?? '—'}</td>
+    <td class="num">${r.turnover === null || r.turnover === undefined ? '—' : pctPlain(r.turnover)}</td>
+    ${numCell(r.net, true)}</tr>`;
 }
-function renderRecipes() {
-  // Без stats.json подставлять нечего: молча оставляем разметку как есть, иначе числа
-  // в тексте затёрлись бы прочерками ещё до того, как payload успел загрузиться
-  if (!state.stats) return;
-  const rs = state.stats.recipes ?? [];
-  const box = $('#recipes-table');
-  if (box && rs.length) {
-    const num = (v, warn) => `<td class="num ${v === null || v === undefined ? 'muted' : (warn && v < 0 ? 'warn-n' : cls(v))}">${fmtPct(v)}</td>`;
-    box.innerHTML = '<tr><th>Набор</th><th class="num">Держать</th><th class="num" title="средний состав портфеля">Бумаг</th>' +
-      '<th class="num" title="среднегодовая доходность самого портфеля">CAGR</th>' +
-      '<th class="num" title="годовая альфа к рынку и наклону размера">Альфа</th><th class="num">t</th>' +
-      '<th class="num">до 2021</th><th class="num">с 2021</th>' +
-      '<th class="num" title="оборот портфеля в год">Оборот</th>' +
-      `<th class="num" title="альфа за вычетом издержек ${pctPlain(state.stats.roundTrip, 1)} на круг">Нетто</th>` +
-      '<th>Сверх контроля</th></tr>' +
-      rs.map(r => `<tr><td><b>${esc(r.name)}</b></td><td class="num">${r.hold} мес</td>` +
-        `<td class="num ${r.n < 15 ? 'warn-n' : ''}">${r.n}</td>` +
-        num(r.cagr) + num(r.a, true) + tCell(r.t) + num(r.aT) + num(r.aV) +
-        `<td class="num">${pctPlain(r.turnover)}</td>` + num(r.net, true) +
-        `<td>${r.control ? `<b>${fmtPct(r.control.ex)}</b> (t=${r.control.t})<br><span class="muted">${esc(r.control.name)}</span>` : '—'}</td></tr>`).join('');
+function renderSetBlock() {
+  const s = state.stats;
+  const set = s?.set;
+  const head = `<tr><th>Портфель</th><th class="num">Держать</th><th class="num" title="средний состав">Бумаг</th>
+    <th class="num">CAGR</th><th class="num">Вол.</th><th class="num">Просадка</th><th class="num" title="доходность сверх безрисковой на единицу волатильности">Шарп</th>
+    <th class="num" title="превышение над S&P 500 в год">к SPY</th><th class="num">t</th>
+    <th class="num" title="информационный коэффициент: превышение на единицу ошибки следования">IR</th>
+    <th class="num" title="альфа к рынку, размеру и моментуму">α 3ф</th><th class="num">t</th>
+    <th class="num">β</th><th class="num" title="нагрузка на моментум">мом.</th>
+    <th class="num">Оборот</th><th class="num" title="к SPY за вычетом издержек">Нетто</th></tr>`;
+  const rows = (set ? mainRow(set, true) : '') + (s?.reference ?? []).map(r => mainRow(r, false)).join('');
+  $('#set-main').innerHTML = head + rows;
+
+  if (s?.setDef) {
+    const d = s.setDef;
+    $('#set-def-note').innerHTML =
+      `Правило: покупка не ниже <b>${Math.abs(Math.round(d.maxDd * 100))}%</b> от 52-недельного максимума, ` +
+      `сумма <b>от ${fmtMoney(d.minVal)}</b>, оборот бумаги <b>от ${fmtMoney(d.minDv)}</b> в день, ` +
+      `удержание <b>${d.hold} месяца</b>, равный вес по бумагам. Издержки в колонке «нетто» — ` +
+      `${pctPlain(s.roundTrip, 1)} на круг.`;
   }
-  // числа внутри текста: <b data-rn="high.control.ex"></b>
-  for (const el of document.querySelectorAll('[data-rn]')) {
-    const [key, ...path] = el.dataset.rn.split('.');
-    let v = key === 'bench' ? state.stats?.benchmarks
-      : key === 'stats' ? state.stats
-        : recipeById(key);
-    for (const p of path) v = v?.[p];
-    if (v === null || v === undefined) { el.textContent = '—'; continue; }
-    el.textContent = el.dataset.rnFmt === 'raw' ? String(v)
-      : el.dataset.rnFmt === 'int' ? fmtInt(v)
-        : el.dataset.rnFmt === 'pct0' ? pctPlain(v) : fmtPct(v);
+  if (!set) { $('#set-proof').innerHTML = ''; return; }
+
+  // Доказательства: лестницы порогов, год за годом, затухание при задержке входа
+  let html = '';
+  if (set.control) {
+    html += `<p class="hint"><b>Сверх собственного ценового контекста: ${fmtPct(set.control.ex)} (t=${set.control.t}).</b> ` +
+      `Контроль — ${esc(set.control.name)}, собранные тем же способом и на тот же срок. Это и есть ответ на вопрос, ` +
+      `добавляет ли инсайдер что-то сверх моментума.</p>`;
   }
-  const lad = $('#recipe-ladder');
-  const high = recipeById('high');
-  if (lad && high?.ladder?.length) {
-    lad.innerHTML = high.ladder.map(l =>
-      `не ниже ${Math.round(Math.abs(l.th) * 100)}% от максимума — <b>${fmtPct(l.a)}</b> (t=${l.t}, ${l.n} бумаг)`).join('; ');
+  for (const L of set.ladders ?? []) {
+    html += `<h4>Порог не подогнан: ${esc(L.name)}</h4><div class="table-wrap"><table class="mini"><tr>` +
+      L.rows.map(x => `<th>${esc(x.lab)}</th>`).join('') + '</tr><tr>' +
+      L.rows.map(x => `<td class="${cls(x.spy)}">${fmtPct(x.spy)}<br><span class="muted">t=${x.t}, ${x.n} бум.</span></td>`).join('') +
+      '</tr></table></div>';
   }
-  for (const b of document.querySelectorAll('#f-recipes .chip[data-recipe]')) {
-    const t = recipeTitle(b.dataset.recipe);
-    if (t) b.title = t;
+  if (set.lag?.length) {
+    html += `<h4>Сигнал живёт около месяца</h4><div class="table-wrap"><table class="mini"><tr>` +
+      set.lag.map(x => `<th>вход через ${x.lag} мес</th>`).join('') + '</tr><tr>' +
+      set.lag.map(x => `<td class="${cls(x.spy)}">${fmtPct(x.spy)}<br><span class="muted">t=${x.t}</span></td>`).join('') +
+      '</tr></table></div>';
   }
-  // Лестница скора в подсказке фильтра — из той же сборки, что и экран статистики
-  const sg = $('#f-score-group');
-  const sc = state.stats?.portfolio?.score;
-  if (sg && sc) {
-    const parts = Object.entries(sc)
-      .map(([g, c]) => [g, c.h12])
-      .filter(([, c]) => c && c.a !== null)
-      .sort((a, b) => (b[1].a ?? 0) - (a[1].a ?? 0))
-      .map(([g, c]) => `${g}: ${fmtPct(c.a)} (t=${c.t})`);
-    if (parts.length) sg.title = sg.title.split(' Лестница')[0] +
-      ` Лестница на удержании 12 мес, годовая альфа — ${parts.join('; ')}.`;
+  if (set.years?.length) {
+    const pos = set.years.filter(y => y.ex > 0).length;
+    html += `<h4>Год за годом против индекса — в плюсе ${pos} из ${set.years.length}</h4>` +
+      '<div class="table-wrap"><table class="mini"><tr>' +
+      set.years.map(y => `<th>${esc(y.y)}</th>`).join('') + '</tr><tr>' +
+      set.years.map(y => `<td class="${cls(y.ex)}">${fmtPct(y.ex, 0)}</td>`).join('') + '</tr></table></div>';
   }
+  $('#set-proof').innerHTML = html;
+
+  const av = s.avoid ?? [];
+  $('#avoid-table').innerHTML = av.length
+    ? `<tr><th>Срез</th><th class="num">Держать</th><th class="num">Бумаг</th><th class="num">CAGR</th>
+       <th class="num">к SPY</th><th class="num">t</th><th class="num">α 3ф</th><th class="num">t</th></tr>` +
+      av.map(r => `<tr><td>${esc(r.name)}</td><td class="num">${r.hold} мес</td><td class="num">${r.n}</td>
+        ${numCell(r.cagr)}${numCell(r.spy, true)}${tCell(r.spyT)}${numCell(r.a, true)}${tCell(r.t)}</tr>`).join('')
+    : '<tr><td>Данных пока недостаточно.</td></tr>';
 }
+
 const GROUP_LABEL = { F: 'CFO', C: 'CEO/През', O: 'Офицер', D: 'Директор', T: '10%-владелец', X: 'Прочее' };
-const tCell = t => {
-  if (t === null || t === undefined) return '<td class="num muted">—</td>';
-  // Значимость показываем явно: без неё разница между ячейками выглядит осмысленной,
-  // хотя на подставных данных |t|>2 не встречается вовсе.
-  const strong = Math.abs(t) >= 2;
-  return `<td class="num ${strong ? cls(t) : 'muted'}" title="${strong ? 'отличие от нуля устойчиво' : 'от нуля неотличимо'}">${t.toFixed(2)}</td>`;
-};
 function renderStats() {
   const dim = $('#s-dim').value;
   const H = $('#s-hold').value;
@@ -768,59 +618,25 @@ function renderStats() {
   let html = '<tr><th>Группа</th>' +
     '<th class="num" title="средний состав портфеля, бумаг в месяц">Бумаг</th>' +
     '<th class="num" title="среднегодовая доходность самого портфеля">CAGR</th>' +
-    '<th class="num" title="годовая альфа к двум факторам: рынок и наклон размера">Альфа</th>' +
-    '<th class="num" title="t-статистика альфы с поправкой Ньюи–Уэста; |t|≥2 = устойчиво">t</th>' +
-    `<th class="num" title="альфа на первой половине выборки">до ${(m.split ?? '2021-01').slice(0, 4)}</th>` +
-    `<th class="num" title="альфа на второй половине: расхождение половин — мера доверия">с ${(m.split ?? '2021-01').slice(0, 4)}</th>` +
-    '<th class="num" title="превышение над равновзвешенной вселенной той же ликвидности">vs вселенной</th>' +
+    '<th class="num" title="превышение над S&P 500 в год">к SPY</th>' +
+    '<th class="num" title="t-статистика превышения с поправкой Ньюи–Уэста">t</th>' +
+    '<th class="num" title="годовая альфа к рынку, размеру и моментуму">α 3ф</th>' +
     '<th class="num">t</th>' +
-    '<th class="num" title="рыночная бета">β</th>' +
-    '<th class="num" title="наклон на размер: 1 = ведёт себя как малая капитализация">размер</th></tr>';
-  const entries = Object.entries(port)
-    .map(([g, c]) => [g, c['h' + H]])
-    .filter(([, c]) => c)
-    .sort((a, b) => (b[1].n ?? 0) - (a[1].n ?? 0));
-  if (!entries.length) html += '<tr><td colspan="11" class="muted">На этом горизонте ни одна группа не набирает трёх лет истории.</td></tr>';
-  for (const [g, c] of entries) {
-    html += `<tr${c.thin ? ' class="dropped"' : ''}><td>${esc(GROUP_LABEL[g] ?? g)}${c.thin ? ' <span class="pill warn" title="средний состав меньше десяти бумаг: числа неустойчивы по построению">тонкая</span>' : ''}</td>` +
-      `<td class="num muted">${fmtInt(c.n)}</td>` +
-      `<td class="num">${fmtPct(c.cagr)}</td>` +
-      `<td class="num ${cls(c.a)}">${fmtPct(c.a)}</td>` + tCell(c.t) +
-      `<td class="num muted">${fmtPct(c.aT)}</td><td class="num muted">${fmtPct(c.aV)}</td>` +
-      `<td class="num ${cls(c.u)}">${fmtPct(c.u)}</td>` + tCell(c.ut) +
-      `<td class="num muted">${c.beta ?? '—'}</td><td class="num muted">${c.size ?? '—'}</td></tr>`;
+    '<th class="num" title="превышение над равновзвешенной вселенной той же ликвидности">к вселенной</th>' +
+    '<th class="num">t</th>' +
+    `<th class="num" title="до ${esc(m.split ?? '2021-01')}">1-я половина</th>` +
+    '<th class="num">2-я половина</th></tr>';
+  const rows = Object.entries(port).map(([g, cell]) => [g, cell['h' + H]]).filter(([, c]) => c);
+  rows.sort((a, b) => (b[1].spy ?? -9) - (a[1].spy ?? -9));
+  for (const [g, c] of rows) {
+    html += `<tr><td>${esc(GROUP_LABEL[g] ?? g)}${c.thin ? ' <span class="pill warn" title="средний состав меньше 10 бумаг — оценка ненадёжна">тонкая</span>' : ''}</td>` +
+      `<td class="num ${c.thin ? 'warn-n' : ''}">${c.n}</td>` +
+      numCell(c.cagr) + numCell(c.spy, true) + tCell(c.spyT) + numCell(c.a, true) + tCell(c.t) +
+      numCell(c.u, true) + tCell(c.ut) + numCell(c.aT) + numCell(c.aV) + '</tr>';
   }
   $('#stats-table').innerHTML = html;
   $('#stats-legend').innerHTML =
-    `Альфа — годовая, после вычета рыночной беты и наклона на размер: без второго фактора микрокапный ` +
-    `портфель показывал бы «мастерство» там, где это просто малая капитализация. ` +
-    `<b>Две колонки по половинам выборки важнее одной общей цифры</b>: если они расходятся на порядок, ` +
-    `общая оценка ничего не предсказывает. Порог значимости |t|≥2; на подставных данных такое не встречается ни разу. ` +
-    `Ячейки со средним составом меньше ${m.thin ?? 10} бумаг помечены как тонкие.`;
-  renderEventStats(dim);
-}
-// Прежняя метрика: оставлена, но понижена в статусе и снабжена честной подписью
-function renderEventStats(dim) {
-  const agg = state.stats.agg?.[dim] ?? {};
-  const hs = state.stats.horizons;
-  const p = state.stats.placebo;
-  $('#stats-events-note').innerHTML =
-    `Среднее и медиана избыточной доходности <b>по сделкам</b>. Отвечает на другой вопрос, чем таблица выше: ` +
-    `имя с восемью подачами весит в восемь раз больше одного, окна перекрываются, ошибки нет. ` +
-    (p ? `На случайном отборе той же ликвидности эта метрика даёт ${fmtPct(p.med)}, поэтому сравнивать её надо не с нулём, а с этим уровнем. ` : '') +
-    `Сохранена для сопоставимости с прежними разборами.`;
-  let html = '<tr><th>Группа</th><th class="num">Покупок</th>' +
-    hs.map(h => `<th class="num" colspan="3">${h} мес</th>`).join('') + '</tr>' +
-    '<tr><th></th><th></th>' + hs.map(() =>
-      '<th class="num" title="закрытых окон">N</th><th class="num" title="среднее избыточное">сред.</th>' +
-      '<th class="num" title="медиана">мед.</th>').join('') + '</tr>';
-  for (const [g, cell] of Object.entries(agg).sort((a, b) => (b[1].total ?? 0) - (a[1].total ?? 0))) {
-    html += `<tr><td>${esc(GROUP_LABEL[g] ?? g)}</td><td class="num">${fmtInt(cell.total)}</td>` +
-      hs.map(h => {
-        const c = cell['h' + h] ?? {};
-        return `<td class="num muted">${fmtInt(c.n)}</td><td class="num ${cls(c.mean)}">${fmtPct(c.mean)}</td>` +
-          `<td class="num ${cls(c.med)}">${fmtPct(c.med)}</td>`;
-      }).join('') + '</tr>';
-  }
-  $('#stats-event-table').innerHTML = html;
+    `Ячейка считается, только если у среза набралось не меньше ${m.minMonths ?? 36} месяцев и ` +
+    `${m.minNames ?? 5} бумаг в портфеле. «Тонкая» — средний состав меньше ${m.thin ?? 10} бумаг: ` +
+    `такие числа держат один-два эмитента, и доверять им нельзя.`;
 }

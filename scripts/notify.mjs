@@ -1,5 +1,5 @@
 // Telegram-уведомления. Присылаются ТОЛЬКО три вещи, каждая из которых прошла проверку
-// на расщеплённой выборке (docs/ЛУЧШИЕ-ФИЛЬТРЫ.md):
+// рабочего набора (docs/ЧТО-РАБОТАЕТ.md):
 //   1. новая сделка из набора «Сила после отчёта»;
 //   2. новая сделка из набора «Кластер + докупка» со скором ≥55;
 //   3. переход агрегатного индикатора в зону «вспышка» (≥3σ).
@@ -52,9 +52,8 @@ if (args.includes('--test')) {
     body: JSON.stringify({
       chat_id: chat, parse_mode: 'HTML',
       text: '✅ <b>Инсайдерский радар</b>: связка с Telegram работает.\n\n' +
-        'Сюда будут приходить только проверенные сигналы: сделки из наборов ' +
-        '«Сила после отчёта» и «Кластер + докупка» со скором ≥55, а также переход ' +
-        'рыночного индикатора в зону вспышки.',
+        'Сюда будут приходить сделки, попавшие в рабочий набор: покупка инсайдера ' +
+        'у 52-недельного максимума на существенную сумму в торгуемой бумаге.',
     }),
   });
   const body = await res.text();
@@ -64,7 +63,7 @@ if (args.includes('--test')) {
 }
 
 const feed = readJson(join(SITE, 'data', 'feed.json'), []);
-const market = readJson(join(SITE, 'data', 'market.json'), null);
+const stats = readJson(join(SITE, 'data', 'stats.json'), null);
 const statePath = join(DATA, 'state', 'notify.json');
 const state = readJson(statePath, {});
 
@@ -81,106 +80,69 @@ const FRESH_DAYS = Number(argVal('--fresh-days', '7'));
 const DRY = args.includes('--dry-run');
 const freshCut = addDaysIso(today, -FRESH_DAYS);
 
-// Наборы: условия буква в букву совпадают с проверенными в бэктесте
-const RECIPES = {
-  strength: {
-    match: r => r.wo === 1 && r.dd !== null && r.dd >= -0.05 && r.role !== 'C' && r.bucket !== 'н/д',
-    title: '📈 <b>Сила после отчёта</b>',
-    // Замер затухания: 0 дн +10.5%, неделя +9.8%, две недели +7.6%, два месяца +4.8%
-    when: '⏱ <b>Когда входить:</b> в первые 3 дня, максимум неделя. Через две недели теряется треть эффекта — паттерн живёт на свежести отчётной информации.',
-    stat: 'Исторически: +10.5% к бенчмарку за 12 мес, медиана +2.2%, выше рынка 53% случаев, плюс в 9 годах из 10.',
-  },
-  conviction: {
-    match: r => r.cl >= 3 && r.dOwn !== null && r.dOwn >= 0.2 && r.dOwn < 9 && r.score >= 55 && r.bucket !== 'н/д',
-    title: '🔷 <b>Кластер + докупка, скор ≥55</b>',
-    // Замер: 0 дн +39.8%, 5 дн +43.6%, 21 дн +36.1%, 42 дн +26.1%
-    when: '⏱ <b>Когда входить:</b> в течение двух недель, максимум месяц. Спешить не нужно — на 3–10 день результат был даже чуть выше, кластер разворачивается неделями.',
-    stat: 'Исторически: +39.8% к бенчмарку за 12 мес. Распределение лотерейное — выигрывает 48% сделок, поэтому нужно много позиций.',
-  },
-};
+// Единственный повод для уведомления — попадание сделки в РАБОЧИЙ НАБОР. Прежние поводы
+// (кластер со скором, вспышка рыночного индикатора) убраны вместе с самими сущностями:
+// ни один из них не пережил проверку. Признак `set` считает сборка, здесь он только читается —
+// так условие письма не может разойтись с условием бэктеста.
+// Ключ отправленного изменился вместе с логикой (был «набор|тикер|дата» для четырёх
+// наборов, стал один). Старые ключи не совпадут с новыми, и без версии первая же сборка
+// отправила бы недельную историю разом. Смена версии = молчаливый пересев состояния.
+const NOTIFY_VERSION = 2;
+const seeding = !state.sentTrades || state.version !== NOTIFY_VERSION;
+const sent = new Set(state.version === NOTIFY_VERSION ? (state.sentTrades ?? []) : []);
+state.version = NOTIFY_VERSION;
 
-// Первый запуск после смены логики: запоминаем состояние молча, иначе прилетит вся неделя
-const seeding = !state.sentTrades;
-const sent = new Set(state.sentTrades ?? []);
-
-// Группируем по (тикер, набор): несколько строк одной покупки не должны давать несколько писем
+// Группируем по (тикер, дата подачи): несколько строк одной покупки — одно письмо
 const groups = new Map();
 for (const r of feed) {
-  if (r.drop || r.fdate < freshCut) continue;
-  for (const [key, def] of Object.entries(RECIPES)) {
-    if (!def.match(r)) continue;
-    const id = `${key}|${r.t}|${r.fdate}`;
-    if (sent.has(id)) continue;
-    const g = groups.get(id) ?? { key, t: r.t, name: r.name, fdate: r.fdate, rows: [] };
-    g.rows.push(r);
-    groups.set(id, g);
-  }
+  if (r.set !== 1 || r.fdate < freshCut) continue;
+  const id = `set|${r.t}|${r.fdate}`;
+  if (sent.has(id)) continue;
+  const g = groups.get(id) ?? { t: r.t, name: r.name, fdate: r.fdate, rows: [] };
+  g.rows.push(r);
+  groups.set(id, g);
 }
+
+const setLine = stats?.set
+  ? `Исторически набор давал ${(stats.set.spy * 100).toFixed(1)}% годовых сверх S&P 500 `
+    + `(t=${stats.set.spyT}), после издержек ${(stats.set.net * 100).toFixed(1)}%. `
+    + `Половина превышения приходится на несколько месяцев из ста двадцати.`
+  : '';
 
 for (const [id, g] of groups) {
   sent.add(id);
   if (seeding) continue;
-  const def = RECIPES[g.key];
   const total = g.rows.reduce((a, b) => a + b.val, 0);
-  const best = g.rows.reduce((a, b) => (b.score ?? 0) > (a.score ?? 0) ? b : a, g.rows[0]);
+  const best = g.rows.reduce((a, b) => (b.val ?? 0) > (a.val ?? 0) ? b : a, g.rows[0]);
   const who = [...new Set(g.rows.map(r => r.who))].slice(0, 3).join('; ');
   const lines = [
-    `${def.title}\n<b>${esc(g.t)}</b> — ${esc(g.name)}`,
+    `📈 <b>Рабочий набор</b>\n<b>${esc(g.t)}</b> — ${esc(g.name)}`,
     `${esc(who)} (${ROLE[best.role] ?? best.role})`,
-    `Куплено на ${money(total)} по ~$${best.px >= 10 ? best.px.toFixed(2) : best.px.toFixed(3)}` +
-      (best.dOwn !== null && best.dOwn < 9 ? `, позиция +${Math.round(best.dOwn * 100)}%` : ', позиция открыта с нуля'),
+    `Куплено на ${money(total)} по ~$${best.px >= 10 ? best.px.toFixed(2) : best.px.toFixed(3)}`,
+    `До 52-нед. максимума ${Math.round((best.dd ?? 0) * 100)}% · оборот ${money(best.dv ?? 0)} в день`,
   ];
-  if (best.cl >= 2) lines.push(`Независимых покупателей в кластере: ${best.cl}`);
-  if (best.score !== null) lines.push(`Скор ${best.score}${best.dd !== null ? ` · до 52-нед. максимума ${Math.round(best.dd * 100)}%` : ''}`);
-  if (best.cur) lines.push(`Цена сейчас $${best.cur >= 10 ? best.cur.toFixed(2) : best.cur.toFixed(3)}` +
-    (best.chgT !== null ? ` (с даты сделки ${best.chgT > 0 ? '+' : ''}${(best.chgT * 100).toFixed(1)}%)` : ''));
-  lines.push('', def.when, '', `<i>${def.stat}</i>`);
+  if (best.cur) {
+    lines.push(`Цена сейчас $${best.cur >= 10 ? best.cur.toFixed(2) : best.cur.toFixed(3)}`
+      + (best.chg !== null ? ` (${best.chg >= 0 ? '+' : ''}${Math.round(best.chg * 100)}% с подачи)` : ''));
+  }
+  lines.push(`⏱ <b>Когда входить:</b> в течение месяца после подачи — дальше сигнала нет. `
+    + `Держать три месяца${best.exit ? `, ориентир выхода ${best.exit}` : ''}.`);
+  if (setLine) lines.push(setLine);
+  lines.push(`<a href="https://ml371kl.github.io/temp-zero-inode-840/#ticker/${encodeURIComponent(g.t)}">Карточка тикера</a>`);
   events.push(lines.join('\n'));
 }
 
-// Рынок: только переход в зону вспышки (≥3σ). Зона 2–3σ не шлётся — на истории она
-// от базовой доходности не отличается.
-if (market?.now && market.now.z !== null) {
-  const strong = market.thresholds?.strong ?? 3;
-  const inFlash = market.now.z >= strong;
-  if (inFlash && state.aggFlash !== true) {
-    const v = market.validation?.z3?.h12;
-    events.push([
-      '🚨 <b>Рынок: вспышка инсайдерских покупок</b>',
-      `Кластерная активность ${market.now.z >= 0 ? '+' : ''}${market.now.z}σ от двухлетней нормы — редкое состояние, случалось 8 раз за 10 лет.`,
-      '',
-      '⏱ <b>Когда входить:</b> в течение 1–2 месяцев, оптимально первые две недели. ' +
-        'Спешка не нужна: доходность при входе через 1–2 недели была даже выше, чем сразу. ' +
-        'После трёх месяцев преимущество исчезает.',
-      '',
-      v?.n ? `<i>Исторически после таких недель SPY через 12 мес: в среднем ${(v.mean * 100).toFixed(0)}%, ` +
-        `положительных ${Math.round(v.pos * 100)}% из ${v.n} наблюдений (база рынка +13.7%).</i>` : '',
-      '<i>Осторожно: эпизодов всего 8, окна доходностей перекрываются, порог подобран на этих же данных.</i>',
-    ].filter(Boolean).join('\n'));
-  }
-  state.aggFlash = inFlash;
-}
+state.sentTrades = [...sent].slice(-4000);
+writeJson(statePath, state, true);
 
-// Храним последние 3000 идентификаторов — с запасом на месяцы работы
-if (!DRY) {
-  state.sentTrades = [...sent].slice(-3000);
-  delete state.clusters;   // наследие прежней логики уведомлений
-  delete state.bigBuys;
-  delete state.aggZone;
-  writeJson(statePath, state, true);
-}
-
-if (DRY) {
-  console.log(`[notify] СУХОЙ ПРОГОН: событий ${events.length}, состояние не изменено\n`);
-  for (const e of events.slice(0, 4)) console.log('─'.repeat(60) + '\n' + e.replace(/<[^>]+>/g, '') + '\n');
-  process.exit(0);
-}
-if (seeding) {
-  console.log(`[notify] первый запуск новой логики: запомнено ${sent.size} сигналов без отправки`);
-  process.exit(0);
-}
 if (!events.length) { console.log('[notify] новых сигналов нет'); process.exit(0); }
 console.log(`[notify] сигналов: ${events.length}`);
+// --dry-run печатает то, что было бы отправлено: раньше флаг молча падал в ветку
+// «секретов нет», и проверить текст письма было нечем
+if (DRY) {
+  for (const e of events) console.log('\n---\n' + e.replace(/<[^>]+>/g, ''));
+  process.exit(0);
+}
 if (!token || !chat) { console.log('[notify] секреты Telegram не заданы — отправка пропущена'); process.exit(0); }
 
 const chunks = [];

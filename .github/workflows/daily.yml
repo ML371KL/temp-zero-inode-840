@@ -58,9 +58,6 @@ jobs:
         run: node scripts/live.mjs --time-budget-min 60
 
       # Инкрементально: прошлые кварталы в состоянии, перечитывается только текущий form.idx
-      - name: Даты отчётностей (10-Q/10-K)
-        run: node scripts/earnings.mjs --time-budget-min 15
-
       - name: Обновление цен
         run: node scripts/prices.mjs --mode daily --time-budget-min 55
 

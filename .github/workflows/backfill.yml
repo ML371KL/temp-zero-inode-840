@@ -50,9 +50,6 @@ jobs:
       - name: Живой хвост (после последнего датасета)
         run: node scripts/live.mjs --time-budget-min 110
 
-      - name: Даты отчётностей (10-Q/10-K)
-        run: node scripts/earnings.mjs --time-budget-min 60
-
       - name: Цены (бэкфил без кэша)
         run: node scripts/prices.mjs --mode backfill --time-budget-min 150
 

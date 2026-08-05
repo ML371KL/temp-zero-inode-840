@@ -33,10 +33,14 @@
 // максимума в этом месяце», а не «стоит у максимума в последний день». Разница не
 // косметическая: на конце месяца превышение над контролем получается +6.8%, при
 // согласованном измерении — вдвое меньше.
-const YEAR_BARS = 252;
+// Моментум 12-1 (доходность за год без последнего месяца) нужен как ФАКТОР. Без него
+// любой набор, отбирающий по цене, показывает «альфу», которой нет: набор «у 52-недельного
+// максимума» по построению сидит в победителях моментума. Проверено — с фактором альфа
+// набора сохраняется, а у широких инсайдерских срезов исчезает.
+const YEAR_BARS = 252, MONTH_BARS = 21;
 export function monthlyFromDaily(series) {
-  const px = {}, dv = {}, dd = {}, ddHi = {}, ddLo = {};
-  if (!series?.length) return { px, dv, dd, ddHi, ddLo };
+  const px = {}, dv = {}, dd = {}, ddHi = {}, ddLo = {}, mom = {};
+  if (!series?.length) return { px, dv, dd, ddHi, ddLo, mom };
   let cur = '', vols = [];
   const flush = () => { if (cur) dv[cur] = median(vols); };
   // Максимум скользящего окна — монотонной очередью за O(n): перебор 252 баров на каждый
@@ -60,9 +64,13 @@ export function monthlyFromDaily(series) {
         ddLo[m] = ddLo[m] === undefined ? v : Math.min(ddLo[m], v);
       }
     }
+    if (i >= YEAR_BARS) {
+      const a = series[i - YEAR_BARS][2], b = series[i - MONTH_BARS][2];
+      mom[m] = a > 0 && b > 0 ? Math.round((b / a - 1) * 1e4) / 1e4 : null;
+    }
   }
   flush();
-  return { px, dv, dd, ddHi, ddLo };
+  return { px, dv, dd, ddHi, ddLo, mom };
 }
 function median(a) {
   if (!a.length) return null;
@@ -73,7 +81,7 @@ function median(a) {
 export class Panel {
   constructor() {
     this.px = new Map(); this.dv = new Map(); this.dd = new Map();
-    this.ddHi = new Map(); this.ddLo = new Map();
+    this.ddHi = new Map(); this.ddLo = new Map(); this.mom = new Map();
     // ETF-бенчмарки лежат в панели ради месячных доходностей, но во вселенную «все бумаги
     // той же ликвидности» они входить не должны: это не акции, а корзины.
     this.bench = new Set();
@@ -86,6 +94,7 @@ export class Panel {
     if (monthly.dd) this.dd.set(ticker, monthly.dd);
     if (monthly.ddHi) this.ddHi.set(ticker, monthly.ddHi);
     if (monthly.ddLo) this.ddLo.set(ticker, monthly.ddLo);
+    if (monthly.mom) this.mom.set(ticker, monthly.mom);
     if (isBench) this.bench.add(ticker);
     this._months = null;
   }
@@ -181,6 +190,41 @@ export function universeSeries(panel, { minDv = 3e6, pred = null, H = 1 } = {}) 
   return out;
 }
 
+// Факторы размера и моментума строятся ИЗ ТОЙ ЖЕ вселенной, что и портфели: внешние ETF
+// мерили бы другую совокупность. Треть/треть, равный вес, ежемесячная пересборка.
+export function factorSeries(panel, { minDv = 3e6 } = {}) {
+  const size = new Map(), mom = new Map();
+  const months = panel.months;
+  for (let i = 0; i < months.length - 1; i++) {
+    const mForm = months[i], mHold = months[i + 1];
+    const bySize = [], byMom = [];
+    for (const t of panel.names()) {
+      if ((panel.adv(t, mForm) ?? 0) < minDv) continue;
+      const dv = panel.adv(t, mForm), mo = panel.mom.get(t)?.[mForm];
+      if (dv > 0) bySize.push([t, dv]);
+      if (mo !== undefined && mo !== null) byMom.push([t, mo]);
+    }
+    const cut = (arr, lowFirst) => {
+      arr.sort((a, b) => a[1] - b[1]);
+      const k = Math.floor(arr.length / 3);
+      if (k < 5) return null;
+      const lo = arr.slice(0, k).map(x => x[0]), hi = arr.slice(-k).map(x => x[0]);
+      const ew = list => {
+        const rs = [];
+        for (const t of list) { const r = panel.ret(t, mHold); if (r !== null) rs.push(r); }
+        return rs.length >= 5 ? mean(rs) : null;
+      };
+      const a = ew(lo), b = ew(hi);
+      return a === null || b === null ? null : (lowFirst ? a - b : b - a);
+    };
+    const sz = cut(bySize, true);      // малые минус крупные
+    const mm = cut(byMom, false);      // победители минус проигравшие
+    if (sz !== null) size.set(mHold, sz);
+    if (mm !== null) mom.set(mHold, mm);
+  }
+  return { size, mom };
+}
+
 // Разность двух помесячных рядов по общим месяцам + значимость по Ньюи–Уэсту.
 // Это и есть ответ на вопрос «добавляет ли инсайдер что-то сверх самого контекста».
 export function pairedDiff(rows, byMonth) {
@@ -235,22 +279,72 @@ export function neweyWestT(x, lag = 3) {
 }
 export const annualize = m => (1 + m) ** 12 - 1;
 
-// Альфа к двум факторам: рынок (SPY) и наклон размера (IWM − SPY). Без второго фактора
-// микрокапный портфель показывал бы «альфу» там, где это просто малая капитализация.
-export function twoFactorAlpha(rows, spyByMonth, iwmByMonth) {
-  const s = rows.filter(x => spyByMonth.has(x.m) && iwmByMonth.has(x.m));
+// Безрисковая ставка (3-мес. векселя, годовая по годам). Без неё CAPM-альфа портфеля с
+// бетой 1.3 систематически занижена на rf*(β−1) — а у равновзвешенных малых имён бета
+// именно такая. Регрессия ведётся в ИЗБЫТОЧНЫХ доходностях, как положено.
+const RF_YEAR = {
+  2014: 0.0003, 2015: 0.0005, 2016: 0.003, 2017: 0.0095, 2018: 0.0195, 2019: 0.021,
+  2020: 0.0035, 2021: 0.0005, 2022: 0.02, 2023: 0.05, 2024: 0.05, 2025: 0.04, 2026: 0.035,
+};
+export const rfOf = m => (RF_YEAR[Number(String(m).slice(0, 4))] ?? 0.03) / 12;
+
+// МНК с константой. X — массив колонок-факторов.
+function ols(y, X) {
+  const n = y.length, k = X.length;
+  const A = Array.from({ length: k + 1 }, () => new Array(k + 1).fill(0));
+  const B = new Array(k + 1).fill(0);
+  const col = j => j === 0 ? new Array(n).fill(1) : X[j - 1];
+  for (let a = 0; a <= k; a++) {
+    const ca = col(a);
+    for (let b = 0; b <= k; b++) { const cb = col(b); let s = 0; for (let i = 0; i < n; i++) s += ca[i] * cb[i]; A[a][b] = s; }
+    let s = 0; for (let i = 0; i < n; i++) s += ca[i] * y[i]; B[a] = s;
+  }
+  for (let c = 0; c <= k; c++) {
+    let p = c;
+    for (let r = c + 1; r <= k; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+    if (!Number.isFinite(A[p][c]) || Math.abs(A[p][c]) < 1e-12) return null;
+    [A[c], A[p]] = [A[p], A[c]]; [B[c], B[p]] = [B[p], B[c]];
+    for (let r = 0; r <= k; r++) {
+      if (r === c) continue;
+      const f = A[r][c] / A[c][c];
+      for (let q = c; q <= k; q++) A[r][q] -= f * A[c][q];
+      B[r] -= f * B[c];
+    }
+  }
+  const b = B.map((v, i) => v / A[i][i]);
+  const resid = y.map((v, i) => { let p = b[0]; for (let j = 0; j < k; j++) p += b[j + 1] * X[j][i]; return v - p; });
+  return { b, resid };
+}
+
+// Альфа к трём факторам: рынок, размер и МОМЕНТУМ. Моментум обязателен: главный рабочий
+// набор отбирает бумаги у 52-недельного максимума, то есть по построению сидит в
+// победителях моментума, и без этого фактора его «альфа» была бы завышена. Факторы
+// приходят помесячными картами: market (SPY), size (мал−круп), mom (победители−проигравшие).
+export function factorAlpha(rows, { market, size, mom } = {}) {
+  const fs = [market, size, mom].filter(Boolean);
+  const s = rows.filter(x => fs.every(f => f.has(x.m)));
+  if (s.length < 30) return null;
+  const y = s.map(x => x.r - rfOf(x.m));
+  const X = fs.map((f, j) => s.map(x => j === 0 ? f.get(x.m) - rfOf(x.m) : f.get(x.m)));
+  const o = ols(y, X);
+  if (!o) return null;
+  const t = neweyWestT(o.resid.map(v => v + o.b[0]));
+  return { alpha: t.mean, t: t.t, betas: o.b.slice(1), months: s.length };
+}
+
+// Риск и торговые характеристики против индекса: без них «альфа» не отвечает на вопрос,
+// стоит ли менять SPY на этот портфель.
+export function vsBenchmark(rows, benchByMonth) {
+  const s = rows.filter(x => benchByMonth.has(x.m));
   if (s.length < 24) return null;
-  const y = s.map(x => x.r), mk = s.map(x => spyByMonth.get(x.m)), sz = s.map((x, i) => iwmByMonth.get(x.m) - mk[i]);
-  const S = (a, b) => a.reduce((p, v, i) => p + v * b[i], 0);
-  const my = mean(y), mm = mean(mk), ms = mean(sz);
-  const cy = y.map(v => v - my), cm = mk.map(v => v - mm), cs = sz.map(v => v - ms);
-  const a11 = S(cm, cm), a12 = S(cm, cs), a22 = S(cs, cs), b1 = S(cm, cy), b2 = S(cs, cy);
-  const det = a11 * a22 - a12 * a12;
-  if (!Number.isFinite(det) || Math.abs(det) < 1e-18) return null;
-  const beta = (b1 * a22 - b2 * a12) / det, size = (a11 * b2 - a12 * b1) / det;
-  const resid = y.map((v, i) => v - beta * mk[i] - size * sz[i]);
-  const t = neweyWestT(resid);
-  return { alpha: t.mean, t: t.t, beta, size, months: s.length };
+  const ex = s.map(x => x.r - benchByMonth.get(x.m));
+  const t = neweyWestT(ex);
+  const m = mean(ex);
+  const te = Math.sqrt(12 * mean(ex.map(v => (v - m) ** 2)));
+  const r = s.map(x => x.r), mr = mean(r);
+  const vol = Math.sqrt(12 * mean(r.map(v => (v - mr) ** 2)));
+  const sharpe = vol > 0 ? (mean(s.map(x => x.r - rfOf(x.m))) * 12) / vol : null;
+  return { ex: t.mean, t: t.t, ir: te > 0 ? (m * 12) / te : null, sharpe, months: s.length };
 }
 
 export function pathStats(rows) {

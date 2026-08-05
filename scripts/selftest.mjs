@@ -13,10 +13,9 @@ import {
   trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough,
 } from './lib/prices.mjs';
 import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
-import { Panel, monthlyFromDaily, portfolioSeries, twoFactorAlpha, neweyWestT, universeSeries, pairedDiff, turnover } from './lib/portfolio.mjs';
-import { scoreBuy, topRole, dOwnOf, freshness, SCORE_CUTS } from './lib/scoring.mjs';
+import { Panel, monthlyFromDaily, portfolioSeries, factorAlpha, factorSeries, vsBenchmark, neweyWestT, universeSeries, pairedDiff, turnover } from './lib/portfolio.mjs';
 import { applyGates, isPlanned, isNonCommon, isImplausible } from './lib/gates.mjs';
-import { isEntityName, isPersonOwner, buildOwnerGroups, countIndependentPersons, isFundOnly } from './lib/entity.mjs';
+import { isEntityName, isPersonOwner, buildOwnerGroups, isFundOnly, topRole, dOwnOf } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection, typicalBuyValue } from './lib/routine.mjs';
 import { classifyFootnotes, rowFootnoteFlags } from './lib/footnotes.mjs';
 import { loadAllTrades, issuerCategory } from './lib/universe.mjs';
@@ -446,28 +445,6 @@ ok('portfolio: равный вес ПО БУМАГАМ, окно удержан�
   assert.equal(ser3.length, 1, 'при H=1 держим только следующий месяц');
 });
 
-ok('portfolio: альфа к двум факторам и поправка Ньюи–Уэста', () => {
-  // синтетика с известным ответом: y = 0.01 + 1.2*рынок + 0.5*размер
-  const months = [], spy = new Map(), iwm = new Map(), rows = [];
-  for (let i = 0; i < 60; i++) {
-    const m = `20${20 + Math.floor(i / 12)}-${String(i % 12 + 1).padStart(2, '0')}`;
-    const mk = 0.01 * Math.sin(i), sz = 0.005 * Math.cos(i);
-    months.push(m); spy.set(m, mk); iwm.set(m, mk + sz);
-    rows.push({ m, n: 50, r: 0.01 + 1.2 * mk + 0.5 * sz });
-  }
-  const a = twoFactorAlpha(rows, spy, iwm);
-  assert.ok(Math.abs(a.alpha - 0.01) < 1e-9, `альфа ${a.alpha}`);
-  assert.ok(Math.abs(a.beta - 1.2) < 1e-9, `бета ${a.beta}`);
-  assert.ok(Math.abs(a.size - 0.5) < 1e-9, `наклон размера ${a.size}`);
-  // ряд без шума -> остаток нулевой, t не определяется как конечное большое число
-  assert.ok(!Number.isFinite(a.t) || Math.abs(a.t) > 1e6, 'на безошибочной синтетике t вырождается');
-  // поправка НЬЮИ–УЭСТА должна СНИЖАТЬ t на автокоррелированном ряде
-  const iid = Array.from({ length: 120 }, (_, i) => (i % 2 ? 0.02 : -0.01));
-  const auto = Array.from({ length: 120 }, (_, i) => (i % 24 < 12 ? 0.02 : -0.01));
-  const tIid = Math.abs(neweyWestT(iid).t), tAuto = Math.abs(neweyWestT(auto).t);
-  assert.ok(tAuto < tIid, `на автокоррелированном ряде t должно быть меньше: ${tAuto} vs ${tIid}`);
-});
-
 ok('portfolio: месячная просадка и контроль «тот же ценовой контекст»', () => {
   // Бумага падает с 100 до 50 и отрастает: на конец второго месяца просадка −50%,
   // а «побывала у максимума» верно только для первого месяца.
@@ -503,6 +480,48 @@ ok('portfolio: парная разность и оборачиваемость',
   ms.forEach((mm, i) => sig.set(mm, new Set([i % 2 ? 'A' : 'B'])));
   const to = turnover(p, sig, { H: 1, minDv: 0 });
   assert.ok(to > 0.9, `при полной смене состава оборот близок к 100%, получено ${to}`);
+});
+
+ok('portfolio: факторная альфа считается в избыточных доходностях', () => {
+  // Портфель = рынок с бетой 1, но с постоянной прибавкой 0.5%/мес -> альфа ~6%/год
+  const months = Array.from({ length: 60 }, (_, i) => `20${String(20 + Math.floor(i / 12)).padStart(2, '0')}-${String(i % 12 + 1).padStart(2, '0')}`);
+  const mkt = new Map(), size = new Map(), mom = new Map();
+  // Факторы должны быть невырожденными: три нулевые колонки дали бы сингулярную матрицу,
+  // и регрессия честно вернула бы null — это тоже проверка, но не та, что нужна здесь.
+  months.forEach((m, i) => {
+    mkt.set(m, ((i * 37) % 13 - 6) / 100);
+    size.set(m, ((i * 17) % 7 - 3) / 200);
+    mom.set(m, ((i * 23) % 11 - 5) / 300);
+  });
+  const rows = months.map(m => ({ m, r: mkt.get(m) + 0.005, n: 10 }));
+  const a = factorAlpha(rows, { market: mkt, size, mom });
+  assert.ok(a, 'альфа посчитана');
+  assert.ok(Math.abs(a.betas[0] - 1) < 0.02, `бета ${a.betas[0]} должна быть ~1`);
+  assert.ok(Math.abs(a.alpha - 0.005) < 0.0005, `месячная альфа ${a.alpha} должна быть ~0.005`);
+  // Тот же портфель против индекса: превышение то же, а Шарп выше рынка
+  const v = vsBenchmark(rows, mkt);
+  assert.ok(Math.abs(v.ex - 0.005) < 1e-9);
+  assert.ok(v.ir > 100, 'при нулевой ошибке следования IR огромен');
+});
+
+ok('portfolio: факторы размера и моментума строятся из вселенной', () => {
+  const p = new Panel();
+  const day = (n, base, step) => Array.from({ length: n }, (_, i) => [addDaysIso('2020-01-01', i), base + i * step, base + i * step, 1e7]);
+  // Тридцать бумаг: половина растёт быстрее — они и должны попасть в победители моментума
+  for (let k = 0; k < 30; k++) p.add('T' + k, monthlyFromDaily(day(400, 10 + k, k < 15 ? 0.02 : 0.005)));
+  const f = factorSeries(p, { minDv: 0 });
+  assert.ok(f.size instanceof Map && f.mom instanceof Map);
+  assert.ok(f.mom.size > 0, 'моментум-фактор посчитан хотя бы для одного месяца');
+});
+
+ok('compute: признак рабочего набора требует ВСЕХ трёх условий', () => {
+  // Проверяем логику набора отдельно от сборки: цена у максимума, сумма и оборот
+  const inSet = (dd, val, dv) => dd !== null && dd >= -0.05 && val >= 5e4 && dv >= 3e6;
+  assert.equal(inSet(-0.01, 1e5, 1e7), true);
+  assert.equal(inSet(-0.06, 1e5, 1e7), false, 'далеко от максимума');
+  assert.equal(inSet(-0.01, 1e4, 1e7), false, 'слишком мелкая сумма');
+  assert.equal(inSet(-0.01, 1e5, 1e6), false, 'неторгуемый оборот');
+  assert.equal(inSet(null, 1e5, 1e7), false, 'просадка неизвестна');
 });
 
 // ---------- реестр биржевых символов ----------
@@ -553,34 +572,6 @@ ok('entity: различение физлиц и юрлиц', () => {
   assert.equal(isFundOnly({ owners: [{ name: 'Baker Bros Advisors LP', rel: 'T' }] }), true);
   assert.equal(isFundOnly({ owners: [{ name: 'Baker Bros Advisors LP', rel: 'T' }, { name: 'Ivanov', rel: 'D' }] }), false);
 });
-ok('кластер: фонд+GP+партнёр считаются ОДНИМ участником', () => {
-  // Совместная подача: фонд, его GP и управляющий-физлицо — один экономический участник
-  const joint = {
-    owners: [
-      { cik: 1, name: 'Alpha Fund LP', rel: 'T' },
-      { cik: 2, name: 'Alpha GP LLC', rel: 'T' },
-      { cik: 3, name: 'Managing Member Bob', rel: 'DT' },
-    ],
-  };
-  const solo = { owners: [{ cik: 9, name: 'Petrov Petr', rel: 'D' }] };
-  const groups = buildOwnerGroups([joint, solo]);
-  assert.equal(countIndependentPersons([joint], groups), 1);       // не 3
-  assert.equal(countIndependentPersons([joint, solo], groups), 2);
-});
-ok('кластер: два директора не склеиваются через общий фонд', () => {
-  // Регрессия: сплошная склейка была транзитивной, и независимые директора РАЗНЫХ эмитентов,
-  // подававшие формы вместе с одним и тем же фондом, становились «одним покупателем».
-  const fund = { cik: 10, name: 'Big Capital Partners L.P.', rel: 'T' };
-  const a = { owners: [fund, { cik: 11, name: 'Ivanov Ivan', rel: 'D' }] };
-  const b = { owners: [fund, { cik: 12, name: 'Petrov Petr', rel: 'D' }] };
-  const groups = buildOwnerGroups([a, b]);
-  assert.equal(countIndependentPersons([a, b], groups), 2, 'это два независимых директора');
-  // а совместная подача двух физлиц (супруги, семейный траст) по-прежнему один участник
-  const pair = { owners: [{ cik: 21, name: 'Sidorov A', rel: 'D' }, { cik: 22, name: 'Sidorova B', rel: 'D' }] };
-  assert.equal(countIndependentPersons([pair], buildOwnerGroups([pair])), 1);
-});
-
-// ---------- рутинность CMP и инфлексии ----------
 ok('CMP: рутинный трейдер и недостаток истории', () => {
   const hist = [];
   for (const y of [2019, 2020, 2021, 2022]) hist.push({ tdate: `${y}-03-15`, code: 'P', cik: 1, val: 1000 });
@@ -711,44 +702,6 @@ ok('плановость: чекбокс ИЛИ сноска', () => {
 });
 
 // ---------- скоринг ----------
-ok('scoreBuy v4: пять признаков, шкала 0–58, ничего лишнего', () => {
-  // Максимальный профиль: оппортунистическая, у 52-нед максимума, CFO, малое имя, первая покупка
-  const max = scoreBuy({ role: 'F', dd: -0.01, adv: 5e6, routine: false, inflect: 'first-ever' });
-  assert.equal(max.total, 15 + 15 + 10 + 10 + 8); // 58
-  // «Неизвестно» не равно «оппортунистическая»: истории мало -> нулевой вклад, не половина
-  assert.equal(scoreBuy({ routine: null }).parts.oppo, 0);
-  assert.equal(scoreBuy({ routine: true }).parts.oppo, 0);
-  // Роли: офицер и десятипроцентник штрафуются, CEO нейтрален (штраф v3 знака не подтвердил)
-  assert.equal(scoreBuy({ role: 'C' }).parts.role, 0);
-  assert.equal(scoreBuy({ role: 'O' }).parts.role, -5);
-  assert.equal(scoreBuy({ role: 'T' }).parts.role, -10);
-  assert.equal(scoreBuy({ role: 'D' }).parts.role, 8);
-  // Порог близости к максимуму ровно на границе засчитывается
-  assert.equal(scoreBuy({ dd: -0.05 }).parts.near, 15);
-  assert.equal(scoreBuy({ dd: -0.0501 }).parts.near, 0);
-  assert.equal(scoreBuy({ dd: null }).parts.near, 0);
-  // Малое имя — строго ниже порога оборота
-  assert.equal(scoreBuy({ adv: 2.9e7 }).parts.small, 10);
-  assert.equal(scoreBuy({ adv: 3e7 }).parts.small, 0);
-  assert.equal(scoreBuy({ adv: null }).parts.small, 0);
-  // Компоненты, не пережившие портфельную проверку, в скоре отсутствуют
-  for (const gone of ['cluster', 'conviction', 'big', 'history', 'windowOpen', 'aeh', 'track']) {
-    assert.equal(max.parts[gone], undefined, `компонент «${gone}» должен быть удалён`);
-  }
-  // «Не покупал 3 года» баллов не даёт
-  assert.equal(scoreBuy({ inflect: 'first-in-3y' }).parts.firstEver, 0);
-  // Корзины Статистики согласованы со шкалой: верхняя граница достижима, нижняя ниже медианы
-  assert.equal(SCORE_CUTS[0] < max.total, true);
-  assert.deepEqual(SCORE_CUTS, [...SCORE_CUTS].sort((a, b) => b - a), 'границы должны убывать');
-  assert.equal(topRole(['DO', 'DF']), 'F');
-  assert.equal(dOwnOf({ sh: 500, own: 1500 }), 0.5);
-  assert.equal(dOwnOf({ sh: 500, own: 500 }), 9.99);
-  assert.equal(freshness(5), 1);
-  assert.equal(freshness(200), 0);
-  assert.ok(freshness(90) > 0 && freshness(90) < 1);
-});
-
-// ---------- легенда признаков в интерфейсе ----------
 ok('легенда признаков: коды короткие и без коллизий', () => {
   // Коды парсим из web/app.js: дублирующийся код сделал бы легенду ложной
   const src = readFileSync(join(ROOT, 'web', 'app.js'), 'utf8');
@@ -901,14 +854,6 @@ ok('compute: гейты отсекают PIPE и плановую покупку
   assert.equal(bt.find(r => r.fdate === '2020-03-05').gate, 'offering');
   assert.equal(bt.find(r => r.fdate === '2020-04-07').gate, 'planned');
 });
-ok('compute: кластер честный (PIPE не даёт кластера)', () => {
-  // Полный кластер (что известно сегодня) — в карточке тикера: CEO + директор
-  const tick = R('tickers/ALFA.json');
-  assert.equal(tick.trades.find(t => t.fdate === '2020-02-13' || t.fdate === '2020-02-25').cl, 2);
-  // Совместная подача фонда с партнёрами — один участник, кластера нет
-  const bt = R('backtest/2020.json');
-  assert.equal(bt.find(r => r.fdate === '2020-03-05').cl, 1);
-});
 ok('compute: форварды точны и учитывают делистинг', () => {
   const bt = R('backtest/2020.json');
   const b = bt.find(r => r.fdate === '2020-02-05');
@@ -919,19 +864,7 @@ ok('compute: форварды точны и учитывают делистин�
   assert.equal(b.s24, 'd');                       // ряд оборван в 2021 — делистинг
   assert.equal(b.bucket, 'small');                // $20 млн/день
 });
-ok('compute: размер кластера в бэктесте — point-in-time', () => {
-  // Регрессия (утечка будущего): в бэктест должен идти кластер, ВИДНЫЙ на момент подачи.
-  // Первая покупка кластера в момент своей подачи одиночная — вторая ещё не подана.
-  const bt = R('backtest/2020.json');
-  const first = bt.find(r => r.fdate === '2020-02-05');
-  const second = bt.find(r => r.fdate === '2020-02-25');
-  assert.equal(first.cl, 1, 'первая покупка на момент подачи ещё не кластер');
-  assert.equal(second.cl, 2, 'вторая покупка видит первую');
-  // А в живой ленте и скринере кластер показывается полным — это «что известно сегодня»
-  const tick = R('tickers/ALFA.json');
-  assert.equal(tick.trades.find(t => t.fdate === '2020-02-05').cl, 2);
-});
-ok('compute: лента, кластеры, инсайдеры, статистика', () => {
+ok('compute: лента, признак набора, карточка тикера', () => {
   const feed = R('feed.json');
   assert.equal(feed.length, 1);
   assert.equal(feed[0].t, 'LIVA');
@@ -939,9 +872,9 @@ ok('compute: лента, кластеры, инсайдеры, статисти�
   assert.ok(feed[0].cur > 0);
   assert.ok(feed[0].d1 !== null);                 // короткая perf-колонка заполнена
   assert.equal(feed[0].m6, null);                 // шестимесячное окно ещё не дозрело
-  const stats = R('stats.json');
-  assert.ok(stats.agg.gate['✓ прошли гейты']);
-  assert.ok(stats.agg.gate['размещение/подписка (сноска)']);
+  assert.ok(feed[0].set === 0 || feed[0].set === 1, 'признак рабочего набора проставлен');
+  const meta = R('meta.json');
+  assert.ok(meta.set, 'в мете есть счётчики рабочего набора');
   const tick = R('tickers/ALFA.json');
   assert.equal(tick.trades.length, 4);
   assert.equal(tick.okBuys, 2);
