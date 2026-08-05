@@ -8,7 +8,7 @@
 // Использование: node scripts/prices.mjs --mode daily|backfill [--data data] [--time-budget-min N]
 import { readJson, writeJson, isoToday, addDaysIso } from './lib/util.mjs';
 import { fetchTickerRef } from './lib/edgar.mjs';
-import { fetchYahooDaily, fetchStooqDaily, readPriceCache, writePriceCache, hasPriceCache } from './lib/prices.mjs';
+import { fetchYahooDaily, fetchStooqDaily, readPriceCache, writePriceCache, hasPriceCache, listedThrough } from './lib/prices.mjs';
 import { fetchSymbolRanges, writeSymbolRanges, loadSymbolRanges } from './lib/symbols.mjs';
 import { loadAllTrades, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
 import { join } from 'node:path';
@@ -73,6 +73,28 @@ const needsVolume = t => {
   return c && (c.length === 0 || c[c.length - 1][3] === null || c[c.length - 1][3] === undefined);
 };
 
+// Ряд оборвался, а по реестру символ ещё торгуется — это не делистинг, а просто не
+// обновлявшийся кэш: в режиме daily берутся только тикеры с покупками за 25 месяцев.
+// Движок такие ряды принимал за делистнутые и закрывал по ним позиции по старой цене.
+// Дозагружаем их порциями, начиная с самых устаревших.
+const STALE_DAYS = 20;
+const STALE_PER_RUN = 150;
+function staleTickers() {
+  const out = [];
+  const cut = addDaysIso(today, -STALE_DAYS);
+  for (const t of all.keys()) {
+    if (!hasPriceCache(DATA, t)) continue;
+    const c = readPriceCache(DATA, t);
+    const last = c?.length ? c[c.length - 1][0] : null;
+    if (!last || last >= cut) continue;
+    const through = listedThrough(symRanges, t);
+    if (through === null || through < cut) continue;   // реестр подтверждает делистинг
+    out.push([t, last]);
+  }
+  out.sort((a, b) => a[1] < b[1] ? -1 : 1);
+  return out.slice(0, STALE_PER_RUN).map(x => x[0]);
+}
+
 let list;
 if (MODE === 'daily') {
   list = [...BENCHMARKS, ...[...all.entries()].filter(([, v]) => v.recent).map(([t]) => t)];
@@ -80,6 +102,9 @@ if (MODE === 'daily') {
   for (const [t, m] of Object.entries(state.missing)) {
     if (all.has(t) && m.tries < 4 && (!m.last || m.last < addDaysIso(today, -7))) list.push(t);
   }
+  const stale = staleTickers();
+  if (stale.length) console.log(`[prices] устаревших рядов при живом листинге: ${stale.length} — дозагружаем`);
+  list.push(...stale);
 } else {
   // backfill: тикеры без кэша и кэши без объёма — в алфавитном порядке (детерминированный резюм)
   list = [...BENCHMARKS, ...[...all.keys()].sort()].filter(t => !hasPriceCache(DATA, t) || needsVolume(t));

@@ -18,21 +18,51 @@
 // Расхождение оценки между половинами выборки: 3.2 п.п. против 15.3 п.п. у сырого среднего.
 
 // ---------- месячная панель ----------
-// Дневной ряд [[iso, close, adjclose, volume], ...] -> помесячные закрытие и оборот.
+// Дневной ряд [[iso, close, adjclose, volume], ...] -> помесячные закрытие, оборот и
+// просадка от 52-недельного максимума на конец месяца.
 // Оборот — медианный дневной долларовый за месяц: он же прокси размера компании.
+// Просадка нужна для КОНТРОЛЬНЫХ портфелей («все бумаги у максимума», «все просевшие»):
+// без них про ценовой набор нельзя сказать, добавляет ли инсайдер что-то сверх моментума.
+// Считается по колонке close (скорректирована на сплиты, но НЕ на дивиденды) — ровно так
+// же, как признак сделки в compute.drawdownAt, иначе сигнал и контроль мерялись бы разными
+// линейками.
+//
+// Кроме просадки на конец месяца пишем ЛУЧШУЮ и ХУДШУЮ за месяц (ddHi/ddLo). Это не
+// украшение: признак сделки меряется на ДАТУ СДЕЛКИ, то есть в произвольный день месяца,
+// и контроль «все бумаги у максимума» обязан отбираться тем же правилом — «побывала у
+// максимума в этом месяце», а не «стоит у максимума в последний день». Разница не
+// косметическая: на конце месяца превышение над контролем получается +6.8%, при
+// согласованном измерении — вдвое меньше.
+const YEAR_BARS = 252;
 export function monthlyFromDaily(series) {
-  const px = {}, dv = {};
-  if (!series?.length) return { px, dv };
+  const px = {}, dv = {}, dd = {}, ddHi = {}, ddLo = {};
+  if (!series?.length) return { px, dv, dd, ddHi, ddLo };
   let cur = '', vols = [];
   const flush = () => { if (cur) dv[cur] = median(vols); };
-  for (const r of series) {
+  // Максимум скользящего окна — монотонной очередью за O(n): перебор 252 баров на каждый
+  // бар каждого из 5300 рядов стоил бы миллиарды операций на прогон.
+  const dq = [];
+  for (let i = 0; i < series.length; i++) {
+    const r = series[i];
     const m = r[0].slice(0, 7);
     if (m !== cur) { flush(); cur = m; vols = []; }
     px[m] = r[2];                                    // последний торговый день месяца
     if (r[1] > 0 && r[3] > 0) vols.push(r[1] * r[3]);
+    while (dq.length && series[dq[dq.length - 1]][1] <= r[1]) dq.pop();
+    dq.push(i);
+    while (dq[0] <= i - YEAR_BARS) dq.shift();
+    if (i >= 30) {
+      const hi = series[dq[0]][1];
+      const v = hi > 0 && r[1] > 0 ? Math.round((r[1] / hi - 1) * 1e4) / 1e4 : null;
+      dd[m] = v;
+      if (v !== null) {
+        ddHi[m] = ddHi[m] === undefined ? v : Math.max(ddHi[m], v);
+        ddLo[m] = ddLo[m] === undefined ? v : Math.min(ddLo[m], v);
+      }
+    }
   }
   flush();
-  return { px, dv };
+  return { px, dv, dd, ddHi, ddLo };
 }
 function median(a) {
   if (!a.length) return null;
@@ -41,13 +71,26 @@ function median(a) {
 }
 
 export class Panel {
-  constructor() { this.px = new Map(); this.dv = new Map(); this._months = null; }
-  add(ticker, monthly) {
+  constructor() {
+    this.px = new Map(); this.dv = new Map(); this.dd = new Map();
+    this.ddHi = new Map(); this.ddLo = new Map();
+    // ETF-бенчмарки лежат в панели ради месячных доходностей, но во вселенную «все бумаги
+    // той же ликвидности» они входить не должны: это не акции, а корзины.
+    this.bench = new Set();
+    this._months = null;
+  }
+  add(ticker, monthly, isBench = false) {
     if (!monthly || !Object.keys(monthly.px).length) return;
     this.px.set(ticker, monthly.px);
     this.dv.set(ticker, monthly.dv);
+    if (monthly.dd) this.dd.set(ticker, monthly.dd);
+    if (monthly.ddHi) this.ddHi.set(ticker, monthly.ddHi);
+    if (monthly.ddLo) this.ddLo.set(ticker, monthly.ddLo);
+    if (isBench) this.bench.add(ticker);
     this._months = null;
   }
+  // Тикеры вселенной: всё, кроме бенчмарков
+  *names() { for (const t of this.px.keys()) if (!this.bench.has(t)) yield t; }
   get months() {
     if (!this._months) {
       const s = new Set();
@@ -60,6 +103,11 @@ export class Panel {
   idx(m) { this.months; return this._idx.get(m); }
   at(i) { return this.months[i]; }
   adv(t, m) { return this.dv.get(t)?.[m] ?? null; }
+  drawdown(t, m) { const v = this.dd.get(t)?.[m]; return v === undefined ? null : v; }
+  // Побывала ли бумага в этом месяце ближе/дальше указанной просадки. Именно так меряется
+  // признак сделки (на дату сделки, то есть в произвольный день месяца).
+  wasNearHigh(t, m, th) { const v = this.ddHi.get(t)?.[m]; return v !== undefined && v >= th; }
+  wasBelow(t, m, th) { const v = this.ddLo.get(t)?.[m]; return v !== undefined && v < th; }
   // Доходность ЗА месяц m: от закрытия m-1 к закрытию m
   ret(t, m) {
     const i = this.idx(m);
@@ -102,13 +150,28 @@ export function portfolioSeries(panel, signalsByMonth, { H = 12, minDv = 3e6, mi
 }
 
 // Равновзвешенная вселенная той же ликвидности — эталон «а если брать всё подряд».
-export function universeSeries(panel, { minDv = 3e6 } = {}) {
+// pred — необязательный фильтр контекста (t, mForm) => bool: так строится контроль
+// «все бумаги у 52-недельного максимума» или «все просевшие глубже 30%».
+export function universeSeries(panel, { minDv = 3e6, pred = null, H = 1 } = {}) {
   const out = new Map();
   const months = panel.months;
+  const hist = [];   // для H>1: множества квалифицировавшихся в прошлые месяцы
   for (let i = 0; i < months.length - 1; i++) {
     const mForm = months[i], mHold = months[i + 1];
+    const cur = new Set();
+    for (const t of panel.names()) {
+      if ((panel.adv(t, mForm) ?? 0) < minDv) continue;
+      if (pred && !pred(t, mForm)) continue;
+      cur.add(t);
+    }
+    hist.push(cur);
+    // Контроль должен формироваться так же, как сигнальный портфель: если тот держит
+    // бумагу H месяцев, то и «все бумаги в том же контексте» держатся H месяцев, иначе
+    // сравниваются портфели разного возраста и разность ничего не значит.
+    const hold = new Set();
+    for (let k = 0; k < H && i - k >= 0; k++) for (const t of hist[i - k]) hold.add(t);
     const rs = [];
-    for (const t of panel.px.keys()) {
+    for (const t of hold) {
       if ((panel.adv(t, mForm) ?? 0) < minDv) continue;
       const r = panel.ret(t, mHold);
       if (r !== null) rs.push(r);
@@ -116,6 +179,40 @@ export function universeSeries(panel, { minDv = 3e6 } = {}) {
     if (rs.length) out.set(mHold, rs.reduce((a, b) => a + b, 0) / rs.length);
   }
   return out;
+}
+
+// Разность двух помесячных рядов по общим месяцам + значимость по Ньюи–Уэсту.
+// Это и есть ответ на вопрос «добавляет ли инсайдер что-то сверх самого контекста».
+export function pairedDiff(rows, byMonth) {
+  const d = [];
+  for (const x of rows) { const y = byMonth.get(x.m); if (y !== undefined) d.push(x.r - y); }
+  if (d.length < 24) return null;
+  const t = neweyWestT(d);
+  return { ex: t.mean, t: t.t, months: d.length };
+}
+
+// Оборачиваемость портфеля: доля состава, меняющаяся за месяц. Нужна, чтобы издержки
+// считались из состава, а не назначались на глаз: у трёхмесячного набора оборот втрое выше.
+export function turnover(panel, signalsByMonth, { H = 12, minDv = 3e6 } = {}) {
+  const months = panel.months;
+  let prev = null, sum = 0, n = 0;
+  for (let i = 0; i < months.length - 1; i++) {
+    const mForm = months[i];
+    const hold = new Set();
+    for (let k = 0; k < H; k++) {
+      const s = signalsByMonth.get(months[i - k]);
+      if (s) for (const t of s) if ((panel.adv(t, mForm) ?? 0) >= minDv) hold.add(t);
+    }
+    if (!hold.size) { prev = null; continue; }
+    if (prev) {
+      let ch = 0;
+      for (const t of hold) if (!prev.has(t)) ch++;
+      for (const t of prev) if (!hold.has(t)) ch++;
+      sum += ch / Math.max(hold.size, prev.size); n++;
+    }
+    prev = hold;
+  }
+  return n ? sum / n : null;
 }
 
 // ---------- статистика ----------

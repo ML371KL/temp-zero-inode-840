@@ -7,10 +7,10 @@
 // кэша, а фазы без цен (гейты, кластеры, скоринг) идут отдельными проходами.
 // Использование: node scripts/compute.mjs [--data data] [--site site]
 import { readJson, writeJson, readJsonGz, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
-import { readPriceCache, nominalFactor, readStats } from './lib/prices.mjs';
+import { readPriceCache, nominalFactor, readStats, listedThrough } from './lib/prices.mjs';
 import { loadSymbolRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import {
-  Panel, monthlyFromDaily, portfolioSeries, universeSeries,
+  Panel, monthlyFromDaily, portfolioSeries, universeSeries, pairedDiff, turnover,
   twoFactorAlpha, pathStats, neweyWestT, annualize,
 } from './lib/portfolio.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
@@ -124,13 +124,19 @@ function idxFirstAfter(s, iso) {
   if (i < 0 && s[next][0] > addDaysIso(iso, ENTRY_MAX_GAP_DAYS)) return -1;
   return next;
 }
+// Просадка от 52-недельного максимума считается по колонке close — она скорректирована на
+// сплиты, но НЕ на дивиденды. Прежняя версия брала adjclose, и это систематически завышало
+// близость к максимуму у дивидендных бумаг: прошлые бары в adjclose занижены на накопленные
+// выплаты, максимум получается ниже настоящего. Замерено на десяти дивидендных именах —
+// медиана расхождения 1.4 п.п., 90-й процентиль 3.7 п.п., то есть при пороге «не ниже 5% от
+// максимума» состав набора заметно смещался в сторону плательщиков дивидендов.
 function drawdownAt(s, iso) {
   const i = idxAtOrBefore(s, iso);
   if (i < 30) return null;
   const from = addDaysIso(iso, -365);
   let hi = 0;
-  for (let k = i; k >= 0 && s[k][0] >= from; k--) hi = Math.max(hi, s[k][2]);
-  return hi > 0 ? rnd(s[i][2] / hi - 1) : null;
+  for (let k = i; k >= 0 && s[k][0] >= from; k--) hi = Math.max(hi, s[k][1]);
+  return hi > 0 && s[i][1] > 0 ? rnd(s[i][1] / hi - 1) : null;
 }
 // Прокси размера компании: медианный дневной $-оборот за 60 торговых дней до сделки.
 // Капитализации в бесплатных источниках нет; оборот с ней коррелирует и заодно отражает
@@ -157,6 +163,22 @@ function sizeBucket(dv) {
 }
 const benchFor = b => ((b === 'micro' || b === 'small') && iwm?.length ? iwm : spy);
 
+// Делистинг или просто устаревший кэш? Раньше признаком было «последний бар старше двух
+// недель», и этого хватало, чтобы принять за делистинг любой не обновлённый ряд: в режиме
+// daily обновляются только тикеры с покупками за 25 месяцев, у остальных ряд обрывается
+// там, где его последний раз качали. Такие «мёртвые» позиции движок закрывал по старой
+// цене, превращая незрелое окно в закрытый результат. Измерено: 97 рядов из 454 оборванных
+// на деле живы по реестру символов.
+// Теперь делистинг требует подтверждения реестром: символ должен и в нём кончиться.
+const stalePrices = new Set();
+function isDelisted(t, s) {
+  if (s[s.length - 1][0] >= addDaysIso(today, -STALE_PRICE_DAYS)) return false;
+  const through = listedThrough(symRanges, t);
+  if (through === null) return true;                 // реестр не знает символа — верим ряду
+  if (through >= addDaysIso(today, -STALE_PRICE_DAYS)) { stalePrices.add(t); return false; }
+  return true;
+}
+
 // ---------- Фаза A: всё, что требует цен (по тикерам, с вытеснением) ----------
 function forward(row, s) {
   const out = {};
@@ -170,7 +192,7 @@ function forward(row, s) {
     return out;
   }
   const bench = benchFor(row._bucket);
-  const dead = s[s.length - 1][0] < addDaysIso(today, -STALE_PRICE_DAYS);
+  const dead = isDelisted(row.T, s);
   const entryAdj = s[e][2];
   const bE = idxAtOrBefore(bench, s[e][0]);
   const spyE = idxAtOrBefore(spy, s[e][0]);
@@ -209,8 +231,8 @@ const quality = { reassigned: 0, reassignedTickers: new Set(), noEntry: 0, unkno
 // Месячная панель для календарно-временного портфеля (lib/portfolio.mjs). Собирается
 // попутно, в том же проходе по ценам: второй проход стоил бы ещё одного чтения всего кэша.
 const panel = new Panel();
-panel.add('SPY', monthlyFromDaily(spy));
-if (iwm?.length) panel.add('IWM', monthlyFromDaily(iwm));
+panel.add('SPY', monthlyFromDaily(spy), true);
+if (iwm?.length) panel.add('IWM', monthlyFromDaily(iwm), true);
 for (const [t, rows] of byTicker) {
   const s = series(t);
   const n = s?.length ?? 0;
@@ -640,7 +662,7 @@ function placeboFloor(rows, draws = 24) {
   const eligible = m => {
     if (pool.has(m)) return pool.get(m);
     const a = [];
-    for (const t of panel.px.keys()) if ((panel.adv(t, m) ?? 0) >= PORT_MIN_DV) a.push(t);
+    for (const t of panel.names()) if ((panel.adv(t, m) ?? 0) >= PORT_MIN_DV) a.push(t);
     pool.set(m, a);
     return a;
   };
@@ -671,12 +693,111 @@ function placeboFloor(rows, draws = 24) {
   return { draws: res.length, med: rnd(q(0.5)), lo: rnd(q(0.05)), hi: rnd(q(0.95)) };
 }
 
+// ---------- Наборы: те же определения, что в ленте (web/app.js RECIPES) ----------
+// Раньше числа наборов лежали в index.html строками и считались вручную скриптом, которого
+// в репозитории нет. Они успели разойтись с движком (у «скор 38+» в подписи стояло +5.1%
+// при t=2.06, движок на тех же данных давал +5.7% при t=2.64), а проверить их было нечем.
+// Теперь набор — это определение в коде, а все его числа считает сборка.
+//
+// Ключевая колонка — «сверх контроля»: для ценового набора берётся портфель ВСЕХ бумаг в
+// том же ценовом контексте, собранный тем же способом и на тот же срок. Без него набор
+// «у 52-недельного максимума» описывает моментум, а не инсайдера.
+const ROUND_TRIP = 0.005;    // издержки на круг, доля
+const RECIPE_DEFS = [
+  {
+    key: 'high', name: 'У 52-нед максимума', H: 3,
+    f: r => r.dd !== null && r.dd >= -0.05,
+    control: { name: 'все бумаги, побывавшие у максимума', pred: (t, m) => panel.wasNearHigh(t, m, -0.05) },
+    // Монотонность порога — главный довод, что это признак, а не подгонка под отсечку.
+    // Раньше лестница стояла в тексте страницы числами; теперь считается здесь.
+    ladder: [-0.02, -0.05, -0.10, -0.20].map(th => ({ th, f: r => r.dd !== null && r.dd >= th })),
+  },
+  { key: 'score38', name: 'Скор 38+', H: 12, f: r => r.score !== null && r.score >= 38 },
+  { key: 'score28', name: 'Скор 28+', H: 12, f: r => r.score !== null && r.score >= 28 },
+  {
+    key: 'deep', name: 'В просадке >30%', H: 12,
+    f: r => r.dd !== null && r.dd < -0.3,
+    control: { name: 'все, побывавшие в просадке глубже 30%', pred: (t, m) => panel.wasBelow(t, m, -0.3) },
+  },
+  { key: 'base', name: 'справка: все прошедшие гейты', H: 12, f: () => true },
+];
+const controlCache = new Map();
+const signalMonths = f => {
+  const byM = new Map();
+  for (const r of backtestRows) {
+    if (r.gate !== 'ok' || !f(r)) continue;
+    const m = r.fdate.slice(0, 7);
+    (byM.get(m) ?? byM.set(m, new Set()).get(m)).add(r.t);
+  }
+  return byM;
+};
+function recipeCell(def) {
+  const rows = backtestRows.filter(r => r.gate === 'ok' && def.f(r));
+  const byM = signalMonths(def.f);
+  const ser = portfolioSeries(panel, byM, { H: def.H, minDv: PORT_MIN_DV });
+  if (ser.length < PORT_MIN_MONTHS) return null;
+  const a = twoFactorAlpha(ser, spyRet, iwmRet);
+  const p = pathStats(ser);
+  const half = w => {
+    const s = ser.filter(w);
+    const h = s.length >= 24 ? twoFactorAlpha(s, spyRet, iwmRet) : null;
+    return h ? rnd(annualize(h.alpha)) : null;
+  };
+  const to = turnover(panel, byM, { H: def.H, minDv: PORT_MIN_DV });
+  const cost = to === null ? null : (to / 2) * 12 * ROUND_TRIP;   // один круг на смену бумаги
+  let ctrl = null;
+  if (def.control) {
+    const ck = def.key + '|' + def.H;
+    if (!controlCache.has(ck)) controlCache.set(ck, universeSeries(panel, { minDv: PORT_MIN_DV, pred: def.control.pred, H: def.H }));
+    const d = pairedDiff(ser, controlCache.get(ck));
+    if (d) ctrl = { name: def.control.name, ex: rnd(annualize(d.ex)), t: rnd(d.t, 2), mo: d.months };
+  }
+  let ladder = null;
+  if (def.ladder) {
+    ladder = [];
+    for (const v of def.ladder) {
+      const s = portfolioSeries(panel, signalMonths(v.f), { H: def.H, minDv: PORT_MIN_DV });
+      if (s.length < PORT_MIN_MONTHS) continue;
+      const av = twoFactorAlpha(s, spyRet, iwmRet);
+      ladder.push({ th: v.th, n: pathStats(s).avgN, a: av ? rnd(annualize(av.alpha)) : null, t: av?.t !== undefined && av?.t !== null ? rnd(av.t, 2) : null });
+    }
+  }
+  return {
+    ladder,
+    key: def.key, name: def.name, hold: def.H, n: p.avgN, mo: ser.length, signals: rows.length,
+    cagr: rnd(p.cagr), vol: rnd(p.vol), dd: rnd(p.dd),
+    a: a ? rnd(annualize(a.alpha)) : null,
+    t: a?.t !== null && a?.t !== undefined ? rnd(a.t, 2) : null,
+    aT: half(x => x.m < PORT_SPLIT), aV: half(x => x.m >= PORT_SPLIT),
+    turnover: to === null ? null : rnd(to * 12),
+    cost: cost === null ? null : rnd(cost),
+    net: a && cost !== null ? rnd(annualize(a.alpha) - cost) : null,
+    control: ctrl,
+  };
+}
+const recipes = RECIPE_DEFS.map(recipeCell).filter(Boolean);
+
+// Ориентиры за ТОТ ЖЕ период, что и базовый набор: без них «14.6% годовых» не с чем
+// сравнить, а именно сравнение и решает, стоит ли вообще следовать за инсайдерами.
+const baseSer = portfolioSeries(panel, signalMonths(() => true), { H: 12, minDv: PORT_MIN_DV });
+const baseMonths = new Set(baseSer.map(x => x.m));
+const benchPath = map => {
+  const rows = [...map.entries()].filter(([m]) => baseMonths.has(m)).map(([m, r]) => ({ m, r, n: 1 }));
+  if (rows.length < PORT_MIN_MONTHS) return null;
+  const p = pathStats(rows);
+  return { cagr: rnd(p.cagr), vol: rnd(p.vol), dd: rnd(p.dd), mo: rows.length };
+};
+const benchmarks = { spy: benchPath(spyRet), iwm: iwm?.length ? benchPath(iwmRet) : null, universe: benchPath(univRet) };
+
 const portAgg = portfolioAggregate(backtestRows);
 const placebo = placeboFloor(backtestRows.filter(r => r.gate === 'ok'));
 W('stats.json', {
   built: today, horizons: Object.keys(HORIZONS).map(Number),
   // Главный блок: то, что портфель реально заработал бы
   portfolio: portAgg,
+  // Наборы ленты со своими сроками удержания, издержками и контролем — считаются здесь,
+  // сайт их только показывает
+  recipes, roundTrip: ROUND_TRIP, benchmarks,
   method: { minDv: PORT_MIN_DV, hold: PORT_HOLD, split: PORT_SPLIT, minNames: 5, minMonths: PORT_MIN_MONTHS, thin: PORT_THIN },
   placebo,
   // Вторичный блок: средние ПО СДЕЛКАМ. Оставлены как справка, но отвечают на другой вопрос
@@ -895,6 +1016,19 @@ W('tickers-index.json', [...byTicker.entries()]
   .map(([t, rows]) => ({ t, name: ref.get(rows[0].cik)?.name ?? rows[0].t }))
   .sort((a, b) => a.t < b.t ? -1 : 1));
 
+// Выживаемость: доля покупок, по которым ценового ряда нет вовсе, ПО ГОДАМ. Это главный
+// невидимый источник смещения — ряды исчезают не случайно, а вместе с компаниями, которых
+// больше нет, и чем старше год, тем их больше. Одно суммарное число («без цен N тикеров»)
+// эту зависимость прячет, поэтому в мете лежит разбивка.
+const survival = {};
+for (const r of buys) {
+  const y = r.fdate.slice(0, 4);
+  const e = survival[y] ?? (survival[y] = { buys: 0, noPrice: 0 });
+  e.buys++;
+  if (!r._fw) e.noPrice++;
+}
+for (const e of Object.values(survival)) e.share = rnd(e.noPrice / Math.max(1, e.buys), 3);
+
 // Мета: честная статистика конвейера
 const dropCounts = {};
 for (const r of buys) if (r._gate.drop) dropCounts[r._gate.drop] = (dropCounts[r._gate.drop] ?? 0) + 1;
@@ -922,7 +1056,13 @@ W('meta.json', {
     frozenSeries: readStats.frozenSeries,
     frozenBars: readStats.frozenBars,
     rejectedForeign: Object.keys(priceQuality.rejectedMeta ?? {}).length,
+    // Ремонт ряда по внешним источникам истины (lib/prices.mjs)
+    splitFixed: readStats.splitFixed,
+    clippedSeries: readStats.clippedSeries, clippedBars: readStats.clippedBars,
+    brokenSeries: readStats.brokenSeries, brokenBars: readStats.brokenBars,
+    stalePrices: stalePrices.size,
   },
+  survival,
   backtest: { rows: backtestRows.length, years },
   feed: { rows: feedRows.length, days: FEED_DAYS },
   clusters: { active: activeClusters.length },
@@ -937,3 +1077,5 @@ console.log(`[compute] отсев: ${Object.entries(dropCounts).sort((a, b) => b
 console.log(`[compute] кластеров активных ${activeClusters.length}, бэктест ${backtestRows.length}, инсайдеров ${insiders.length}, карточек ${tickerFiles}`);
 console.log(`[compute] без цен: ${noPriceTickers.size} тикеров; OTC отсечено строк: ${cntOtc} (из них по реестру символов: ${cntOtcByRegistry})`);
 console.log(`[compute] качество: чужой тикер ${quality.reassigned} строк в ${quality.reassignedTickers.size} тикерах; символ вне реестра ${quality.unknownSymbol}; вход невозможен ${quality.noEntry}; снято выбросов ${readStats.droppedBars} в ${readStats.dirtySeries} рядах; обрезано замороженных хвостов ${readStats.frozenBars} баров в ${readStats.frozenSeries} рядах`);
+console.log(`[compute] ремонт рядов: пересчитано по сплитам ${readStats.splitFixed}; обрезано по реестру ${readStats.clippedBars} баров в ${readStats.clippedSeries} рядах; срезано по разрыву данных ${readStats.brokenBars} баров в ${readStats.brokenSeries} рядах; устаревших рядов (не делистинг) ${stalePrices.size}`);
+console.log(`[compute] наборы: ${recipes.map(r => `${r.key} α=${(r.a * 100).toFixed(1)}% t=${r.t}${r.control ? ` сверх контроля ${(r.control.ex * 100).toFixed(1)}% t=${r.control.t}` : ''}`).join('; ')}`);

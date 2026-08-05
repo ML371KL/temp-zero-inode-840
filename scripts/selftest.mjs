@@ -8,9 +8,12 @@ import { fileURLToPath } from 'node:url';
 import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz, isIsoDate } from './lib/util.mjs';
 import { zipCreate, zipExtract } from './lib/zip.mjs';
 import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, SHARD_VERSION } from './lib/edgar.mjs';
-import { mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo, trimFrozenTail } from './lib/prices.mjs';
+import {
+  mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo,
+  trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough,
+} from './lib/prices.mjs';
 import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
-import { Panel, monthlyFromDaily, portfolioSeries, twoFactorAlpha, neweyWestT } from './lib/portfolio.mjs';
+import { Panel, monthlyFromDaily, portfolioSeries, twoFactorAlpha, neweyWestT, universeSeries, pairedDiff, turnover } from './lib/portfolio.mjs';
 import { scoreBuy, topRole, dOwnOf, freshness, SCORE_CUTS } from './lib/scoring.mjs';
 import { applyGates, isPlanned, isNonCommon, isImplausible } from './lib/gates.mjs';
 import { isEntityName, isPersonOwner, buildOwnerGroups, countIndependentPersons, isFundOnly } from './lib/entity.mjs';
@@ -279,6 +282,92 @@ ok('sanitizeSeries: изолированный выброс снимается, 
   assert.equal(sanitizeSeries(real).dropped, 0);
 });
 
+ok('sanitizeSeries: блок чужих баров снимается целиком (регрессия ITC)', () => {
+  // Прежнее окно ±7 не перекрывало блок из 16 чужих баров, и ряд оставался грязным
+  const base = Array.from({ length: 120 }, (_, i) => [addDaysIso('2021-01-01', i), 40, 40, 1e6]);
+  const dirty = base.map((r, i) => (i >= 50 && i < 66) ? [r[0], 15000, 15000, 500] : r);
+  const c = sanitizeSeries(dirty);
+  assert.equal(c.dropped, 16);
+  assert.ok(!c.series.some(r => r[2] === 15000));
+});
+
+ok('sanitizeSeries: объём защищает настоящий всплеск, но не крайнее отклонение', () => {
+  const mk = (n, px, vol) => Array.from({ length: n }, (_, i) => [addDaysIso('2021-01-01', i), px, px, vol]);
+  const base = mk(60, 10, 1e6);
+  // Короткое сжатие: цена ×7 на один день, объём ×20 — настоящий бар, трогать нельзя
+  const squeeze = base.map((r, i) => i === 30 ? [r[0], 70, 70, 2e7] : r);
+  assert.equal(sanitizeSeries(squeeze).dropped, 0);
+  // Тот же всплеск без объёма — выброс
+  const quiet = base.map((r, i) => i === 30 ? [r[0], 70, 70, 5e5] : r);
+  assert.equal(sanitizeSeries(quiet).dropped, 1);
+  // Отклонение в 280 раз снимается независимо от объёма (чужой бар ITC пришёл с большим)
+  const alien = base.map((r, i) => i === 30 ? [r[0], 2800, 2800, 2e6] : r);
+  assert.equal(sanitizeSeries(alien).dropped, 1);
+});
+
+ok('repairUnadjustedSplits: обратный сплит без коррекции пересчитывается', () => {
+  // TTOO: 1:50 на 2022-10-13, ряд пришёл в номинале — скачок 5.60 -> 255
+  const pre = Array.from({ length: 30 }, (_, i) => [addDaysIso('2022-09-01', i), 5.6, 5.6, 500000]);
+  const post = Array.from({ length: 30 }, (_, i) => [addDaysIso('2022-10-13', i), 255, 255, 10000]);
+  const r = repairUnadjustedSplits(pre.concat(post), [['2022-10-13', 0.02]]);
+  assert.equal(r.fixed, 1);
+  assert.equal(r.series[0][2], 280);          // 5.6 / 0.02
+  assert.equal(r.series[0][3], 10000);        // объём в новых акциях: 500000 * 0.02
+  assert.equal(r.series[30][2], 255, 'бары после сплита не трогаем');
+  // уже скорректированный ряд не трогается вовсе
+  const good = pre.map(x => [x[0], 280, 280, 10000]).concat(post);
+  assert.equal(repairUnadjustedSplits(good, [['2022-10-13', 0.02]]).fixed, 0);
+  // Скорректированный ряд с МЕЛКИМ коэффициентом тоже не трогаем: без требования ступени
+  // сплит 1:2 «чинился» на ровном месте и делил всю историю пополам
+  const flat = Array.from({ length: 60 }, (_, i) => [addDaysIso('2022-09-01', i), 50, 50, 1e6]);
+  assert.equal(repairUnadjustedSplits(flat, [['2022-10-13', 0.5]]).fixed, 0);
+  // Дата события у источника съезжает на день: скачок ищем в окне ±3 бара (случай FFAI)
+  const a = Array.from({ length: 40 }, (_, i) => [addDaysIso('2026-06-01', i), 0.112, 0.112, 6e7]);
+  const b = Array.from({ length: 20 }, (_, i) => [addDaysIso('2026-07-13', i), 10.8, 10.8, 4e5]);
+  const r2 = repairUnadjustedSplits(a.concat(b), [['2026-07-15', 0.0067]]);
+  assert.equal(r2.fixed, 1);
+  assert.ok(Math.abs(r2.series[0][2] - 10.8) < 0.2, 'история приведена к посплитовому номиналу');
+});
+
+ok('clipToInstrument: чужой инструмент режется, переименование — нет', () => {
+  const mk = (from, n, px) => Array.from({ length: n }, (_, i) => [addDaysIso(from, i), px, px, 1e6]);
+  // CHRD: старый капитал погашен, новая бумага с 2020-11-20 — на границе скачок ×250
+  const glued = mk('2020-09-01', 60, 0.12).concat(mk('2020-11-20', 60, 31));
+  const cut = clipToInstrument(glued, [['2020-11-20', '2026-08-04']]);
+  assert.equal(cut.head, 60);
+  assert.equal(cut.series[0][1], 31);
+  // TICC -> OXSQ: тикер в реестре начинается с переименования, но ряд непрерывен — не режем
+  const renamed = mk('2018-01-01', 60, 7).concat(mk('2018-03-02', 60, 7.1));
+  assert.equal(clipToInstrument(renamed, [['2018-03-02', '2026-08-04']]).head, 0);
+  // ITC: листинг кончился в 2016-м, а бары есть до 2022-го — хвост убираем
+  const tail = mk('2016-01-04', 200, 40).concat(mk('2021-06-22', 60, 15000));
+  const t2 = clipToInstrument(tail, [['2005-07-26', '2016-10-24']]);
+  assert.ok(t2.tail > 0);
+  assert.ok(t2.series.every(r => r[0] <= '2016-10-24'));
+});
+
+ok('cutAtDataBreak: сдвиг уровня режется, настоящая новость остаётся', () => {
+  const mk = (from, n, px, vol) => Array.from({ length: n }, (_, i) => [addDaysIso(from, i), px, px, vol]);
+  // COSM: 0.33 -> 23.01 без записи о сплите, объём НЕ вырос -> смена номинала
+  const split = mk('2022-11-01', 45, 0.33, 5e7).concat(mk('2022-12-16', 45, 23, 5e7));
+  const c = cutAtDataBreak(split, null);
+  assert.equal(c.cut, 45);
+  assert.equal(c.series[0][2], 23);
+  // Настоящая новость: цена ×6 и объём ×20 — ряд не трогаем
+  const news = mk('2019-10-01', 45, 17, 1e5).concat(mk('2019-11-18', 45, 102, 2e6));
+  assert.equal(cutAtDataBreak(news, null).cut, 0);
+  // Обвал впятеро не режем никогда: это настоящий убыток, а не порча данных
+  const crash = mk('2020-01-01', 45, 10, 1e6).concat(mk('2020-02-15', 45, 1.5, 1e6));
+  assert.equal(cutAtDataBreak(crash, null).cut, 0);
+});
+
+ok('listedThrough: конец листинга по реестру отличает делистинг от устаревшего кэша', () => {
+  const ranges = { DEAD: [[1, '2010-01-01', '2019-06-28']], LIVE: [[1, '2010-01-01', '2026-08-04']] };
+  assert.equal(listedThrough(ranges, 'DEAD'), '2019-06-28');
+  assert.equal(listedThrough(ranges, 'LIVE'), '2026-08-04');
+  assert.equal(listedThrough(ranges, 'UNKNOWN'), null);
+});
+
 ok('metaAcceptable: чужая валюта и не-акция отвергаются, отсутствие меты — нет', () => {
   assert.equal(metaAcceptable({ currency: 'USD', instrumentType: 'EQUITY' }).ok, true);
   assert.equal(metaAcceptable({ currency: 'USD', instrumentType: 'ETF' }).ok, true);
@@ -379,6 +468,43 @@ ok('portfolio: альфа к двум факторам и поправка Нь�
   assert.ok(tAuto < tIid, `на автокоррелированном ряде t должно быть меньше: ${tAuto} vs ${tIid}`);
 });
 
+ok('portfolio: месячная просадка и контроль «тот же ценовой контекст»', () => {
+  // Бумага падает с 100 до 50 и отрастает: на конец второго месяца просадка −50%,
+  // а «побывала у максимума» верно только для первого месяца.
+  const daily = [];
+  const push = (iso, px) => daily.push([iso, px, px, 1e6]);
+  for (let i = 0; i < 40; i++) push(addDaysIso('2020-01-01', i), 100);
+  for (let i = 0; i < 40; i++) push(addDaysIso('2020-02-10', i), 50);
+  const m = monthlyFromDaily(daily);
+  assert.equal(m.dd['2020-03'], -0.5);
+  assert.equal(m.ddHi['2020-01'], 0, 'в январе бумага стоит на максимуме');
+  assert.ok(m.ddLo['2020-03'] <= -0.5);
+  // контроль отбирается предикатом и держится столько же месяцев, сколько сигнал
+  const p = new Panel();
+  p.add('AAA', m);
+  p.add('SPY', monthlyFromDaily(daily.map(r => [r[0], 10, 10, 1e9])), true);
+  assert.ok(!p.px.has('ZZZ'));
+  assert.deepEqual([...p.names()], ['AAA'], 'бенчмарк во вселенную не входит');
+  const u = universeSeries(p, { minDv: 0, pred: (t, mm) => p.wasNearHigh(t, mm, -0.05) });
+  assert.ok(u.size > 0);
+});
+
+ok('portfolio: парная разность и оборачиваемость', () => {
+  const rows = Array.from({ length: 30 }, (_, i) => ({ m: `2020-${String(i % 12 + 1).padStart(2, '0')}`, r: 0.02, n: 5 }));
+  const ctrl = new Map(rows.map(x => [x.m, 0.01]));
+  const d = pairedDiff(rows, ctrl);
+  assert.ok(Math.abs(d.ex - 0.01) < 1e-12, 'разность 2% − 1% = 1% в месяц');
+  // оборот: при удержании 1 месяц состав меняется целиком
+  const p = new Panel();
+  const daily = Array.from({ length: 400 }, (_, i) => [addDaysIso('2020-01-01', i), 10, 10, 1e6]);
+  for (const t of ['A', 'B']) p.add(t, monthlyFromDaily(daily));
+  const sig = new Map();
+  const ms = p.months;
+  ms.forEach((mm, i) => sig.set(mm, new Set([i % 2 ? 'A' : 'B'])));
+  const to = turnover(p, sig, { H: 1, minDv: 0 });
+  assert.ok(to > 0.9, `при полной смене состава оборот близок к 100%, получено ${to}`);
+});
+
 // ---------- реестр биржевых символов ----------
 ok('symbols: разбор реестра, площадка на дату и склейка интервалов', () => {
   const csv = 'ticker,exchange,assetType,priceCurrency,startDate,endDate\n'
@@ -440,6 +566,18 @@ ok('кластер: фонд+GP+партнёр считаются ОДНИМ у�
   const groups = buildOwnerGroups([joint, solo]);
   assert.equal(countIndependentPersons([joint], groups), 1);       // не 3
   assert.equal(countIndependentPersons([joint, solo], groups), 2);
+});
+ok('кластер: два директора не склеиваются через общий фонд', () => {
+  // Регрессия: сплошная склейка была транзитивной, и независимые директора РАЗНЫХ эмитентов,
+  // подававшие формы вместе с одним и тем же фондом, становились «одним покупателем».
+  const fund = { cik: 10, name: 'Big Capital Partners L.P.', rel: 'T' };
+  const a = { owners: [fund, { cik: 11, name: 'Ivanov Ivan', rel: 'D' }] };
+  const b = { owners: [fund, { cik: 12, name: 'Petrov Petr', rel: 'D' }] };
+  const groups = buildOwnerGroups([a, b]);
+  assert.equal(countIndependentPersons([a, b], groups), 2, 'это два независимых директора');
+  // а совместная подача двух физлиц (супруги, семейный траст) по-прежнему один участник
+  const pair = { owners: [{ cik: 21, name: 'Sidorov A', rel: 'D' }, { cik: 22, name: 'Sidorova B', rel: 'D' }] };
+  assert.equal(countIndependentPersons([pair], buildOwnerGroups([pair])), 1);
 });
 
 // ---------- рутинность CMP и инфлексии ----------

@@ -375,6 +375,12 @@ async function loadFeed(arg) {
     try { state.feed = await fetchJson('feed.json'); }
     catch { $('#feed-table').innerHTML = '<tr><td>Данные ленты ещё не собраны.</td></tr>'; return; }
   }
+  // Подписи наборов живут в stats.json — подтягиваем их и на Ленте, не дожидаясь,
+  // пока пользователь откроет Статистику. Ошибка загрузки не мешает ленте работать.
+  if (!state.stats) {
+    try { state.stats = await fetchJson('stats.json'); } catch { /* подписи останутся краткими */ }
+  }
+  renderRecipes();
   renderFeatLegend();
   if (arg) {   // переход из рейтинга инсайдеров: #feed/cik:12345
     const m = /^cik:(\d+)$/.exec(arg);
@@ -645,11 +651,102 @@ async function loadStats() {
       (s.placebo ? `<br><b>Шумовой пол.</b> Если брать случайные бумаги той же ликвидности в те же даты, ` +
         `прежняя метрика «среднее по сделкам» показывает ${fmtPct(s.placebo.med)} ` +
         `(коридор ${fmtPct(s.placebo.lo)}…${fmtPct(s.placebo.hi)}) — <b>без всякого сигнала</b>. ` +
-        `Поэтому она и вынесена вниз как справочная.` : '');
+        `Поэтому она и вынесена вниз как справочная.` : '') + survivalNote();
+    // Выживаемость — главное ограничение любого бэктеста по инсайдерам, и оно молчаливое:
+    // ряды исчезают вместе с компаниями, которых больше нет. Показываем масштаб прямо здесь.
+    function survivalNote() {
+      const sv = state.meta?.survival;
+      if (!sv) return '';
+      const years = Object.keys(sv).sort();
+      if (years.length < 3) return '';
+      const first = sv[years[0]], last = sv[years[years.length - 1]];
+      return `<br><b>Чего здесь нет.</b> У части покупок ценового ряда не существует вовсе — ` +
+        `бумага делистнута, а бесплатные источники её истории не отдают. Доля таких покупок ` +
+        `падает с ${pctPlain(first.share)} в ${years[0]} году до ${pctPlain(last.share)} в ` +
+        `${years[years.length - 1]}: чем старше год, тем больше пропущено, и пропущены именно ` +
+        `компании, которых больше нет. Смещение от этого не устраняется, оно только сокращается ` +
+        `по мере дозагрузки истории делистнутых бумаг.`;
+    }
     $('#s-dim').addEventListener('change', renderStats);
     $('#s-hold').addEventListener('change', renderStats);
   }
+  renderRecipes();
   renderStats();
+}
+
+// ---------- НАБОРЫ: всё считает сборка, страница только показывает ----------
+// Раньше числа наборов стояли в index.html строками и считались скриптом вне репозитория.
+// Они разошлись с движком (у «скор 38+» в подписи было +5.1% при t=2.06, движок на тех же
+// данных давал +5.7% при t=2.64) и проверить их было нечем. Теперь единственный источник —
+// stats.json, а страница не хранит ни одной цифры о результатах.
+const RECIPE_HOLD = { 3: 'ДЕРЖАТЬ 3 МЕСЯЦА', 6: 'ДЕРЖАТЬ 6 МЕСЯЦЕВ', 12: 'ДЕРЖАТЬ 12 МЕСЯЦЕВ' };
+// Оборот, издержки и доли — величины без знака: «+735% оборота» читается как рост оборота
+const pctPlain = (v, d = 0) => v === null || v === undefined || !Number.isFinite(v) ? '—' : (v * 100).toFixed(d) + '%';
+function recipeById(key) { return (state.stats?.recipes ?? []).find(r => r.key === key) ?? null; }
+function recipeTitle(key) {
+  const r = recipeById(key);
+  if (!r) return '';
+  const parts = [
+    `${RECIPE_HOLD[r.hold] ?? `ДЕРЖАТЬ ${r.hold} МЕС`}.`,
+    `Альфа ${fmtPct(r.a)} годовых (t=${r.t}), в половинах выборки ${fmtPct(r.aT)} до 2021 и ${fmtPct(r.aV)} после.`,
+    `Средний состав ${r.n} бумаг, оборот ${pctPlain(r.turnover)} в год.`,
+    `После издержек ${pctPlain(state.stats.roundTrip, 1)} на круг остаётся ${fmtPct(r.net)}.`,
+  ];
+  if (r.control) parts.push(`Сверх контроля «${r.control.name}»: ${fmtPct(r.control.ex)} (t=${r.control.t}) — столько добавляет сам факт покупки инсайдера.`);
+  return parts.join(' ');
+}
+function renderRecipes() {
+  const rs = state.stats?.recipes ?? [];
+  const box = $('#recipes-table');
+  if (box && rs.length) {
+    const num = (v, warn) => `<td class="num ${v === null || v === undefined ? 'muted' : (warn && v < 0 ? 'warn-n' : cls(v))}">${fmtPct(v)}</td>`;
+    box.innerHTML = '<tr><th>Набор</th><th class="num">Держать</th><th class="num" title="средний состав портфеля">Бумаг</th>' +
+      '<th class="num" title="среднегодовая доходность самого портфеля">CAGR</th>' +
+      '<th class="num" title="годовая альфа к рынку и наклону размера">Альфа</th><th class="num">t</th>' +
+      '<th class="num">до 2021</th><th class="num">с 2021</th>' +
+      '<th class="num" title="оборот портфеля в год">Оборот</th>' +
+      `<th class="num" title="альфа за вычетом издержек ${pctPlain(state.stats.roundTrip, 1)} на круг">Нетто</th>` +
+      '<th>Сверх контроля</th></tr>' +
+      rs.map(r => `<tr><td><b>${esc(r.name)}</b></td><td class="num">${r.hold} мес</td>` +
+        `<td class="num ${r.n < 15 ? 'warn-n' : ''}">${r.n}</td>` +
+        num(r.cagr) + num(r.a, true) + tCell(r.t) + num(r.aT) + num(r.aV) +
+        `<td class="num">${pctPlain(r.turnover)}</td>` + num(r.net, true) +
+        `<td>${r.control ? `<b>${fmtPct(r.control.ex)}</b> (t=${r.control.t})<br><span class="muted">${esc(r.control.name)}</span>` : '—'}</td></tr>`).join('');
+  }
+  // числа внутри текста: <b data-rn="high.control.ex"></b>
+  for (const el of document.querySelectorAll('[data-rn]')) {
+    const [key, ...path] = el.dataset.rn.split('.');
+    let v = key === 'bench' ? state.stats?.benchmarks
+      : key === 'stats' ? state.stats
+        : recipeById(key);
+    for (const p of path) v = v?.[p];
+    if (v === null || v === undefined) { el.textContent = '—'; continue; }
+    el.textContent = el.dataset.rnFmt === 'raw' ? String(v)
+      : el.dataset.rnFmt === 'int' ? fmtInt(v)
+        : el.dataset.rnFmt === 'pct0' ? pctPlain(v) : fmtPct(v);
+  }
+  const lad = $('#recipe-ladder');
+  const high = recipeById('high');
+  if (lad && high?.ladder?.length) {
+    lad.innerHTML = high.ladder.map(l =>
+      `не ниже ${Math.round(Math.abs(l.th) * 100)}% от максимума — <b>${fmtPct(l.a)}</b> (t=${l.t}, ${l.n} бумаг)`).join('; ');
+  }
+  for (const b of document.querySelectorAll('#f-recipes .chip[data-recipe]')) {
+    const t = recipeTitle(b.dataset.recipe);
+    if (t) b.title = t;
+  }
+  // Лестница скора в подсказке фильтра — из той же сборки, что и экран статистики
+  const sg = $('#f-score-group');
+  const sc = state.stats?.portfolio?.score;
+  if (sg && sc) {
+    const parts = Object.entries(sc)
+      .map(([g, c]) => [g, c.h12])
+      .filter(([, c]) => c && c.a !== null)
+      .sort((a, b) => (b[1].a ?? 0) - (a[1].a ?? 0))
+      .map(([g, c]) => `${g}: ${fmtPct(c.a)} (t=${c.t})`);
+    if (parts.length) sg.title = sg.title.split(' Лестница')[0] +
+      ` Лестница на удержании 12 мес, годовая альфа — ${parts.join('; ')}.`;
+  }
 }
 const GROUP_LABEL = { F: 'CFO', C: 'CEO/През', O: 'Офицер', D: 'Директор', T: '10%-владелец', X: 'Прочее' };
 const tCell = t => {
