@@ -11,7 +11,7 @@ import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, SHARD_VERSI
 import { mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo, trimFrozenTail } from './lib/prices.mjs';
 import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import { Panel, monthlyFromDaily, portfolioSeries, twoFactorAlpha, neweyWestT } from './lib/portfolio.mjs';
-import { scoreBuy, topRole, dOwnOf, freshness } from './lib/scoring.mjs';
+import { scoreBuy, topRole, dOwnOf, freshness, SCORE_CUTS } from './lib/scoring.mjs';
 import { applyGates, isPlanned, isNonCommon, isImplausible } from './lib/gates.mjs';
 import { isEntityName, isPersonOwner, buildOwnerGroups, countIndependentPersons, isFundOnly } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection, typicalBuyValue } from './lib/routine.mjs';
@@ -573,27 +573,35 @@ ok('плановость: чекбокс ИЛИ сноска', () => {
 });
 
 // ---------- скоринг ----------
-ok('scoreBuy v3: только откалиброванные компоненты', () => {
-  // Максимальный профиль: кластер ≥3, CFO, докупка 20–50%, известная нерутинная история,
-  // первая покупка, сразу после отчёта, доказанный пред-отчётный трек
-  const max = scoreBuy({ persons: 3, role: 'F', dOwn: 0.3, val: 2e5, routine: false, inflect: 'first-ever', windowOpen: 1, aehN: 4, aehHit: 0.75 });
-  assert.equal(max.total, 20 + 16 + 16 + 12 + 8 + 6 + 8); // 86
-  // CEO штрафуется (минус в обеих половинах калибровки), CFO и офицер равны
-  assert.equal(scoreBuy({ role: 'C' }).parts.role, -8);
-  assert.equal(scoreBuy({ role: 'O' }).parts.role, 16);
-  // Позиция с нуля и сделка ≥$1M — отрицательные компоненты
-  const weak = scoreBuy({ persons: 1, role: 'D', dOwn: 9.99, val: 2e6 });
-  assert.equal(weak.parts.conviction, -12);
-  assert.equal(weak.parts.big, -8);
-  // Выброшенные в v3 компоненты не существуют
-  assert.equal(max.parts.price, undefined);
-  assert.equal(max.parts.track, undefined);
-  assert.equal(max.parts.dip, undefined);
-  // A&H только со строгим порогом
-  assert.equal(scoreBuy({ aehN: 2, aehHit: 1 }).parts.aeh, 0);
-  assert.equal(scoreBuy({ aehN: 3, aehHit: 0.6 }).parts.aeh, 8);
-  // «Не покупал 3 года» больше не даёт баллов (на validation знак отрицательный)
+ok('scoreBuy v4: пять признаков, шкала 0–58, ничего лишнего', () => {
+  // Максимальный профиль: оппортунистическая, у 52-нед максимума, CFO, малое имя, первая покупка
+  const max = scoreBuy({ role: 'F', dd: -0.01, adv: 5e6, routine: false, inflect: 'first-ever' });
+  assert.equal(max.total, 15 + 15 + 10 + 10 + 8); // 58
+  // «Неизвестно» не равно «оппортунистическая»: истории мало -> нулевой вклад, не половина
+  assert.equal(scoreBuy({ routine: null }).parts.oppo, 0);
+  assert.equal(scoreBuy({ routine: true }).parts.oppo, 0);
+  // Роли: офицер и десятипроцентник штрафуются, CEO нейтрален (штраф v3 знака не подтвердил)
+  assert.equal(scoreBuy({ role: 'C' }).parts.role, 0);
+  assert.equal(scoreBuy({ role: 'O' }).parts.role, -5);
+  assert.equal(scoreBuy({ role: 'T' }).parts.role, -10);
+  assert.equal(scoreBuy({ role: 'D' }).parts.role, 8);
+  // Порог близости к максимуму ровно на границе засчитывается
+  assert.equal(scoreBuy({ dd: -0.05 }).parts.near, 15);
+  assert.equal(scoreBuy({ dd: -0.0501 }).parts.near, 0);
+  assert.equal(scoreBuy({ dd: null }).parts.near, 0);
+  // Малое имя — строго ниже порога оборота
+  assert.equal(scoreBuy({ adv: 2.9e7 }).parts.small, 10);
+  assert.equal(scoreBuy({ adv: 3e7 }).parts.small, 0);
+  assert.equal(scoreBuy({ adv: null }).parts.small, 0);
+  // Компоненты, не пережившие портфельную проверку, в скоре отсутствуют
+  for (const gone of ['cluster', 'conviction', 'big', 'history', 'windowOpen', 'aeh', 'track']) {
+    assert.equal(max.parts[gone], undefined, `компонент «${gone}» должен быть удалён`);
+  }
+  // «Не покупал 3 года» баллов не даёт
   assert.equal(scoreBuy({ inflect: 'first-in-3y' }).parts.firstEver, 0);
+  // Корзины Статистики согласованы со шкалой: верхняя граница достижима, нижняя ниже медианы
+  assert.equal(SCORE_CUTS[0] < max.total, true);
+  assert.deepEqual(SCORE_CUTS, [...SCORE_CUTS].sort((a, b) => b - a), 'границы должны убывать');
   assert.equal(topRole(['DO', 'DF']), 'F');
   assert.equal(dOwnOf({ sh: 500, own: 1500 }), 0.5);
   assert.equal(dOwnOf({ sh: 500, own: 500 }), 9.99);

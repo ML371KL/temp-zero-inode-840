@@ -14,7 +14,7 @@ import {
   twoFactorAlpha, pathStats, neweyWestT, annualize,
 } from './lib/portfolio.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
-import { scoreBuy, topRole, dOwnOf, freshness } from './lib/scoring.mjs';
+import { scoreBuy, topRole, dOwnOf, freshness, SCORE_CUTS } from './lib/scoring.mjs';
 import { applyGates, isPlanned, DROP_LABELS } from './lib/gates.mjs';
 import { buildOwnerGroups, isPersonOwner, isFundOnly, countIndependentPersons } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './lib/routine.mjs';
@@ -404,24 +404,13 @@ for (const r of buys) {
   r._track = tr.all;
   r._trackPre = tr.pre;
   r._inflect = inflection(hist, r.tdate);
-  const common = {
-    role: r._role, dOwn: r._dOwn, val: r.val,
-    routine: r._routine, inflect: r._inflect, windowOpen: r._wo,
-    aehN: r._trackPre?.n ?? null, aehHit: r._trackPre?.hit ?? null,
-  };
-  // Скор «на сегодня» — для ленты и скринера (полный кластер уже известен)
+  // Скор v4 берёт только признаки на дату сделки, поэтому «живая» и point-in-time версии
+  // совпадают: расхождение в v3 создавал кластер, которого в скоре больше нет.
   r._score = scoreBuy({
-    ...common,
-    persons: cl ? cl.dense : 1,
-    totalVal: cl ? cl.rows.reduce((a, b) => a + b.val, 0) : r.val,
+    role: r._role, dd: r._dd, adv: r._dv ?? null,
+    routine: r._routine, inflect: r._inflect,
   });
-  // Скор «на момент подачи» — только он идёт в бэктест
-  const pitRows = cl ? cl.rows.filter(x => x.fdate <= r.fdate && x.tdate <= r.tdate) : [];
-  r._scorePit = scoreBuy({
-    ...common,
-    persons: r._clPit ?? 1,
-    totalVal: pitRows.length ? pitRows.reduce((a, b) => a + b.val, 0) : r.val,
-  });
+  r._scorePit = r._score;
 }
 
 // ---------- Payload ----------
@@ -535,8 +524,13 @@ const DIMS = {
   routine: r => r.routine === true ? 'рутинная (CMP)' : r.routine === false ? 'оппортунистическая' : 'нет истории',
   inflect: r => r.inflect ?? 'обычная',
   dd: r => bucketDdLabel(r.dd),
-  // Корзины соответствуют шкале скоринга v3 (максимум ≈86), см. docs/КАЛИБРОВКА-V3.md
-  score: r => r.score === null ? 'отсеяна' : r.score >= 55 ? 'скор 55+' : r.score >= 40 ? 'скор 40–54' : r.score >= 25 ? 'скор 25–39' : r.score >= 10 ? 'скор 10–24' : 'скор <10',
+  // Границы взяты из scoring.mjs: на held-out половине лестница по ним монотонна
+  score: r => r.score === null ? 'отсеяна'
+    : r.score >= SCORE_CUTS[0] ? `скор ${SCORE_CUTS[0]}+`
+    : r.score >= SCORE_CUTS[1] ? `скор ${SCORE_CUTS[1]}–${SCORE_CUTS[0] - 1}`
+    : r.score >= SCORE_CUTS[2] ? `скор ${SCORE_CUTS[2]}–${SCORE_CUTS[1] - 1}`
+    : r.score >= SCORE_CUTS[3] ? `скор ${SCORE_CUTS[3]}–${SCORE_CUTS[2] - 1}`
+    : `скор <${SCORE_CUTS[3]}`,
   year: r => r.fdate.slice(0, 4),
 };
 // Срезы, кроме 'gate' и 'routine', считаются только по прошедшим гейты:
