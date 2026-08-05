@@ -696,7 +696,10 @@ function recipeTitle(key) {
   return parts.join(' ');
 }
 function renderRecipes() {
-  const rs = state.stats?.recipes ?? [];
+  // Без stats.json подставлять нечего: молча оставляем разметку как есть, иначе числа
+  // в тексте затёрлись бы прочерками ещё до того, как payload успел загрузиться
+  if (!state.stats) return;
+  const rs = state.stats.recipes ?? [];
   const box = $('#recipes-table');
   if (box && rs.length) {
     const num = (v, warn) => `<td class="num ${v === null || v === undefined ? 'muted' : (warn && v < 0 ? 'warn-n' : cls(v))}">${fmtPct(v)}</td>`;
