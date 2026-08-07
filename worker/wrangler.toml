@@ -1,0 +1,11 @@
+# Воркер живых котировок. Отдельный от всего остального: у 840 нет ни Pages-проекта,
+# ни бакета R2, и заводить их ради одной колонки незачем.
+name = "radar840-quotes"
+main = "index.js"
+compatibility_date = "2026-08-03"
+
+# Адрес вида radar840-quotes.<поддомен>.workers.dev — его же прописан в web/app.js
+workers_dev = true
+
+[observability]
+enabled = true

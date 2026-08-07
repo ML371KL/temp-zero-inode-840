@@ -1,0 +1,47 @@
+name: Воркер котировок
+
+# Деплой только когда воркер действительно поменялся: ежедневная сборка данных его
+# не касается, а лишние публикации расходуют лимиты аккаунта.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/worker.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      # Секрет с токеном в этом репозитории называется CLOUD (не CLOUDFLARE_API_TOKEN),
+      # а wrangler читает переменную с каноническим именем — отсюда переименование.
+      - name: wrangler deploy
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUD }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npx --yes wrangler@4.92.0 deploy
+
+      - name: Проверка живого ответа
+        run: |
+          sleep 5
+          url="https://radar840-quotes.${{ vars.CF_WORKERS_SUBDOMAIN }}.workers.dev/health"
+          if [ -z "${{ vars.CF_WORKERS_SUBDOMAIN }}" ]; then
+            echo "Переменная CF_WORKERS_SUBDOMAIN не задана — проверку пропускаем."
+            echo "Адрес воркера напечатан выше в выводе wrangler deploy."
+            exit 0
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' "$url")
+          echo "GET $url -> $code"
+          [ "$code" = "200" ]
