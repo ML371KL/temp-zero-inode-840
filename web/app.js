@@ -275,10 +275,37 @@ function groupPositions(rows, holdMonths) {
     p.n = p.rows.length;
     p.who = [...new Set(p.rows.map(x => x.who))];
     p.px = p.rows[0].px; p.cur = p.rows[0].cur;
+    p.entryPx = p.rows[0].entryPx; p.entryDate = p.rows[0].entryDate;
     p.chg = p.rows[0].chg; p.dd = p.rows[0].dd; p.dv = p.rows[0].dv;
     p.role = p.rows[0].role; p.title = p.rows[0].title;
   }
   return out.sort((a, b) => a.first < b.first ? 1 : a.first > b.first ? -1 : b.val - a.val);
+}
+
+// Насколько доступный вход отличался от цены инсайдера. У большинства сделок разрыв мелкий,
+// у просроченных подач — огромный; именно он и объяснял, почему «изм.» не сходилась
+// с делением цены сделки на текущую.
+function insiderPxHint(p) {
+  const gap = p.entryPx && p.px ? p.entryPx / p.px - 1 : null;
+  if (gap === null || Math.abs(gap) < 0.005) return 'Цена, по которой купил инсайдер';
+  return `Цена, по которой купил инсайдер: вход по правилу оказался `
+    + `${gap > 0 ? 'дороже' : 'дешевле'} на ${(Math.abs(gap) * 100).toFixed(1)}%`;
+}
+
+// Число в колонке «Изм.» — полная доходность (с дивидендами), как в бэктесте. Деление
+// видимых на экране цен даёт чуть меньше у дивидендных бумаг (у AAT за 85 дней +11.6%
+// по ценам против +13.2% с дивидендами). Показываем обе величины, чтобы расхождение
+// не выглядело ошибкой счёта.
+function chgHint(p) {
+  if (p.chg === null || p.chg === undefined) {
+    return p.entryPx ? 'Позиция открылась в последний торговый день данных — измерять пока нечего'
+      : 'Первый торговый день после подачи ещё не закрылся — считать не от чего';
+  }
+  const base = `Вход ${fmtPrice(p.entryPx)} → сейчас ${fmtPrice(p.cur)}`;
+  const byPrice = p.entryPx && p.cur ? p.cur / p.entryPx - 1 : null;
+  return byPrice !== null && Math.abs(byPrice - p.chg) >= 0.002
+    ? `${base}: по ценам ${fmtPct(byPrice)}, с дивидендами ${fmtPct(p.chg)}`
+    : `${base} = ${fmtPct(p.chg)}`;
 }
 
 function renderSet() {
@@ -304,8 +331,9 @@ function renderSet() {
     <th class="num sortable" data-sort="age" title="Дата первой покупки в позиции и сколько дней прошло">Открыта ⇅</th>
     <th title="Успеваю ли я войти и держится ли позиция — это разные вещи">Статус</th>
     <th class="num sortable" data-sort="val" title="Сумма всех покупок инсайдеров в этой позиции">Куплено ⇅</th>
-    <th class="num">Цена сделки</th><th class="num">Сейчас</th>
-    <th class="num sortable" data-sort="chg" title="Изменение с первого торгового дня после подачи">Изм. ⇅</th>
+    <th class="num" title="Цена, по которой можно было войти по правилу набора: закрытие первого торгового дня после подачи формы. Мелким — цена самого инсайдера; при просроченной подаче она бывает намного ниже, и считать изменение от неё нельзя">Вход</th>
+    <th class="num">Сейчас</th>
+    <th class="num sortable" data-sort="chg" title="Изменение от ЦЕНЫ ВХОДА, а не от цены инсайдера: инсайдерская цена подписчику недоступна. Считается полная доходность — с дивидендами, как в бэктесте, поэтому у дивидендных бумаг число чуть выше, чем даёт деление цен на экране (в подсказке к числу видно обе величины)">Изм. ⇅</th>
     <th class="num sortable" data-sort="dd" title="Насколько ниже 52-недельного максимума была цена на дату сделки">До макс. ⇅</th>
     <th class="num" title="Медианный дневной долларовый оборот бумаги">Оборот</th>
     <th title="Три месяца от первой покупки">Выход</th></tr>`;
@@ -324,9 +352,11 @@ function renderSet() {
             : st === 'hold' ? 'Входить поздно, но открытая позиция держится до даты выхода'
               : 'Три месяца истекли — позиция закрыта')}">${lab}</span></td>
       <td class="num">${fmtMoney(p.val)}</td>
-      <td class="num">${fmtPrice(p.px)}</td>
+      <td class="num">${p.entryPx ? fmtPrice(p.entryPx)
+        : `<span class="muted" title="Первый торговый день после подачи ещё не закрылся — входить по правилу можно на ближайшем закрытии">ждём</span>`}
+        <span class="sub2" title="${esc(insiderPxHint(p))}">сделка ${fmtPrice(p.px)}</span></td>
       <td class="num">${fmtPrice(p.cur)}</td>
-      <td class="num ${cls(p.chg)}">${fmtPct(p.chg)}</td>
+      <td class="num ${cls(p.chg)}" title="${esc(chgHint(p))}">${fmtPct(p.chg)}</td>
       <td class="num ${cls(p.dd)}">${fmtPct(p.dd, 0)}</td>
       <td class="num">${fmtMoney(p.dv)}</td>
       <td class="muted">${esc(fmtDate(p.exit))}</td>
