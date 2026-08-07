@@ -48,6 +48,7 @@ $('#theme-toggle').addEventListener('click', () => {
 const state = {
   feed: null, stats: null, meta: null,
   tickersIndex: null, tickerData: null, chart: null, feedShown: 100, sort: null,
+  live: null,          // последний ответ воркера котировок, null — живого слоя нет
 };
 async function fetchJson(path) {
   const res = await fetch('data/' + path, { cache: 'no-cache' });
@@ -64,7 +65,7 @@ function route() {
   if (!TABS.includes(tab)) { tab = 'screener'; arg = undefined; }  // неизвестный якорь — не белый экран
   for (const a of tabs) a.classList.toggle('active', a.dataset.tab === tab);
   for (const p of document.querySelectorAll('.tab-panel')) p.classList.toggle('active', p.id === 'tab-' + tab);
-  if (tab === 'screener') loadScreener();
+  if (tab === 'screener') { loadScreener(); startLive(); } else stopLive();
   if (tab === 'feed') loadFeed(arg);
   if (tab === 'stats') loadStats();
   if (tab === 'ticker') { loadTickerIndex(); if (arg) openTicker(decodeURIComponent(arg)); }
@@ -187,6 +188,7 @@ async function loadScreener() {
   if (!state.stats) { try { state.stats = await fetchJson('stats.json'); } catch { /* числа появятся позже */ } }
   renderSetHeader();
   renderSet();
+  pollLive({ force: true });   // первый опрос сразу после данных, а не через период таймера
 }
 for (const b of document.querySelectorAll('#set-age .chip')) {
   b.addEventListener('click', () => {
@@ -282,11 +284,97 @@ function groupPositions(rows, holdMonths) {
   return out.sort((a, b) => a.first < b.first ? 1 : a.first > b.first ? -1 : b.val - a.val);
 }
 
+// ---------- ЖИВЫЕ ЦЕНЫ ----------
+// Yahoo не отдаёт CORS-заголовок, поэтому спросить цену напрямую браузер не может.
+// Посредник — свой воркер на краю Cloudflare (worker/index.js): он держит ответ 30 секунд
+// в кэше края, так что опрос отсюда не может разогнать обращения к источнику.
+// Слой необязательный: если воркер молчит, страница остаётся на ценах снимка и работает
+// целиком — живой слой ничего не добавляет к решению, только к наблюдению.
+const QUOTES_URL = 'https://radar840-quotes.financehub.workers.dev/quotes';
+const LIVE_PERIOD_MS = 30000;
+const ySym = t => String(t).replace(/[./]/g, '-');   // BRK.B -> BRK-B, как в сборке
+let liveTimer = null;
+
+const onScreener = () => location.hash === '' || location.hash.startsWith('#screener');
+
+// force — разовый опрос по явному поводу (экран только что отрисован, вкладка стала видимой).
+// Требование видимости относится к ПОВТОРНОМУ опросу по таймеру: именно он в фоновой вкладке
+// тянул бы источник сутками. Один запрос на отрисовку не стоит того, чтобы им рисковать.
+async function pollLive({ force = false } = {}) {
+  if ((!force && document.visibilityState !== 'visible') || !onScreener()) return;
+  const today = new Date().toISOString().slice(0, 10);
+  // Спрашиваем только по открытым позициям: закрытые живая цена не меняет, а список
+  // короче — значит и ответ меньше, и в потолок воркера по числу тикеров не упираемся.
+  const syms = [...new Set((state.feed ?? [])
+    .filter(r => r.set === 1 && (!r.exit || r.exit >= today)).map(r => r.t))].slice(0, 60);
+  if (!syms.length) return;
+  try {
+    const res = await fetch(`${QUOTES_URL}?symbols=${encodeURIComponent(syms.join(','))}`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.json();
+    if (!body?.quotes) throw new Error('пустой ответ');
+    state.live = body;
+  } catch (error) {
+    // Тихо: снимок остаётся на месте. Единственный след — колонка не назовётся живой.
+    state.live = null;
+    console.warn('[live] котировки недоступны:', error?.message || error);
+  }
+  if (onScreener()) renderSet();
+}
+
+function startLive() {
+  if (liveTimer) return;
+  pollLive({ force: true });
+  liveTimer = setInterval(pollLive, LIVE_PERIOD_MS);
+}
+function stopLive() { clearInterval(liveTimer); liveTimer = null; }
+// Опрос идёт только у видимой вкладки: фоновая вкладка сутками тянула бы источник впустую.
+addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && onScreener()) startLive();
+  else stopLive();
+});
+
+// Живая цена подменяет снимок, а «изм.» пересчитывается так, чтобы НЕ потерять дивиденды:
+// снимочное изменение уже полное (adjClose), поэтому его достаточно домножить на отношение
+// живой цены к цене снимка. Прямое «живая ÷ вход» дало бы ценовую доходность и разошлось
+// бы с бэктестом. Снимочные значения сохраняются: из них считается сам множитель.
+function applyLive(pos) {
+  const q = state.live?.quotes;
+  for (const p of pos) {
+    p.curSnap = p.cur; p.chgSnap = p.chg; p.live = null;
+    const x = q?.[ySym(p.t)];
+    if (!x || typeof x.p !== 'number' || !p.curSnap) continue;
+    p.live = x;
+    p.cur = x.p;
+    p.chg = p.chgSnap === null || p.chgSnap === undefined
+      ? (p.entryPx ? x.p / p.entryPx - 1 : null)
+      : (1 + p.chgSnap) * (x.p / p.curSnap) - 1;
+  }
+}
+
+const MARKET_STATE = {
+  REGULAR: 'торги идут', PRE: 'предторги', POST: 'постторги',
+  PREPRE: 'до предторгов', POSTPOST: 'после постторгов', CLOSED: 'рынок закрыт',
+};
+// Время котировки — в нью-йоркском, а не в местном: цена принадлежит своей сессии,
+// и «16:45» в Куала-Лумпуре ничего не говорит о том, открыт ли рынок.
+function liveStamp() {
+  const at = state.live?.at;
+  if (!at) return null;
+  const time = new Date(at * 1000).toLocaleTimeString('ru-RU', {
+    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit',
+  });
+  const st = Object.values(state.live.quotes ?? {})[0]?.st;
+  return `живые цены · ${time} Нью-Йорк${st && MARKET_STATE[st] ? ` · ${MARKET_STATE[st]}` : ''}`
+    + (state.live.stale ? ' · источник молчит, показано последнее' : '');
+}
+
 // «Сейчас» — это закрытие последнего дня снимка, а не текущая цена: сборка идёт раз в сутки
-// после закрытия рынка. Пока живого источника нет, дата снимка должна стоять на виду —
-// иначе колонка выдаёт себя за настоящее время и вводит в заблуждение тем сильнее,
-// чем дольше не было сборки.
+// после закрытия рынка. Когда живого слоя нет, дата снимка должна стоять на виду — иначе
+// колонка выдаёт себя за настоящее время и вводит в заблуждение тем сильнее, чем дольше
+// не было сборки.
 function pricesAsOfHint() {
+  if (state.live?.at) return liveStamp() + ' — цена обновляется каждые 30 секунд, пока вкладка открыта';
   const d = state.stats?.pricesAsOf;
   if (!d) return 'Последняя цена в снимке';
   const days = Math.round((Date.parse(new Date().toISOString().slice(0, 10)) - Date.parse(d)) / 864e5);
@@ -312,7 +400,7 @@ function chgHint(p) {
     return p.entryPx ? 'Позиция открылась в последний торговый день данных — измерять пока нечего'
       : 'Первый торговый день после подачи ещё не закрылся — считать не от чего';
   }
-  const base = `Вход ${fmtPrice(p.entryPx)} → сейчас ${fmtPrice(p.cur)}`;
+  const base = `Вход ${fmtPrice(p.entryPx)} → ${p.live ? 'живая цена' : 'закрытие'} ${fmtPrice(p.cur)}`;
   const byPrice = p.entryPx && p.cur ? p.cur / p.entryPx - 1 : null;
   return byPrice !== null && Math.abs(byPrice - p.chg) >= 0.002
     ? `${base}: по ценам ${fmtPct(byPrice)}, с дивидендами ${fmtPct(p.chg)}`
@@ -328,6 +416,7 @@ function renderSet() {
   // Открыта ли позиция — решает ДАТА ВЫХОДА, которую считает сборка, а не приблизительный
   // возраст в днях: иначе строка с уже прошедшей датой выхода оставалась в списке.
   if (setAge === 'fresh') pos = pos.filter(p => !p.exit || p.exit >= today);
+  applyLive(pos);          // до сортировки: сортировать надо по тому, что видно
   pos = sortRows(pos);
   const sig = pos.reduce((a, p) => a + p.n, 0);
   const canEnter = pos.filter(p => p.age <= fresh).length;
@@ -336,7 +425,8 @@ function renderSet() {
       ? `${plural(pos.length, 'открытая позиция', 'открытые позиции', 'открытых позиций')} · войти ещё можно в ${canEnter}`
       : `${plural(pos.length, 'позиция', 'позиции', 'позиций')} за 200 дней`) +
       (sig > pos.length ? ` · ${plural(sig, 'сигнал', 'сигнала', 'сигналов')}, повторные покупки второй позиции не требуют` : '') +
-      (state.stats?.pricesAsOf ? ` · цены на закрытие ${fmtDate(state.stats.pricesAsOf)}` : '')
+      (liveStamp() ? ` · ${liveStamp()}`
+        : state.stats?.pricesAsOf ? ` · цены на закрытие ${fmtDate(state.stats.pricesAsOf)}` : '')
     : '';
   const th = `<tr>
     <th>Бумага</th><th>Покупали</th>
