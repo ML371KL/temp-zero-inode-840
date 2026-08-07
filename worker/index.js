@@ -19,13 +19,30 @@
 //
 // v7 без cookie+crumb отвечает 401 (проверено), поэтому пара добывается и живёт в кэше края
 // вместе с ответами; при 401 добывается заново один раз.
+//
+// РЕЗЕРВ — ВТОРОЙ ЭНДПОИНТ YAHOO, А НЕ ВТОРОЙ ПОСТАВЩИК. Хрупкое место основного пути ровно
+// одно: стена crumb. `v8/finance/chart` crumb не требует вовсе и переживает именно этот отказ.
+// Finnhub сюда сознательно НЕ взят: (1) ключ у пользователя один и он уже занят живым
+// источником 839, а падение Yahoo увело бы туда оба дашборда разом — это и есть та самая
+// связанность, которой мы избегаем; (2) на бесплатном тарифе Finnhub отвечает по ОДНОМУ
+// тикеру на запрос, то есть обход стоит 24 запроса вместо одного при потолке 60 в минуту;
+// (3) защищает он только колонки «Сейчас» и «Изм.», которые ни на одно решение не влияют:
+// без живого слоя страница честно возвращается к ценам снимка.
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 const TTL = 30;              // сколько секунд ответ считается свежим
-const STALE_TTL = 1800;      // сколько held последний удачный ответ на случай отказа Yahoo
+const CHART_TTL = 300;       // то же для запасного пути: он стоит запрос НА КАЖДЫЙ тикер
+const STALE_TTL = 1800;      // сколько держим последний удачный ответ на случай отказа Yahoo
 const COOLDOWN = 300;        // пауза после 429 — не долбим источник
-const CRUMB_TTL = 3600;
-const MAX_SYMBOLS = 60;
+const CRUMB_TTL = 2700;      // crumb живёт дольше, но обновить его дешевле, чем поймать 401
+// Предел пачки у Yahoo не документирован, и СВЕРХ НЕГО ОТВЕТ МОЛЧА ОБРЕЗАЕТСЯ — это выглядит
+// как «у части бумаг нет котировки», а не как ошибка. 50 — величина, проверенная на практике
+// живым источником дашборда IBKR; выше не поднимать.
+const MAX_SYMBOLS = 50;
+// Доля тикеров, ниже которой ответ считается негодным. Ноль котировок при HTTP 200 — самый
+// коварный отказ Yahoo: у соседнего проекта он восемь тактов подряд засчитывался за здоровье,
+// и резервный источник не включался. Пустой и куцый ответ обязаны вести себя как ошибка.
+const MIN_COVERAGE = 0.5;
 const ALLOWED_ORIGINS = new Set([
   'https://ml371kl.github.io',
   'http://localhost:8843',
@@ -79,7 +96,8 @@ async function getCrumb(cache, force) {
   return pair;
 }
 
-async function fetchQuotes(cache, symbols) {
+// Основной путь: одна пачка на все тикеры. Требует cookie+crumb — без них v7 отвечает 401.
+async function fetchBatch(cache, symbols) {
   let pair = await getCrumb(cache, false);
   for (let attempt = 0; attempt < 2; attempt++) {
     const url = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols='
@@ -91,7 +109,61 @@ async function fetchQuotes(cache, symbols) {
     const j = await r.json();
     return (j?.quoteResponse?.result ?? []).filter(q => q?.symbol);
   }
-  throw new Error('Yahoo отверг crumb дважды');
+  const e = new Error('Yahoo отверг crumb дважды');
+  e.crumbWall = true;
+  throw e;
+}
+
+// Запасной путь: график вместо котировки. Crumb ему не нужен вовсе, поэтому он переживает
+// ровно тот отказ, который для v7 смертелен — когда Yahoo закрывает выдачу crumb. Плата:
+// один запрос НА КАЖДЫЙ тикер, поэтому ответ этого пути живёт в кэше впятеро дольше,
+// и включается он только после провала основного.
+async function fetchChart(symbols) {
+  const out = [];
+  const got = await Promise.allSettled(symbols.map(async s => {
+    const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(s)}?interval=1d&range=1d`,
+      { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+    if (r.status === 429) { const e = new Error('429'); e.rateLimited = true; throw e; }
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const m = (await r.json())?.chart?.result?.[0]?.meta;
+    if (!m || typeof m.regularMarketPrice !== 'number') throw new Error('нет цены');
+    return {
+      symbol: m.symbol ?? s,
+      regularMarketPrice: m.regularMarketPrice,
+      regularMarketTime: m.regularMarketTime ?? null,
+      marketState: m.marketState ?? null,
+      regularMarketPreviousClose: m.chartPreviousClose ?? null,
+    };
+  }));
+  for (const g of got) if (g.status === 'fulfilled') out.push(g.value);
+  if (got.some(g => g.status === 'rejected' && g.reason?.rateLimited)) {
+    const e = new Error('429 на запасном пути');
+    e.rateLimited = true;
+    throw e;
+  }
+  return out;
+}
+
+// HTTP 200 с пустым или куцым списком — это отказ, а не здоровье. Проверка стоит здесь, а не
+// у вызывающего, чтобы её нельзя было забыть ни на одном из двух путей.
+function assertCoverage(result, symbols, source) {
+  const n = result.filter(q => typeof q?.regularMarketPrice === 'number').length;
+  if (n === 0) throw new Error(`${source}: ответ без котировок (запрошено ${symbols.length})`);
+  if (n < Math.ceil(symbols.length * MIN_COVERAGE)) {
+    throw new Error(`${source}: ответ обрезан — ${n} котировок из ${symbols.length}`);
+  }
+  return result;
+}
+
+async function fetchQuotes(cache, symbols, forceChart) {
+  try {
+    if (forceChart) throw new Error('запасной путь запрошен явно');
+    return { source: 'quote', ttl: TTL, result: assertCoverage(await fetchBatch(cache, symbols), symbols, 'quote') };
+  } catch (error) {
+    if (error?.rateLimited) throw error;         // на 429 запасной путь только усугубит
+    const result = assertCoverage(await fetchChart(symbols), symbols, 'chart');
+    return { source: 'chart', ttl: CHART_TTL, result, degraded: String(error.message || error) };
+  }
 }
 
 export default {
@@ -109,8 +181,10 @@ export default {
       .sort().slice(0, MAX_SYMBOLS).map(yahooSymbol);
     if (!symbols.length) return json({ error: 'нужен параметр symbols' }, 400, origin);
 
+    // Явный вызов запасного пути — чтобы его можно было проверить, а не надеяться на него.
+    const forceChart = url.searchParams.get('src') === 'chart';
     const cache = caches.default;
-    const key = KEY('q/' + symbols.join(','));
+    const key = KEY((forceChart ? 'c/' : 'q/') + symbols.join(','));
     const staleKey = KEY('stale/' + symbols.join(','));
 
     const fresh = await cache.match(key);
@@ -128,7 +202,7 @@ export default {
     }
 
     try {
-      const result = await fetchQuotes(cache, symbols);
+      const { source, ttl, result, degraded } = await fetchQuotes(cache, symbols, forceChart);
       const quotes = {};
       for (const q of result) {
         if (typeof q.regularMarketPrice !== 'number') continue;
@@ -139,11 +213,19 @@ export default {
           prev: typeof q.regularMarketPreviousClose === 'number' ? q.regularMarketPreviousClose : null,
         };
       }
-      const body = { at: Math.floor(Date.now() / 1000), n: Object.keys(quotes).length, quotes };
-      // Свежая копия живёт TTL, запасная — STALE_TTL: вторая нужна ровно на случай,
+      const missing = symbols.filter(s => !quotes[s]);
+      const body = {
+        at: Math.floor(Date.now() / 1000), n: Object.keys(quotes).length,
+        src: source, quotes,
+        // Недостача называется вслух: молча отданный неполный набор выглядел бы так,
+        // будто у части бумаг просто нет цены.
+        ...(missing.length ? { missing } : {}),
+        ...(degraded ? { degraded } : {}),
+      };
+      // Свежая копия живёт ttl, запасная — STALE_TTL: вторая нужна ровно на случай,
       // когда источник замолчал, и отдаётся с признаком stale, а не молча.
       ctx.waitUntil(cache.put(key, new Response(JSON.stringify(body), {
-        headers: { 'Cache-Control': `max-age=${TTL}`, 'Content-Type': 'application/json' },
+        headers: { 'Cache-Control': `max-age=${ttl}`, 'Content-Type': 'application/json' },
       })));
       ctx.waitUntil(cache.put(staleKey, new Response(JSON.stringify(body), {
         headers: { 'Cache-Control': `max-age=${STALE_TTL}`, 'Content-Type': 'application/json' },
