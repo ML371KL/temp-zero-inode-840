@@ -725,6 +725,21 @@ ok('легенда признаков: коды короткие и без ко�
   assert.deepEqual(dupDrop, [], `дубли среди причин отсева: ${dupDrop}`);
 });
 
+ok('легенда «у максимума» называет тот же порог, что и правило набора', () => {
+  // Порог живёт в двух местах: константа сборки и текст легенды. Разъехавшись, они дают
+  // страницу, которая уверенно врёт про собственное правило, и заметить это можно только
+  // глазами. При смене SET_MAX_DD этот тест краснеет и заставляет поправить текст.
+  const compute = readFileSync(join(ROOT, 'scripts', 'compute.mjs'), 'utf8');
+  const m = compute.match(/const SET_MAX_DD = (-?[\d.]+);/);
+  assert.ok(m, 'в compute.mjs не найдена константа SET_MAX_DD');
+  const pctRule = Math.abs(Math.round(Number(m[1]) * 100));
+  const app = readFileSync(join(ROOT, 'web', 'app.js'), 'utf8');
+  const legend = app.match(/high:\s*\[[^\]]*?не более чем на (\d+)% ниже/);
+  assert.ok(legend, 'в web/app.js не найден текст легенды «у максимума»');
+  assert.equal(Number(legend[1]), pctRule,
+    `легенда обещает ${legend[1]}%, а правило набора — ${pctRule}%`);
+});
+
 // ---------- сквозной прогон compute ----------
 const TMP = join(ROOT, '.selftest-tmp');
 rmSync(TMP, { recursive: true, force: true });
