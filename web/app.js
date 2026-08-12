@@ -24,6 +24,9 @@ export const FEAT = {
   indirect:      ['Кс', 'Косвенное владение', 'Бумаги записаны не напрямую на инсайдера', 'gray'],
   'no-history':  ['Ни', 'Нет истории', 'Истории сделок меньше трёх лет — рутинность по CMP не определена', 'gray'],
   'no-price':    ['Нц', 'Нет котировок', 'Ценовые проверки (дисконт, единицы, старт торгов) провести было не на чем', 'gray'],
+  // Единственный признак не из tags: гейты роняют плановую ПОКУПКУ раньше, чем доходят до
+  // тегов, поэтому в Ленте кода «Пл» не бывает. Метку ставит карточка тикера по полю b5 —
+  // там же и плановые продажи, у которых причины отсева нет вовсе (гейты считают покупки).
   'planned-mark': ['Пл', 'План 10b5-1', 'Сделка по заранее принятому плану — малоинформативна', 'warn'],
 };
 // Причины отсева — те же короткие коды; расшифровки берутся из meta.gates.labels
@@ -160,23 +163,43 @@ function featureCell(r) {
   for (const t of r.tags ?? []) out.push(featPill(t));
   return out.join(' ');
 }
-// Легенда собирается из тех же таблиц, что и метки, поэтому не может с ними разойтись
+// Легенда собирается из тех же таблиц, что и метки, поэтому не может с ними разойтись.
+// Но таблиц две, и рисуют они РАЗНЫЕ наборы: Лента — ценовой контекст, инфлексию и теги
+// гейтов (featureCell), карточка тикера — плановость и косвенность (renderTickerTrades).
+// Общий список обещал бы каждой из них чужие метки. Особенно «Пл»: в Ленте её не бывает
+// вовсе — плановые сделки уходят в drop('planned') до блока с tags.push (lib/gates.mjs),
+// и код «Пл» там означает причину отсева, а не признак сделки.
+const FEAT_LEGEND = {
+  // Названия групп честные: «сигнальным» осталось одно условие набора, остальное —
+  // описание сделки, у которого предсказательной силы не нашлось
+  'tab-feed': [
+    ['Ценовой контекст и поведение:', ['high', 'first-ever', 'first-in-3y']],
+    ['Описание сделки:', ['pledge', 'trust', 'indirect', 'no-history', 'no-price']],
+  ],
+  'tab-ticker': [
+    ['Описание сделки:', ['planned-mark', 'indirect']],
+  ],
+};
 function renderFeatLegend() {
   const boxes = document.querySelectorAll('.feat-legend');
   if (!boxes.length) return;
   const group = (title, items) => `<div class="legend-group"><b>${esc(title)}</b>${items.map(([code, name, why, style]) =>
     `<span class="legend-item" title="${esc(why)}"><i class="pill ${style ?? 'gray'} feat">${esc(code)}</i>${esc(name)}</span>`).join('')}</div>`;
-  const signal = ['high', 'first-ever', 'first-in-3y'].map(k => FEAT[k]);
-  const info = ['pledge', 'trust', 'indirect', 'planned-mark', 'no-history', 'no-price'].map(k => FEAT[k]);
-  // Названия групп честные: «сигнальным» осталось одно условие набора, остальное —
-  // описание сделки, у которого предсказательной силы не нашлось
   const labels = state.meta?.gates?.labels ?? {};
   const drops = Object.entries(DROP_CODE)
     .filter(([k]) => labels[k])
     .map(([k, code]) => [code, labels[k], labels[k], 'warn']);
-  const html = group('Ценовой контекст и поведение:', signal) + group('Описание сделки:', info) +
-    (drops.length ? group('Причины отсева (видны при показе отсеянных):', drops) : '');
-  for (const b of boxes) if (b.dataset.done !== '1') { b.innerHTML = html; b.dataset.done = '1'; }
+  for (const b of boxes) {
+    if (b.dataset.done === '1') continue;
+    const groups = FEAT_LEGEND[b.closest('.tab-panel')?.id];
+    if (!groups) continue;
+    // Отсеянные строки в Ленте показываются по выбору фильтра, в карточке тикера — всегда
+    const dropTitle = groups === FEAT_LEGEND['tab-feed']
+      ? 'Причины отсева (видны при показе отсеянных):' : 'Причины отсева:';
+    b.innerHTML = groups.map(([title, keys]) => group(title, keys.map(k => FEAT[k]))).join('') +
+      (drops.length ? group(dropTitle, drops) : '');
+    b.dataset.done = '1';
+  }
 }
 
 // ---------- СКРИНЕР: рабочий набор ----------
