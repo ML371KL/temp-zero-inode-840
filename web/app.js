@@ -40,12 +40,14 @@ export const DROP_CODE = {
 };
 
 // ---------- Тема ----------
-document.documentElement.dataset.theme = localStorage.getItem('ir-theme')
-  ?? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+// Тема уже стоит: её ставит ранний скрипт из <head>, вместе с вечерним правилом
+// (с 20:00 до 07:00 — тёмная). Здесь только переключатель.
 $('#theme-toggle').addEventListener('click', () => {
   const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
   document.documentElement.dataset.theme = cur;
-  localStorage.setItem('ir-theme', cur);
+  // Вечером выбор живёт до закрытия вкладки и не трогает постоянную память: иначе
+  // один вечер сделал бы тёмную «последней темой» навсегда.
+  if (window.__theme.remember(cur)) localStorage.setItem('ir-theme', cur);
   if (state.chart && state.tickerData) renderChart();
 });
 
