@@ -17,7 +17,7 @@ import { readJson, writeJson, isoToday } from './lib/util.mjs';
 import { writePriceCache, normalizeTiingo } from './lib/prices.mjs';
 import { loadSymbolRanges, exchangeAt } from './lib/symbols.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
-import { readdirSync, existsSync } from 'node:fs';
+import { readdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -26,18 +26,32 @@ const DATA = argVal('--data', 'data');
 const BUDGET_MS = Number(argVal('--time-budget-min', '25')) * 60000;
 const started = Date.now();
 
-const TOKEN = process.env.TIINGO_TOKEN;
+// Токен: сначала окружение (так его подаёт workflow), затем локальный файл data/.tiingo-token
+// (каталог data/ в .gitignore, поэтому секрет не может уехать в репозиторий).
+let TOKEN = process.env.TIINGO_TOKEN;
+// Вариант с .txt обязателен: Проводник и Блокнот дописывают расширение молча, и файл,
+// сохранённый вручную, оказывается не там, где его ищут.
 if (!TOKEN) {
-  console.log('[tiingo] TIINGO_TOKEN не задан — бэкфил делистнутых пропущен (это не ошибка)');
+  for (const name of ['.tiingo-token', '.tiingo-token.txt']) {
+    const p = join(DATA, name);
+    if (existsSync(p)) { TOKEN = readFileSync(p, 'utf8').trim(); break; }
+  }
+}
+if (!TOKEN) {
+  console.log('[tiingo] токена нет (ни TIINGO_TOKEN, ни data/.tiingo-token) — бэкфил пропущен (это не ошибка)');
   process.exit(0);
 }
 
-// Запас к лимитам: 480 из 500 символов и 45 из 50 запросов в час. Упереться в лимит
-// значит получить 429 и потратить прогон впустую, поэтому идём заведомо ниже.
-const MONTH_SYMBOL_CAP = 480;
-const REQ_PER_HOUR = 45;
+// Лимиты задаются аргументами; значения по умолчанию — бесплатный тариф с запасом
+// (480 из 500 символов в месяц, 45 из 50 запросов в час), чтобы ежедневный workflow
+// работал как раньше. На платном тарифе лимиты снимаются флагами, см. docs/НАСТРОЙКА.md.
+const MONTH_SYMBOL_CAP = Number(argVal('--month-cap', '480'));
+const REQ_PER_HOUR = Number(argVal('--req-per-hour', '45'));
+const CONCURRENCY = Math.max(1, Number(argVal('--concurrency', '1')));
 const PACE_MS = Math.ceil(3600000 / REQ_PER_HOUR);
-const FROM = '2014-01-01';
+// Насколько глубоко тянуть историю. 2014 хватает текущему бэктесту (с 2016), но для
+// слепой проверки на 2006–2015 нужен более ранний старт — тогда --from 2005-01-01.
+const FROM = argVal('--from', '2014-01-01');
 const CAP_VAL = 5e7;   // потолок правдоподобия одной сделки — см. gates.isImplausible
 
 const statePath = join(DATA, 'prices', '_tiingo.json');
@@ -89,71 +103,94 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const splitsPath = join(DATA, 'prices', '_splits.json');
 const allSplits = readJson(splitsPath, {});
 let ok = 0, empty = 0, fail = 0, budgetOut = false, rateLimited = false;
+let cursor = 0, consecutive429 = 0, lastSave = 0, lastLog = Date.now();
+const MAX_429_IN_ROW = 20;   // столько подряд означает, что лимит тарифа действительно исчерпан
+const SAVE_EVERY = 25;       // при нескольких работниках писать состояние на каждый символ незачем
 
-for (const t of queue) {
-  if (used.size >= MONTH_SYMBOL_CAP) { console.log('[tiingo] месячный лимит символов исчерпан'); break; }
-  if (Date.now() - started > BUDGET_MS) { budgetOut = true; break; }
-  // Токен уходит заголовком, а не в строке запроса: URL попадает в тексты сетевых ошибок
-  // и в отладочный вывод, а секрету там делать нечего.
-  const url = `https://api.tiingo.com/tiingo/daily/${encodeURIComponent(t)}/prices?startDate=${FROM}&format=json`;
-  let res;
-  try {
-    res = await fetch(url, {
-      headers: { 'Content-Type': 'application/json', Authorization: `Token ${TOKEN}` },
-      signal: AbortSignal.timeout(60000),
-    });
-  } catch (e) {
-    fail++;
-    const f = state.failed[t] ?? { tries: 0 };
-    f.tries++; f.last = isoToday(); f.why = 'сеть';
-    state.failed[t] = f;
-    continue;
-  }
-  // Символ израсходован в момент запроса независимо от результата — так считает и Tiingo
-  used.add(t);
-  if (res.status === 429) { rateLimited = true; console.log('[tiingo] 429: лимит запросов — прогон остановлен'); break; }
-  if (res.status === 404 || res.status === 400) {
-    empty++;
-    const f = state.failed[t] ?? { tries: 0 };
-    f.tries = 3; f.last = isoToday(); f.why = `HTTP ${res.status}`;   // больше не пробуем
-    state.failed[t] = f;
-    await sleep(PACE_MS);
-    continue;
-  }
-  if (!res.ok) {
-    fail++;
-    const f = state.failed[t] ?? { tries: 0 };
-    f.tries++; f.last = isoToday(); f.why = `HTTP ${res.status}`;
-    state.failed[t] = f;
-    await sleep(PACE_MS);
-    continue;
-  }
-  let rows;
-  try { rows = await res.json(); } catch { rows = null; }
-  if (!Array.isArray(rows) || rows.length < 20) {
-    empty++;
-    const f = state.failed[t] ?? { tries: 0 };
-    f.tries = 3; f.last = isoToday(); f.why = 'пустой ряд';
-    state.failed[t] = f;
-  } else {
-    const { series, splits } = normalizeTiingo(rows);
-    if (series.length >= 20) {
-      writePriceCache(DATA, t, series);
-      if (splits.length) allSplits[t] = splits;
-      done.add(t);
-      delete state.failed[t];
-      ok++;
-      console.log(`[tiingo] ${t}: ${series.length} баров ${series[0][0]}..${series[series.length - 1][0]}`);
-    } else { empty++; state.failed[t] = { tries: 3, last: isoToday(), why: 'ряд короче 20 баров' }; }
-  }
-  // Состояние пишется после каждого символа: прогон обрывается по бюджету раннера,
-  // и потерять учёт израсходованных символов значит упереться в 429 на следующем.
+function saveState(force = false) {
+  if (!force && ok + empty + fail - lastSave < SAVE_EVERY) return;
+  lastSave = ok + empty + fail;
   state.usedThisMonth = [...used];
   state.done = [...done];
   writeJson(statePath, state, true);
   writeJson(splitsPath, allSplits);
-  await sleep(PACE_MS);
 }
+
+async function worker() {
+  while (true) {
+    if (used.size >= MONTH_SYMBOL_CAP) { rateLimited ||= false; break; }
+    if (Date.now() - started > BUDGET_MS) { budgetOut = true; break; }
+    if (consecutive429 >= MAX_429_IN_ROW) { rateLimited = true; break; }
+    const t = queue[cursor++];
+    if (t === undefined) break;
+    // Токен уходит заголовком, а не в строке запроса: URL попадает в тексты сетевых ошибок
+    // и в отладочный вывод, а секрету там делать нечего.
+    const url = `https://api.tiingo.com/tiingo/daily/${encodeURIComponent(t)}/prices?startDate=${FROM}&format=json`;
+    let res;
+    try {
+      res = await fetch(url, {
+        headers: { 'Content-Type': 'application/json', Authorization: `Token ${TOKEN}` },
+        signal: AbortSignal.timeout(60000),
+      });
+    } catch {
+      fail++;
+      const f = state.failed[t] ?? { tries: 0 };
+      f.tries++; f.last = isoToday(); f.why = 'сеть';
+      state.failed[t] = f;
+      await sleep(CONCURRENCY * PACE_MS);
+      continue;
+    }
+    // 429 на платном тарифе — временный всплеск, а не конец: ждём и возвращаем символ
+    // в очередь. Прогон прекращается лишь если отказы идут подряд (лимит действительно исчерпан).
+    if (res.status === 429) {
+      consecutive429++;
+      console.log(`[tiingo] 429 (подряд ${consecutive429}) — пауза 60 с, ${t} вернётся в очередь`);
+      queue.push(t);
+      await sleep(60000);
+      continue;
+    }
+    consecutive429 = 0;
+    // Символ израсходован в момент запроса независимо от результата — так считает и Tiingo
+    used.add(t);
+    if (res.status === 404 || res.status === 400) {
+      empty++;
+      const f = state.failed[t] ?? { tries: 0 };
+      f.tries = 3; f.last = isoToday(); f.why = `HTTP ${res.status}`;   // больше не пробуем
+      state.failed[t] = f;
+    } else if (!res.ok) {
+      fail++;
+      const f = state.failed[t] ?? { tries: 0 };
+      f.tries++; f.last = isoToday(); f.why = `HTTP ${res.status}`;
+      state.failed[t] = f;
+    } else {
+      let rows;
+      try { rows = await res.json(); } catch { rows = null; }
+      if (!Array.isArray(rows) || rows.length < 20) {
+        empty++;
+        const f = state.failed[t] ?? { tries: 0 };
+        f.tries = 3; f.last = isoToday(); f.why = 'пустой ряд';
+        state.failed[t] = f;
+      } else {
+        const { series, splits } = normalizeTiingo(rows);
+        if (series.length >= 20) {
+          writePriceCache(DATA, t, series);
+          if (splits.length) allSplits[t] = splits;
+          done.add(t);
+          delete state.failed[t];
+          ok++;
+        } else { empty++; state.failed[t] = { tries: 3, last: isoToday(), why: 'ряд короче 20 баров' }; }
+      }
+    }
+    saveState();
+    if (Date.now() - lastLog > 15000) {
+      lastLog = Date.now();
+      console.log(`[tiingo] ${ok + empty + fail}/${queue.length}: загружено ${ok}, пусто ${empty}, сбоев ${fail}`);
+    }
+    await sleep(CONCURRENCY * PACE_MS);
+  }
+}
+await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+saveState(true);
 
 state.usedThisMonth = [...used];
 state.done = [...done];
