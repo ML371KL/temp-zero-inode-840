@@ -10,7 +10,7 @@
 //   --mode noise       та же сетка на ПЕРЕМЕШАННЫХ метках — калибровка порога
 // Использование: node scripts/search.mjs --data data-search --mode grid --from 2016-01 --to 2026-12
 import { readPriceCache } from './lib/prices.mjs';
-import { Panel, monthlyFromDaily, portfolioSeries, factorSeries, vsBenchmark, factorAlpha, annualize, turnover } from './lib/portfolio.mjs';
+import { Panel, monthlyFromDaily, portfolioSeries, universeSeries, factorSeries, vsBenchmark, factorAlpha, annualize, turnover } from './lib/portfolio.mjs';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -63,6 +63,14 @@ const spyRet = new Map();
 const FACT = factorSeries(panel, { minDv: PORT_MIN_DV });
 const FMODEL = { market: spyRet, size: FACT.size, mom: FACT.mom };
 
+// Контроль «сопоставимые бумаги»: равновзвешенная вселенная той же ликвидности.
+// Литература по инсайдерской торговле (Lakonishok–Lee, Jeng–Metrick–Zeckhauser,
+// Cohen–Malloy–Pomorski) меряет эффект именно против него, а не против индекса:
+// сам пул структурно проигрывает S&P 500 (~10% против ~14% годовых), и сравнение
+// с индексом требует от сигнала сначала отыграть 3–5 п.п. гандикапа.
+const UNI = new Map();
+for (const dv of [3e6, 1e7, 3e7]) UNI.set(dv, universeSeries(panel, { minDv: dv }));
+
 // ---------- сетка ----------
 // Признаки только те, что известны на дату сделки. Режим рынка и календарные годы
 // исключены протоколом: годовую разбивку на 2006–2015 мы уже видели.
@@ -105,9 +113,13 @@ function evaluateBy(byM, hold, minDv, signals) {
   const to = turnover(panel, byM, { H: hold, minDv });
   const cost = to === null ? null : (to / 2) * 12 * ROUND_TRIP;
   const ex = annualize(v.ex);
+  // Превышение над сопоставимыми бумагами — метрика литературы
+  const uni = UNI.get(minDv);
+  const u = uni ? vsBenchmark(ser, uni) : null;
   return {
     ex, t: v.t, ir: v.ir, sharpe: v.sharpe, mo: ser.length, avgN, medN,
     a: a ? annualize(a.alpha) : null, at: a?.t ?? null,
+    ux: u ? annualize(u.ex) : null, ut: u?.t ?? null,
     net: cost === null ? null : ex - cost, signals,
   };
 }
@@ -160,16 +172,27 @@ if (MODE === 'grid') {
       return { ...r, t: pool[Math.floor(rnd() * pool.length)] };
     });
     const res = runGrid(shuffled);
-    const mx = res.reduce((m, x) => Math.max(m, Math.abs(x.t)), 0);
-    maxT.push(mx);
-    if ((s + 1) % 10 === 0) console.log(`  прогон ${s + 1}/${SEEDS}: текущий максимум |t| = ${mx.toFixed(2)}`);
+    // ВАЖНО: калибруем по ЗНАКОВОМУ максимуму, а не по модулю. Перемешанные портфели —
+    // это случайные корзины вселенной, а вселенная структурно проигрывает индексу
+    // (равновзвешенный пул ADV≥$3 млн: ~10% годовых против ~14% у S&P 500). Поэтому
+    // max|t| измеряет глубину ОТСТАВАНИЯ, а не высоту шума, и завышает порог.
+    // Ищем мы превышение, значит и порог нужен по положительному хвосту.
+    const mx = res.reduce((m, x) => Math.max(m, x.t), -Infinity);
+    const mxAbs = res.reduce((m, x) => Math.max(m, Math.abs(x.t)), 0);
+    const mxA = res.reduce((m, x) => Math.max(m, x.at ?? -Infinity), -Infinity);
+    const mxU = res.reduce((m, x) => Math.max(m, x.ut ?? -Infinity), -Infinity);
+    maxT.push({ t: mx, abs: mxAbs, at: mxA, ut: mxU });
+    if ((s + 1) % 5 === 0) console.log(`  прогон ${s + 1}/${SEEDS}: SPY ${mx.toFixed(2)} | альфа ${mxA.toFixed(2)} | контроль ${mxU.toFixed(2)}`);
   }
-  maxT.sort((a, b) => a - b);
-  const q = p => maxT[Math.min(maxT.length - 1, Math.floor(p * maxT.length))];
+  const q = (arr, p) => { const s2 = [...arr].sort((a, b) => a - b); return s2[Math.min(s2.length - 1, Math.floor(p * s2.length))]; };
+  const cols = {
+    'превышение над SPY (знаковое)': maxT.map(x => x.t),
+    'превышение по модулю': maxT.map(x => x.abs),
+    'альфа к 3 факторам': maxT.map(x => x.at),
+    'сверх сопоставимых бумаг': maxT.map(x => x.ut),
+  };
   console.log(`\n[search] КАЛИБРОВКА ШУМА на ${SEEDS} прогонах, сетка ${configs.length} конфигураций:`);
-  console.log(`  медиана максимума |t|: ${q(0.5).toFixed(2)}`);
-  console.log(`  90-й перцентиль:       ${q(0.9).toFixed(2)}`);
-  console.log(`  95-й перцентиль:       ${q(0.95).toFixed(2)}`);
-  console.log(`  99-й перцентиль:       ${q(0.99).toFixed(2)}`);
+  for (const [name, arr] of Object.entries(cols))
+    console.log(`  ${name.padEnd(30)} медиана ${q(arr, 0.5).toFixed(2)}  90-й ${q(arr, 0.9).toFixed(2)}  95-й ${q(arr, 0.95).toFixed(2)}  99-й ${q(arr, 0.99).toFixed(2)}`);
   if (OUT) writeFileSync(OUT, JSON.stringify({ seeds: SEEDS, configs: configs.length, maxT }));
 }
