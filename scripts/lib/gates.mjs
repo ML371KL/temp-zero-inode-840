@@ -33,6 +33,15 @@ export const DROP_LABELS = {
 // открыторыночная покупка не может систематически исполняться на 8% ниже закрытия.
 const DISCOUNT_LIMIT = 0.08;
 const DISCOUNT_LIMIT_WAVG = 0.15; // цена-средневзвешенная по серии — допуск шире
+// Одного закрытия для вывода «это размещение» мало. Аудит 16.08.2026 (docs/АУДИТ-ГЕЙТОВ.md):
+// на выборке 290 отсеянных строк с настоящим внутридневным диапазоном 44% срабатываний
+// оказались ложными — цена реально торговалась в этот день или в соседний. У растущей
+// бумаги любое исполнение в первой половине дня выглядит «скидкой к закрытию»: так был
+// ошибочно отсеян CFO AbCellera, купивший по 10.32 при минимуме дня 10.47 и цене открытия
+// предыдущего дня ровно 10.32.
+// Поэтому отсев требует ДВУХ условий: дешевле закрытия на limit И ниже минимума дня
+// сделки и предыдущего дня. Допуск к минимуму небольшой — сам минимум это уже дно дня.
+const LOW_TOLERANCE = 0.98;
 const OUTLIER_LO = 0.1, OUTLIER_HI = 10;
 const SYNC_MIN_FILERS = 3;
 // Сколько торговых дней истории котировок должно быть ДО сделки, чтобы считать её
@@ -72,6 +81,16 @@ export function isImplausible(row) {
   if (row.val > VAL_MAX) return true;
   if (row.sh > SH_MAX) return true;
   return false;
+}
+
+// Торговалась ли цена внутри дня. lows — [минимум дня сделки, минимум предыдущего дня]
+// в номинальной шкале (как в форме), любой элемент может отсутствовать.
+// Данных нет — возвращаем true, то есть поведение остаётся прежним: слой минимумов
+// покрывает 81% дат покупок, и на остальных гейт работает как работал.
+export function belowDayRange(px, lows) {
+  const vals = (lows ?? []).filter(v => typeof v === 'number' && v > 0);
+  if (!vals.length) return true;
+  return px < Math.min(...vals) * LOW_TOLERANCE;
 }
 
 // row — нормализованная сделка; ctx:
@@ -127,7 +146,7 @@ export function applyGates(row, ctx = {}) {
     const ratio = row.px / ctx.close;
     if (ratio < OUTLIER_LO || ratio > OUTLIER_HI) return drop('outlier');
     const limit = fn.wavg ? DISCOUNT_LIMIT_WAVG : DISCOUNT_LIMIT;
-    if (row.code === 'P' && ratio < 1 - limit) return drop('discount');
+    if (row.code === 'P' && ratio < 1 - limit && belowDayRange(row.px, ctx.lows)) return drop('discount');
   }
 
   // G4: одинаковая цена у многих филеров в один день = закрытие размещения, а не кластер

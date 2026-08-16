@@ -12,7 +12,7 @@
 // кэша, а фазы без цен (гейты, признаки) идут отдельными проходами.
 // Использование: node scripts/compute.mjs [--data data] [--site site]
 import { readJson, writeJson, readJsonGz, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
-import { readPriceCache, nominalFactor, readStats, listedThrough } from './lib/prices.mjs';
+import { readPriceCache, nominalFactor, readStats, listedThrough, readLows } from './lib/prices.mjs';
 import { loadSymbolRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import {
   Panel, monthlyFromDaily, portfolioSeries, universeSeries, pairedDiff, turnover,
@@ -226,6 +226,9 @@ function forward(row, s) {
 }
 
 const allSplits = readJson(join(DATA, 'prices', '_splits.json'), {});
+// Минимумы дня для гейта discount. Пусто — гейт работает по прежнему правилу.
+const lowsMap = readLows(DATA);
+if (lowsMap.size) console.log(`[compute] слой минимумов: ${lowsMap.size} дат`);
 const noPriceTickers = new Set(), pricedTickers = new Set();
 const unitsMismatch = new Set();
 // Счётчики честности ценового слоя (уходят в meta.json и на экран Статистики).
@@ -345,6 +348,7 @@ for (const r of buys) {
     regular: isRegularSeries(hist, r.tdate, r.cik, 'P'),
     fundOnly: isFundOnly(r),
     unitsMismatch: unitsMismatch.has(r.T),
+    lows: lowsMap.get(`${r.t}|${r.tdate}`) ?? null,
   });
 }
 

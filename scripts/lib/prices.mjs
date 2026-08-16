@@ -398,6 +398,28 @@ export function hasPriceCache(dataDir, ticker) {
   return existsSync(priceCachePath(dataDir, ticker));
 }
 
+// Слой внутридневных минимумов для гейта discount (docs/АУДИТ-ГЕЙТОВ.md).
+// Отдельный файл, а НЕ колонки основного кэша: на чтении кэша работает цепочка ремонта
+// под болезни Yahoo, и добавление колонок, которые она не масштабирует вместе с ценой,
+// дало бы тихую рассогласованность. Формат: ticker,date,low,prevlow — номинальная шкала.
+// Источник истории — снимок Sharadar; свежие даты дописывает ежедневный контур.
+export function readLows(dataDir) {
+  const p = join(dataDir, 'reference', 'lows.csv.gz');
+  const out = new Map();
+  if (!existsSync(p)) return out;
+  const text = gunzipSync(readFileSync(p)).toString('utf8');
+  let first = true;
+  for (const line of text.split('\n')) {
+    if (first) { first = false; continue; }
+    if (!line) continue;
+    const c = line.split(',');
+    const lo = Number(c[2]), pv = c[3] === '' || c[3] === undefined ? null : Number(c[3]);
+    if (!(lo > 0)) continue;
+    out.set(`${c[0]}|${c[1]}`, pv > 0 ? [lo, pv] : [lo]);
+  }
+  return out;
+}
+
 export function readPriceCache(dataDir, ticker) {
   const p = priceCachePath(dataDir, ticker);
   if (!existsSync(p)) return null;

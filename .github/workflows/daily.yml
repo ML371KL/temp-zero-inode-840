@@ -88,6 +88,14 @@ jobs:
           --month-cap 999999 --req-per-hour 6000 --concurrency 6 --from 2005-01-01
           --include-unverified
 
+      # Внутридневные минимумы для гейта discount. История залита разовым снимком Sharadar
+      # (подписка была месячной), а свежие даты добираются из Yahoo — он отдаёт low бесплатно.
+      # Без этого шага новые сделки остались бы без диапазона, и ложные отсевы вернулись бы
+      # ровно на тех бумагах, которые смотрят живьём (см. docs/АУДИТ-ГЕЙТОВ.md).
+      - name: Минимумы дня для гейта дисконта
+        continue-on-error: true
+        run: node scripts/lows.mjs --time-budget-min 10
+
       - name: Вычисления и payload
         run: node scripts/compute.mjs
 
