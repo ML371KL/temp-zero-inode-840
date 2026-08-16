@@ -52,6 +52,7 @@ const PACE_MS = Math.ceil(3600000 / REQ_PER_HOUR);
 // Насколько глубоко тянуть историю. 2014 хватает текущему бэктесту (с 2016), но для
 // слепой проверки на 2006–2015 нужен более ранний старт — тогда --from 2005-01-01.
 const FROM = argVal('--from', '2014-01-01');
+const INCLUDE_UNVERIFIED = args.includes('--include-unverified');
 const CAP_VAL = 5e7;   // потолок правдоподобия одной сделки — см. gates.isImplausible
 
 const statePath = join(DATA, 'prices', '_tiingo.json');
@@ -81,7 +82,15 @@ for (const r of trades) {
   if (!plausibleTicker(t) || done.has(t)) continue;
   // Восстанавливаем только то, что действительно торговалось на бирже в дату сделки:
   // внебиржевые бумаги вне вселенной, и тратить на них месячный лимит нельзя.
-  if (exchangeAt(ranges, t, r.tdate) !== 'listed') continue;
+  //
+  // С --include-unverified в очередь берутся ещё и те, по кому реестр символов МОЛЧИТ
+  // (не «OTC», а «не знаю»). Таких 691 тикер на $10.4 млрд — WRK, MFRM, ATRS, ARIA и прочие
+  // поглощённые имена, по которым реестр просто не покрывает нужные даты. На платном тарифе
+  // дешевле спросить Tiingo, чем угадывать: отсутствие данных вернётся как 404.
+  // Втащить внебиржевую бумагу во вселенную это не может — OTC отсекается в compute.mjs
+  // по issuerCategory независимо от наличия ценового ряда.
+  const ex = exchangeAt(ranges, t, r.tdate);
+  if (ex !== 'listed' && !(INCLUDE_UNVERIFIED && ex == null)) continue;
   if (cached.has(cacheKey(t))) continue;
   const e = cand.get(t) ?? { w: 0, big: 0, first: r.tdate, last: r.tdate };
   e.w += Math.min(CAP_VAL, r.val || 0);

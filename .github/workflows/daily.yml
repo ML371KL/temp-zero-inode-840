@@ -79,6 +79,7 @@ jobs:
         run: >-
           node scripts/tiingo.mjs --time-budget-min 30
           --month-cap 999999 --req-per-hour 2400 --concurrency 4 --from 2005-01-01
+          --include-unverified
 
       - name: Вычисления и payload
         run: node scripts/compute.mjs
