@@ -11,6 +11,10 @@ const args = process.argv.slice(2);
 function argVal(name, def) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; }
 const DATA = argVal('--data', 'data');
 const MAX = Number(argVal('--max-quarters', '999'));
+// С какого года тянуть кварталы. По умолчанию 2016 — как было; более ранний старт нужен
+// слепой проверке на 2006–2015 (docs/ЗАМОРОЗКА-НАБОРА.md), которая живёт в отдельном
+// каталоге данных и рабочую панель не трогает.
+const FROM_YEAR = Number(argVal('--from-year', '2016'));
 
 const statePath = join(DATA, 'state', 'backfill.json');
 const state = readJson(statePath, { schema: SHARD_VERSION, done: [], missing: [] });
@@ -39,7 +43,11 @@ if (rebuilding) {
 const today = isoToday();
 const curYear = Number(today.slice(0, 4));
 const curQ = Math.ceil(Number(today.slice(5, 7)) / 3);
-const wanted = quarterList(2016, curYear, curQ);
+const wanted = quarterList(FROM_YEAR, curYear, curQ);
+// Нижняя граница года сделки: формы содержат опечатки вроде 1993 и «0013», и раньше
+// всё до 2010 отбрасывалось как мусор. При раннем старте граница опускается вместе с ним,
+// иначе бэкфил 2006–2009 молча терял бы все свои строки.
+const MIN_TRADE_YEAR = String(Math.min(2010, FROM_YEAR));
 
 function shardPath(y) { return join(DATA, 'trades', `${y}.json.gz`); }
 function readShard(y) {
@@ -61,7 +69,7 @@ for (const q of wanted) {
   }
   const byYear = new Map();
   const bucket = y => {
-    if (y < '2010' || y > String(curYear + 1)) return null; // мусорные даты в формах
+    if (y < MIN_TRADE_YEAR || y > String(curYear + 1)) return null; // мусорные даты в формах
     let e = byYear.get(y);
     if (!e) { e = { trades: [], amend: [] }; byYear.set(y, e); }
     return e;
