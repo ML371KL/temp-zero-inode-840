@@ -1,0 +1,4141 @@
+{
+ "month": "2026-09",
+ "usedThisMonth": [
+  "PKTX",
+  "ALCE"
+ ],
+ "done": [
+  "MYOV",
+  "NGM",
+  "FYBR",
+  "SGEN",
+  "UROV",
+  "EIDX",
+  "IEA",
+  "NLSN",
+  "AVEO",
+  "SIX",
+  "NTG",
+  "ISPO",
+  "EIGI",
+  "ETNB",
+  "BECN",
+  "CERE",
+  "MRUS",
+  "MRSN",
+  "RSE",
+  "VEI",
+  "AKUS",
+  "AIMT",
+  "GRA",
+  "AYX",
+  "IMMU",
+  "RETA",
+  "LVGO",
+  "TRNC",
+  "RDUS",
+  "WBA",
+  "ETTX",
+  "IGMS",
+  "SMLP",
+  "APRN",
+  "EPZM",
+  "HRT",
+  "RARX",
+  "GCP",
+  "DISH",
+  "AKRO",
+  "MRTX",
+  "TERP",
+  "GOBI",
+  "SXCP",
+  "CINC",
+  "ALXN",
+  "ITOS",
+  "MDCO",
+  "MTCR",
+  "FRGI",
+  "GMS",
+  "AMAM",
+  "RPTX",
+  "SAII",
+  "INZY",
+  "MODV",
+  "TWTR",
+  "VOXX",
+  "AKCA",
+  "FMTX",
+  "HARP",
+  "STSA",
+  "MORF",
+  "DICE",
+  "AGR",
+  "TERN",
+  "STKL",
+  "XLRN",
+  "WPT",
+  "CNST",
+  "DAWN",
+  "SC",
+  "APLS",
+  "PRVL",
+  "MTSR",
+  "EVA",
+  "ACLX",
+  "XM",
+  "FL",
+  "VERV",
+  "KIN",
+  "GRNA",
+  "SLNO",
+  "GFN",
+  "STON",
+  "AXLA",
+  "SCPH",
+  "NS",
+  "ALPN",
+  "PRNB",
+  "OMGA",
+  "CEQP",
+  "INDT",
+  "CATM",
+  "DBTX",
+  "TBRA",
+  "DNB",
+  "GBIO",
+  "EAR",
+  "PAND",
+  "AXNX",
+  "VIGL",
+  "PHD",
+  "SRRA",
+  "RGLS",
+  "CWEI",
+  "SREV",
+  "WOW",
+  "CEM",
+  "AKICU",
+  "TCRR",
+  "VTA",
+  "NKLA",
+  "TPTX",
+  "ICPT",
+  "CASI",
+  "DFRG",
+  "FTSV",
+  "EXTN",
+  "OYST",
+  "GOEV",
+  "DALS",
+  "KNTE",
+  "RXDX",
+  "KRTX",
+  "KAIRU",
+  "ENH",
+  "DCPH",
+  "FUSN",
+  "RYZB",
+  "SRLP",
+  "FSFR",
+  "ICVX",
+  "BWLD",
+  "HOME",
+  "TIF",
+  "SURF",
+  "DOVA",
+  "PLYA",
+  "ATXS",
+  "VOSO",
+  "CDTX",
+  "THRX",
+  "RAPT",
+  "GHL",
+  "WAIR",
+  "SQNM",
+  "LSXMK",
+  "CFLT",
+  "ERN",
+  "FOLD",
+  "ITCI",
+  "SLRN",
+  "TLND",
+  "SHLX",
+  "BFZ",
+  "IMDZ",
+  "HDS",
+  "ENBL",
+  "OMAM",
+  "TLP",
+  "FDML",
+  "FPAC",
+  "BTWNU",
+  "SIRE",
+  "SCU",
+  "GST",
+  "ESTE",
+  "MEET",
+  "SNI",
+  "TNTR",
+  "CRGX",
+  "RADI",
+  "CHAP",
+  "AXE",
+  "RRD",
+  "QES",
+  "HCP",
+  "EVM",
+  "PACXU",
+  "KRON",
+  "THS",
+  "LMRK",
+  "GLUU",
+  "AVID",
+  "PDLI",
+  "ENFN",
+  "DM",
+  "KDMN",
+  "FST",
+  "AMTI",
+  "NXJ",
+  "AYR",
+  "FAV",
+  "AGC",
+  "MACK",
+  "EXXI",
+  "USER",
+  "SMM",
+  "TPGY",
+  "ALLK",
+  "KZR",
+  "NQP",
+  "MCF",
+  "AGFS",
+  "OMIC",
+  "NAV",
+  "AERI",
+  "DRII",
+  "VSAR",
+  "FSD",
+  "WNR",
+  "ZTAQU",
+  "CRR",
+  "OTEL",
+  "CTR",
+  "FTCV",
+  "MHI",
+  "VIE",
+  "WLH",
+  "TNGO",
+  "CVRS",
+  "LSXMA",
+  "MBII",
+  "SOL",
+  "GTHX",
+  "STS",
+  "ESGR",
+  "ALBO",
+  "INFN",
+  "SRT",
+  "ASFI",
+  "SGTX",
+  "CSPR",
+  "PKD",
+  "ZGNX",
+  "YMAB",
+  "ANDX",
+  "MAV",
+  "CPE",
+  "AUGX",
+  "NSH",
+  "HLVX",
+  "KDNY",
+  "ELEV",
+  "KNBE",
+  "NARI",
+  "ETWO",
+  "CLDR",
+  "ISO",
+  "MYOK",
+  "EFF",
+  "CTIC",
+  "SNCR",
+  "CNBKA",
+  "UHG",
+  "JMP",
+  "FPRX",
+  "RIT",
+  "FTSI",
+  "KEF",
+  "WNRL",
+  "CEN",
+  "CIT",
+  "FMCIU",
+  "DEST",
+  "VTYX",
+  "FDC",
+  "CUK",
+  "FARM",
+  "LONE",
+  "BCOV",
+  "AYLA",
+  "BKS",
+  "FRONU",
+  "NXEO",
+  "RCOR",
+  "JGV",
+  "HCCOU",
+  "SWFT",
+  "APLT",
+  "PTHN",
+  "SNNA",
+  "DCA",
+  "TPCO",
+  "LABP",
+  "EPIX",
+  "CLMS",
+  "ENX",
+  "SBOW",
+  "SCPL",
+  "STCN",
+  "GNTY",
+  "PLAN",
+  "XNPT",
+  "PARA",
+  "PACW",
+  "TSVT",
+  "WSTC",
+  "RNET",
+  "VRE",
+  "CHN",
+  "SHOS",
+  "MACQ",
+  "LNKB",
+  "PSTX",
+  "IAA",
+  "SFR",
+  "THRD",
+  "MIXT",
+  "AMAG",
+  "SWTX",
+  "DRRX",
+  "CRZO",
+  "TVTY",
+  "SKX",
+  "DEX",
+  "PRGX",
+  "REN",
+  "SIC",
+  "IVAC",
+  "IBTX",
+  "SHSP",
+  "HBI",
+  "CADE",
+  "PRTK",
+  "ALXA",
+  "HMTV",
+  "ATVI",
+  "PGLC",
+  "ADMS",
+  "AKYA",
+  "PTLA",
+  "UNVR",
+  "CMPI",
+  "LORL",
+  "HIE",
+  "QTS",
+  "DSPG",
+  "ADVM",
+  "MJCO",
+  "AGN",
+  "MSF",
+  "TGI",
+  "JFC",
+  "TAT",
+  "ETRN",
+  "ACER",
+  "PGRE",
+  "BPYU",
+  "GSKY",
+  "APMIU",
+  "VSI",
+  "PHX",
+  "SBBP",
+  "GLDD",
+  "PZRX",
+  "GEC",
+  "WEBR",
+  "GTYH",
+  "ONTF",
+  "PET",
+  "CPAH",
+  "GNC",
+  "VBTX",
+  "SMAR",
+  "USCR",
+  "KMF",
+  "STRZA",
+  "UBP",
+  "HZN",
+  "GGO",
+  "TNAV",
+  "VBFC",
+  "TRHC",
+  "FREE",
+  "MNP",
+  "ICCH",
+  "MDLA",
+  "MMAC",
+  "RDFN",
+  "BAS",
+  "MNI",
+  "GER",
+  "SNV",
+  "NGHC",
+  "EVGRU",
+  "GBT",
+  "GLSPU",
+  "FLLCU",
+  "SAGE",
+  "BNFT",
+  "PBFX",
+  "CSTR",
+  "CTLT",
+  "CERN",
+  "NATI",
+  "CIVI",
+  "REVG",
+  "COUP",
+  "MGI",
+  "MXWL",
+  "LOXO",
+  "Y",
+  "OMEG",
+  "RLH",
+  "KLR",
+  "VMM",
+  "MYL",
+  "PE",
+  "TELL",
+  "MIO",
+  "BKCC",
+  "MBTCU",
+  "ACKIU",
+  "GES",
+  "JNCE",
+  "HIL",
+  "FMSA",
+  "SUMR",
+  "IAMXU",
+  "CTLP",
+  "PCO",
+  "WRAC",
+  "BKI",
+  "BASE",
+  "NUVA",
+  "STPC",
+  "CNCE",
+  "TTPH",
+  "PRMW",
+  "LSEA",
+  "HCAP",
+  "GDP",
+  "TBMCU",
+  "SMLR",
+  "KITE",
+  "CETV",
+  "MNRL",
+  "BRY",
+  "FLAC",
+  "AVDL",
+  "SMMF",
+  "K",
+  "SEE",
+  "UBFO",
+  "VRNA",
+  "MGP",
+  "FSLF",
+  "BVH",
+  "SCWX",
+  "STRM",
+  "FSRXU",
+  "PETQ",
+  "SGFY",
+  "PGNX",
+  "STFC",
+  "RNDB",
+  "HT",
+  "DFS",
+  "CETC",
+  "X",
+  "SKIS",
+  "AVP",
+  "NES",
+  "COOP",
+  "ABTX",
+  "RESN",
+  "AGCB",
+  "EDI",
+  "TSC",
+  "RNF",
+  "MTSC",
+  "BTRS",
+  "OPOF",
+  "ATLCP",
+  "EXA",
+  "AZEK",
+  "PSXP",
+  "TURN",
+  "HI",
+  "GCAP",
+  "BDSI",
+  "ORTX",
+  "MLVF",
+  "BGIO",
+  "MNTV",
+  "PPD",
+  "OMNT",
+  "CVO",
+  "GFED",
+  "PTXP",
+  "SWCH",
+  "IMGO",
+  "TSBX",
+  "ROCLU",
+  "GMZ",
+  "TFFP",
+  "CHNG",
+  "MCADU",
+  "GATEU",
+  "FSII",
+  "CYTH",
+  "NVRO",
+  "NOVA",
+  "LM",
+  "ALIM",
+  "CAEP",
+  "VMEM",
+  "ROCRU",
+  "TGAN",
+  "BQH",
+  "ATSG",
+  "COWN",
+  "WMGI",
+  "NDP",
+  "QHC",
+  "OZRK",
+  "PFSW",
+  "GDEN",
+  "HMHC",
+  "AAPC",
+  "STOR",
+  "DISTU",
+  "PANA",
+  "MSP",
+  "WAAS",
+  "FCBP",
+  "GPX",
+  "NBL",
+  "FDEU",
+  "HEES",
+  "OLO",
+  "DVAX",
+  "AMPS",
+  "TWNK",
+  "CCP",
+  "ARQL",
+  "STXB",
+  "MCAFU",
+  "ARLZ",
+  "TREC",
+  "FBM",
+  "NSPH",
+  "DHIL",
+  "OCSI",
+  "DCT",
+  "VVNT",
+  "NTGN",
+  "VSM",
+  "MSBF",
+  "BHI",
+  "JSD",
+  "GSB",
+  "ETFC",
+  "PRDS",
+  "JRO",
+  "PBIB",
+  "LHAA",
+  "IMI",
+  "AMED",
+  "SLCA",
+  "NIHD",
+  "SUM",
+  "TSRI",
+  "POPE",
+  "VSTO",
+  "LMST",
+  "MRC",
+  "SRCL",
+  "MDSY",
+  "CVA",
+  "HCCI",
+  "TST",
+  "PYCR",
+  "MSON",
+  "EVBG",
+  "PZN",
+  "MRDB",
+  "KIRK",
+  "RIVE",
+  "CNACU",
+  "PTVE",
+  "ZYNE",
+  "TLMR",
+  "FMBI",
+  "CIE",
+  "GI",
+  "TWOA",
+  "HYB",
+  "OMP",
+  "GIFI",
+  "TRML",
+  "CXO",
+  "TEAF",
+  "EBTC",
+  "ELVT",
+  "KSM",
+  "NRE",
+  "FNCB",
+  "RVNC",
+  "AINC",
+  "INF",
+  "PMBC",
+  "SNR",
+  "MOFG",
+  "QUMU",
+  "FBMS",
+  "CMD",
+  "ABTL",
+  "TIVO",
+  "MMP",
+  "CNVY",
+  "HES",
+  "CDMO",
+  "AVHI",
+  "RTLR",
+  "STAY",
+  "VRTV",
+  "TTNP",
+  "EVOK",
+  "PHF",
+  "MIIIU",
+  "LUB",
+  "FRTA",
+  "FLML",
+  "BPFH",
+  "FLIC",
+  "UCFC",
+  "HWCC",
+  "MRCC",
+  "BF-B",
+  "TCF",
+  "OLBK",
+  "LDR",
+  "DCP",
+  "HOLX",
+  "DENN",
+  "MCAEU",
+  "ENV",
+  "BVSN",
+  "ENLC",
+  "OTMO",
+  "XL",
+  "YUMA",
+  "LSI",
+  "HIBB",
+  "USWS",
+  "CBR",
+  "LVOX",
+  "ONCT",
+  "SPRT",
+  "SDIG",
+  "EVBN",
+  "CEP",
+  "NBLX",
+  "DMF",
+  "NSEC",
+  "EMKR",
+  "MDR",
+  "EMCF",
+  "TEGP",
+  "YUME",
+  "EQC",
+  "TAST",
+  "SRC",
+  "MSGN",
+  "CIO",
+  "ML",
+  "IBKC",
+  "SCTL",
+  "EXAS",
+  "SSRG",
+  "PWOD",
+  "VNE",
+  "GHDX",
+  "CSII",
+  "LEAF",
+  "VGR",
+  "SNAK",
+  "TCO",
+  "GATO",
+  "SLCT",
+  "ARYB",
+  "NVET",
+  "MLNX",
+  "PXD",
+  "TESS",
+  "ZGYHU",
+  "BXG",
+  "LOACU",
+  "FXCOU",
+  "AGCUU",
+  "OUTR",
+  "DRNA",
+  "WLL",
+  "BMCH",
+  "UBA",
+  "CCCR",
+  "TA",
+  "HPR",
+  "AT",
+  "MTECU",
+  "CCR",
+  "MLNK",
+  "PRCP",
+  "BLFY",
+  "LIOX",
+  "HA",
+  "PME",
+  "CRCM",
+  "ITI",
+  "FOCS",
+  "AAWW",
+  "TSS",
+  "MOSC",
+  "LTHM",
+  "MIE",
+  "CELG",
+  "VRTU",
+  "RTIX",
+  "GARS",
+  "EWCZ",
+  "CY",
+  "FNGN",
+  "BATS",
+  "FCSC",
+  "ACC",
+  "QUOT",
+  "SVFB",
+  "SNBC",
+  "IPHI",
+  "MBCN",
+  "APTS",
+  "ATHN",
+  "CLCD",
+  "ARNC",
+  "RPXC",
+  "JAG",
+  "ARGO",
+  "BOCH",
+  "STER",
+  "ERS",
+  "SDI",
+  "DOOR",
+  "CDK",
+  "WMPN",
+  "FARO",
+  "BSQR",
+  "HTBK",
+  "ARWA",
+  "PRVB",
+  "PFBI",
+  "REGI",
+  "CBAY",
+  "NEWR",
+  "PRSP",
+  "MON",
+  "STGG",
+  "SDPI",
+  "TMAC",
+  "QEP",
+  "PFIN",
+  "PBPB",
+  "GCI",
+  "CMO",
+  "PBCT",
+  "ACW",
+  "FORA",
+  "CATS",
+  "HSKA",
+  "MFNC",
+  "FNA",
+  "ZAYO",
+  "VCSA",
+  "FSFG",
+  "SASR",
+  "USAP",
+  "MNE",
+  "JAX",
+  "RCM",
+  "NWLI",
+  "HYZN",
+  "AL",
+  "CSS",
+  "DDMX",
+  "PLL",
+  "RT",
+  "GRUB",
+  "WBT",
+  "LDL",
+  "DSKE",
+  "EVOP",
+  "PCH",
+  "CSFL",
+  "PTRS",
+  "DLPH",
+  "SVBI",
+  "RNWK",
+  "CVLY",
+  "STMP",
+  "WPX",
+  "USAK",
+  "BGFV",
+  "SBT",
+  "WNS",
+  "RTL",
+  "CDOR",
+  "SPNE",
+  "ABST",
+  "ALEX",
+  "ARAV",
+  "DSE",
+  "EDR",
+  "AEGN",
+  "ESL",
+  "LBY",
+  "RGF",
+  "DSEY",
+  "DWRE",
+  "AQUA",
+  "LTS",
+  "ATRI",
+  "SFLY",
+  "CCN",
+  "CTRA",
+  "CFFA",
+  "HEP",
+  "ARC",
+  "CMRX",
+  "MCRN",
+  "ZY",
+  "SOLY",
+  "BBQ",
+  "HSII",
+  "AAN",
+  "HTLF",
+  "VER",
+  "DSSI",
+  "VMEO",
+  "ANAT",
+  "HONE",
+  "HVBC",
+  "DOMA",
+  "DVCR",
+  "SYNH",
+  "CHMA",
+  "AIMC",
+  "ORM",
+  "GHSI",
+  "PROS",
+  "SCOA",
+  "PDCE",
+  "DEPO",
+  "QSII",
+  "VZIO",
+  "ARRS",
+  "IRL",
+  "PRO",
+  "LEVL",
+  "AVDX",
+  "MCEP",
+  "AWH",
+  "BLMT",
+  "RTK",
+  "TRUE",
+  "AST",
+  "HH",
+  "OBDE",
+  "FIF",
+  "ISEE",
+  "AEGR",
+  "TWKS",
+  "DRYS",
+  "WLB",
+  "JTA",
+  "ALSK",
+  "FOE",
+  "CCA",
+  "PMF",
+  "IHTA",
+  "OXFD",
+  "ZIXI",
+  "GAN",
+  "GLA",
+  "KSU",
+  "KNL",
+  "HBMD",
+  "SWAV",
+  "KAMN",
+  "LBAI",
+  "RLYP",
+  "JEQ",
+  "PX",
+  "ICBK",
+  "ROIC",
+  "JWN",
+  "HHY",
+  "ISIL",
+  "PBBK",
+  "DNR",
+  "SONC",
+  "LTEA",
+  "LABL",
+  "EBSB",
+  "IPHS",
+  "DATA",
+  "FSNB",
+  "WMC",
+  "AMNB",
+  "FELP",
+  "SMTA",
+  "CBH",
+  "BPMC",
+  "CNSL",
+  "CMA",
+  "BHBK",
+  "NXTM",
+  "TYPE",
+  "MGLN",
+  "MBTF",
+  "ESXB",
+  "MFL",
+  "ALDR",
+  "WCG",
+  "SBY",
+  "MDWT",
+  "DSKX",
+  "ZEUS",
+  "SBBX",
+  "TIBRU",
+  "PVBC",
+  "SMTX",
+  "CEMI",
+  "HOS",
+  "CLDB",
+  "STL",
+  "ELGX",
+  "AUTO",
+  "RBNC",
+  "ZIMV",
+  "FFNW",
+  "CARO",
+  "MN",
+  "SRF",
+  "ECOM",
+  "AKP",
+  "PCSB",
+  "LBC",
+  "FFWM",
+  "INST",
+  "PRFT",
+  "NVLS",
+  "IEC",
+  "PPBI",
+  "CXP",
+  "PATI",
+  "FCCY",
+  "TRCB",
+  "ARCH",
+  "MVC",
+  "SCX",
+  "BRG",
+  "MAXR",
+  "CASM",
+  "ACBI",
+  "DCF",
+  "CCLP",
+  "CHS",
+  "GVP",
+  "RAVN",
+  "IPG",
+  "LLEX",
+  "PSDO",
+  "ROX",
+  "OPTN",
+  "BGG",
+  "PGTI",
+  "SSI",
+  "MTTR",
+  "CFB",
+  "PKO",
+  "SBCP",
+  "BMTC",
+  "KBAL",
+  "BPL",
+  "AAC",
+  "PBIP",
+  "XEC",
+  "PEGI",
+  "IHIT",
+  "OMN",
+  "CTT",
+  "NWHM",
+  "EPAY",
+  "ARTX",
+  "DNBF",
+  "BRMK",
+  "GPP",
+  "GWB",
+  "ONDK",
+  "PFHD",
+  "AE",
+  "NUO",
+  "PFC",
+  "MSL",
+  "AMRB",
+  "AAIC",
+  "SNPO",
+  "EVRI",
+  "WFBI",
+  "LTXB",
+  "ICAD",
+  "CORE",
+  "MYCC",
+  "AIRC",
+  "MYJ",
+  "NBSE",
+  "DDE",
+  "MRO",
+  "SHYF",
+  "ODP",
+  "ZAGG",
+  "EEI",
+  "XENT",
+  "VRS",
+  "SOHO",
+  "AFT",
+  "TIG",
+  "CSOD",
+  "WTT",
+  "ORBC",
+  "RFP",
+  "CSLT",
+  "NBO",
+  "FOMX",
+  "BPMP",
+  "ECOL",
+  "BERY",
+  "PLYM",
+  "TIS",
+  "RTN",
+  "MQT",
+  "MNTX",
+  "CVT",
+  "RLOG",
+  "ASXC",
+  "WBB",
+  "NEOS",
+  "SRCI",
+  "GTS",
+  "AGS",
+  "FBRC",
+  "SLGC",
+  "JEMD",
+  "DTRM",
+  "KHI",
+  "NURO",
+  "BTA",
+  "OKS",
+  "CALB",
+  "SJI",
+  "INWK",
+  "ORIT",
+  "ASTR",
+  "HAYN",
+  "ESSA",
+  "EFL",
+  "PCTI",
+  "AVCT",
+  "JMF",
+  "DYFN",
+  "NBW",
+  "RKLY",
+  "NXGN",
+  "TYME",
+  "MIRO",
+  "CKPT",
+  "IOTS",
+  "HCR",
+  "GNMK",
+  "CTG",
+  "MOBL",
+  "CHSP",
+  "CONE",
+  "EMAN",
+  "AMRI",
+  "UDMY",
+  "BFIN",
+  "MCBC",
+  "TOWR",
+  "PCMI",
+  "NSL",
+  "EGIF",
+  "CKH",
+  "VTLE",
+  "GHLD",
+  "IMGN",
+  "EMBK",
+  "SAUC",
+  "SAL",
+  "SYNC",
+  "ENOC",
+  "HBP",
+  "SILK",
+  "CTEK",
+  "COVS",
+  "SGN",
+  "MPX",
+  "CVIA",
+  "AVGR",
+  "CZFC",
+  "KRA",
+  "FSB",
+  "SNCY",
+  "XRDC",
+  "FPL",
+  "TMX",
+  "STR",
+  "UNT",
+  "BOBE",
+  "FBNK",
+  "CFMS",
+  "ANH",
+  "MGU",
+  "PACQ",
+  "ARNA",
+  "CLGX",
+  "SONN",
+  "CST",
+  "CVET",
+  "FTNW",
+  "SWN",
+  "TTP",
+  "WAC",
+  "EVBS",
+  "RAS",
+  "FIT",
+  "HOUS",
+  "NMRX",
+  "MYD",
+  "BXLT",
+  "WRI",
+  "DPLO",
+  "RPAI",
+  "CFBI",
+  "PPHM",
+  "SPA",
+  "SPR",
+  "FRGE",
+  "HMNF",
+  "PQ",
+  "SCNB",
+  "NCOM",
+  "PBBI",
+  "AGTC",
+  "GIMO",
+  "RVAC",
+  "ALTM",
+  "DGI",
+  "PDCO",
+  "DFT",
+  "NVEE",
+  "MAMS",
+  "FIV",
+  "CNNB",
+  "ENFC",
+  "ID",
+  "SVT",
+  "CHUY",
+  "SSW",
+  "SEMR",
+  "ACCD",
+  "NPTN",
+  "FSBK",
+  "DALN",
+  "AIF",
+  "MVF",
+  "FBSS",
+  "WIFI",
+  "PFNX",
+  "TLLP",
+  "CAP",
+  "TEUM",
+  "IROQ",
+  "BKJ",
+  "FUR",
+  "MNDT",
+  "PIR",
+  "CARB",
+  "MTOR",
+  "ABCO",
+  "MINI",
+  "OKSB",
+  "PHIC",
+  "SP",
+  "GNVC",
+  "ROSG",
+  "CBNJ",
+  "HABT",
+  "SMED",
+  "MRNS",
+  "ISBC",
+  "MKFG",
+  "SSBK",
+  "WBKC",
+  "RATE",
+  "TLRA",
+  "HZNP",
+  "NVLNF",
+  "FCH",
+  "JHB",
+  "ADER",
+  "HMSY",
+  "MEN",
+  "BWINB",
+  "PSTB",
+  "UMPQ",
+  "NILE",
+  "ADSW",
+  "JMLP",
+  "FCRD",
+  "LMOS",
+  "PFIE",
+  "MUI",
+  "HFBC",
+  "ROAN",
+  "HNW",
+  "BLE",
+  "SPTN",
+  "FTR",
+  "BMTX",
+  "BHAC",
+  "EGAS",
+  "HMG",
+  "XBKS",
+  "MBVT",
+  "JOY",
+  "CNNX",
+  "HTLFP",
+  "OCRX",
+  "HW",
+  "EXAR",
+  "SHCO",
+  "CJ",
+  "ANSS",
+  "MWW",
+  "MODN",
+  "GWR",
+  "BRDG",
+  "NBBC",
+  "LHCG",
+  "BYLK",
+  "PSB",
+  "CNXM",
+  "MUH",
+  "OB",
+  "RBPAA",
+  "GPM",
+  "SOLO",
+  "CBPX",
+  "GFNCP",
+  "NAPA",
+  "DO",
+  "ACHN",
+  "CLBH",
+  "VWR",
+  "WEBK",
+  "CFSB",
+  "MR",
+  "ONVI",
+  "AKS",
+  "EVEP",
+  "CUBN",
+  "BBF",
+  "SCOB",
+  "AIRM",
+  "TRMT",
+  "THRN",
+  "ALDW",
+  "UCP",
+  "NAVG",
+  "JDD",
+  "MHN",
+  "ETRM",
+  "DRE",
+  "CCTS",
+  "ARA",
+  "HPHW",
+  "ALTA",
+  "HEOP",
+  "HMTA",
+  "HFFC",
+  "BZM",
+  "FCFP",
+  "BFK",
+  "OTIV",
+  "CFNL",
+  "UBNK",
+  "EQM",
+  "HYF",
+  "CPLG",
+  "UNXL",
+  "SGAMU",
+  "DPSI",
+  "RST",
+  "CBMX",
+  "SGMA",
+  "HBK",
+  "FNFG",
+  "JNPR",
+  "FNBC",
+  "MDSO",
+  "MIK",
+  "ZFOX",
+  "BCRH",
+  "PMX",
+  "GWPH",
+  "JHD",
+  "FEO",
+  "IDTI",
+  "CRHM",
+  "CMAX",
+  "JHAA",
+  "LRFC",
+  "MUS",
+  "FSKR",
+  "HOTR",
+  "RTEC",
+  "CDI",
+  "LXK",
+  "QIPT",
+  "LOGM",
+  "FGH",
+  "ACGN",
+  "JPEP",
+  "INB",
+  "SFS",
+  "LATN",
+  "FCO",
+  "MENT",
+  "CYBE",
+  "NRCG",
+  "EGOV",
+  "NCIT",
+  "MBFI",
+  "HTWR",
+  "XSPL",
+  "MURA",
+  "KURI",
+  "CRDS",
+  "HTY",
+  "DRA",
+  "MANT",
+  "CFCB",
+  "NPBC",
+  "CBM",
+  "RDEN",
+  "MUE",
+  "RUTH",
+  "RVEN",
+  "EFII",
+  "MFT",
+  "ESMT",
+  "SSY",
+  "REXX",
+  "SHCR",
+  "LLAP",
+  "ASBB",
+  "HRC",
+  "PULB",
+  "GUID",
+  "JPI",
+  "WG",
+  "CEMP",
+  "UQM",
+  "SPPI",
+  "ASCMA",
+  "MXPT",
+  "BKN",
+  "BYM",
+  "STND",
+  "STML",
+  "CUO",
+  "LOTZ",
+  "PNF",
+  "ROI",
+  "RAX",
+  "BKMU",
+  "MGCD",
+  "NID",
+  "MTVC",
+  "MBRG",
+  "ALJ",
+  "BFY",
+  "MVT",
+  "BSE",
+  "SGB",
+  "NHA",
+  "DIAX",
+  "VAM",
+  "MOCO",
+  "RIGP",
+  "JPW",
+  "SHLO",
+  "FGB",
+  "BAF",
+  "AMK",
+  "INSI",
+  "JMT",
+  "PYN",
+  "CHX",
+  "PGRW",
+  "WMAR",
+  "SAJA",
+  "WFM",
+  "BOI",
+  "MTRY",
+  "XCO",
+  "NTRI",
+  "BSD",
+  "WMLP",
+  "MEP",
+  "IQNT",
+  "HCLP",
+  "SPAN",
+  "AUXO",
+  "MFV",
+  "GRDI",
+  "APU",
+  "GGE",
+  "GBSN",
+  "ASV",
+  "UFS",
+  "TLI",
+  "JCO",
+  "MFSF",
+  "LOR",
+  "SNCE",
+  "ACSF",
+  "SWI",
+  "ONCE",
+  "VSR",
+  "TRR",
+  "LBPH",
+  "PHMD",
+  "WBC",
+  "CSGS",
+  "BKK",
+  "BBK",
+  "EGF",
+  "OBCI",
+  "MYF",
+  "FPT",
+  "HCCH",
+  "CTXS",
+  "BRSWQ",
+  "WP",
+  "NTI",
+  "RSTI",
+  "CAW",
+  "AXAR",
+  "KCG",
+  "SSN",
+  "TOTAU",
+  "RAI",
+  "CMRO",
+  "HSNI",
+  "JFKKU",
+  "XYN",
+  "WMIH",
+  "TRK",
+  "GACQU",
+  "IGNYU",
+  "BSGAU",
+  "SPKAU",
+  "POWRU",
+  "ACBAU",
+  "NOAC",
+  "GMFIU",
+  "GDNR",
+  "SNEY",
+  "KALO",
+  "HHC",
+  "GNCA",
+  "OMAG",
+  "AXDX",
+  "WWWW",
+  "SOAN",
+  "MTEM",
+  "VBIV",
+  "DNMR",
+  "IMGL",
+  "TOGL",
+  "CONN",
+  "MNKTQ",
+  "UPL",
+  "ARCK",
+  "SQZ",
+  "ZZLL",
+  "LHDX",
+  "NH",
+  "FNCH",
+  "LCW",
+  "LPTV",
+  "ALR",
+  "SVFA",
+  "EXPR",
+  "CDAK",
+  "XHFIX",
+  "VERY",
+  "NDAC",
+  "TWOU",
+  "TEKK",
+  "CYT",
+  "GLHA",
+  "AAM",
+  "GRTS",
+  "IDSY",
+  "YTEN",
+  "FSR",
+  "CBAK",
+  "MSPR",
+  "ELIQ",
+  "LMACA",
+  "RACY",
+  "CLOE",
+  "MDCL",
+  "STNL",
+  "NVTA",
+  "VAQC",
+  "BIOL",
+  "BRDS",
+  "ALOR",
+  "CFIV",
+  "RPLA",
+  "AVAN",
+  "FPAY",
+  "ECA",
+  "WTRH",
+  "ADOC",
+  "DZSI",
+  "GFGD",
+  "NAVB",
+  "DNAY",
+  "ROCHU",
+  "SIVB",
+  "TUEM",
+  "ZEV",
+  "GTXI",
+  "NBAC",
+  "CFV",
+  "MSO",
+  "LUXH",
+  "GGGV",
+  "GOED",
+  "NIMU",
+  "ARIZ",
+  "DYNT",
+  "ADTH",
+  "MDVX",
+  "FIII",
+  "CMLS",
+  "FI",
+  "CFFS",
+  "BFMC",
+  "ALTIX",
+  "EUSG",
+  "PHII",
+  "OSGIQ",
+  "USEL",
+  "SDOI",
+  "TMTC",
+  "CGIX",
+  "HUNT",
+  "PLXP",
+  "CURO",
+  "ARGS",
+  "CCCM",
+  "JAMF",
+  "EPWR",
+  "HHGC",
+  "TTCF",
+  "IDW",
+  "CTHR",
+  "GAXY",
+  "VYGG",
+  "FOMC",
+  "VNRR",
+  "TRNF",
+  "OBSV",
+  "NMTR",
+  "OEG",
+  "SPAR",
+  "SITO",
+  "HYRE",
+  "NBRV",
+  "WE",
+  "ZSAN",
+  "PCPC",
+  "APTO",
+  "BAMM",
+  "AVLR",
+  "WEYL",
+  "NNUTD",
+  "ZVO",
+  "RDGA",
+  "PNST",
+  "CPAA",
+  "OHGI",
+  "CERC",
+  "TRTC",
+  "VNTR",
+  "ATHX",
+  "LYLT",
+  "ROSE",
+  "BOXD",
+  "MSLP",
+  "CUI",
+  "BTHT",
+  "INNT",
+  "TIK",
+  "LTN",
+  "CRGE",
+  "PENC",
+  "GCEH",
+  "MNGA",
+  "EFHT",
+  "PMD",
+  "STAF",
+  "WIN",
+  "EDNT",
+  "FAT",
+  "PES",
+  "LSMG",
+  "CFDB",
+  "IDEX",
+  "XOG",
+  "FPMYX",
+  "UNAM",
+  "ZYXI",
+  "QEGY",
+  "GIGA",
+  "KRBP",
+  "HGG",
+  "CTB",
+  "PHOT",
+  "CBSTF",
+  "OTRK",
+  "BGHM",
+  "TRIQ",
+  "SRSA",
+  "DYII",
+  "AMHG",
+  "HSTO",
+  "ARCW",
+  "QTEK",
+  "TAPM",
+  "PLKI",
+  "CBKC",
+  "SUBK",
+  "VGRBF",
+  "ETFM",
+  "EVTN",
+  "EVRT",
+  "PRLE",
+  "GNBT",
+  "SOCB",
+  "NBLD",
+  "BAGR",
+  "IMAC",
+  "FWV",
+  "PRED",
+  "VORB",
+  "HCYT",
+  "ARTH",
+  "DRUS",
+  "RCGP",
+  "HMTF",
+  "AWGI",
+  "SOHFF",
+  "UCLE",
+  "XLIT",
+  "PGEI",
+  "SCHS",
+  "SWET",
+  "SOUP",
+  "RSPI",
+  "VTIQ",
+  "SYSX",
+  "BGFT",
+  "ALAC",
+  "BDIC",
+  "VXEL",
+  "HOFD",
+  "SCVX",
+  "BMSN",
+  "NMMC",
+  "MIGT",
+  "BFT",
+  "CND",
+  "GGMC",
+  "LGV",
+  "ASZ",
+  "AUS",
+  "FVIV",
+  "AMPI",
+  "ITHX",
+  "BITE",
+  "SSAA",
+  "EUSGU",
+  "DLCA",
+  "FCAX",
+  "FVT",
+  "DILA",
+  "PAFO",
+  "JAQC",
+  "BLNG",
+  "HTAQ",
+  "ICNC",
+  "NCAC",
+  "ACAQ",
+  "RNER",
+  "LBBB",
+  "ENVI",
+  "PLTN",
+  "MOBV",
+  "TMPO",
+  "BIOR",
+  "AQU",
+  "MLAC",
+  "DYCQ",
+  "IVCRQ",
+  "CTKYY",
+  "QRTEA",
+  "WORX",
+  "LBRDK",
+  "PKTX",
+  "ALCE"
+ ],
+ "failed": {
+  "FRG": {
+   "tries": 3,
+   "last": "2026-08-04",
+   "why": "пустой ряд"
+  },
+  "MFRM": {
+   "tries": 3,
+   "last": "2026-08-04",
+   "why": "пустой ряд"
+  },
+  "QTNT": {
+   "tries": 3,
+   "last": "2026-08-05",
+   "why": "пустой ряд"
+  },
+  "MDVL": {
+   "tries": 3,
+   "last": "2026-08-05",
+   "why": "пустой ряд"
+  },
+  "KLG": {
+   "tries": 3,
+   "last": "2026-08-07",
+   "why": "пустой ряд"
+  },
+  "SNMP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "LCI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "AVYA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "AGII": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BCACU": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ABDC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "COOL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ATRS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ARIA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CTV": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "WRK": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "PNT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "AMSWA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "OMED": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "AGTI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CCRD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "POLY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SGE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "LBMH": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CRGS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CLR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SIMP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "IEECD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BHG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GTT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ODT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "REV": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "PROG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ETM": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "TCDA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "AKAO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "LJPC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "LAZY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "FRED": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "VRAY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ATNX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "IMH": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MLNT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "FRLF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PTI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "UCBB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AMRS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "NYSE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PRTY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "DMS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "FLMN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "IMPL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "APEN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "FRGA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PGIM": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "OTIVF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RIAEX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TAXA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CGME": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AREX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SPKE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "IEEC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DPM": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ECR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BSIG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "FACP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CFII": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TBA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BII": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "UBI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "OCPIX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PCPL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CLI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "RVLP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "VLRX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ONCS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "GLG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "OCPAX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "OSMT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "PNAQ": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ENT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "HCCO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "INFI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CANO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "IDRA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "PFMT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ALNA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "IMPX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "JONE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BFI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "TLRD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BLUA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "LOV": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "YELL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "USAT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "OZM": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "HGEN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NBA.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RBT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SDC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AXGT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TRTL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PHAS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CSSE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "KML": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CPSI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "AB-LEND": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ACOR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "DMTK": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CASA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BTN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CHKE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DHHC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TUES": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TUP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GOGN.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SRGA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SQBG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TALS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AHC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "MCG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "IO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "PVAC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CERF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "JCP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "COT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GMO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "HIIQ": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "IMBI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "FNNIX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "GGO.A": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ICD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "NOVN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SIEN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "GRCYU": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SHAPU": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "REPH": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "JASN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MEAC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "HAIR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "KEG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "FEYE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MICT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "APRI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MDP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "AUD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "EBIX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CBTX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TRKA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "UPH": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NOGN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BRTM": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TCRD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GIK.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NHLD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "WLMS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "COG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SPN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "HFC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NBEV": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TRXC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NCS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BLI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BCEI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "PEI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "DRAD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "EIGR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "FSNN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "JOAN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MTAK": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AFI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "MYOS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BPMX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SWBK.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ROVI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "GIX.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NOTV": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CAFN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CAS.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "VWE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "VICL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CHFC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RLGY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ESES": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SNPY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NLN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SNSS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "GIG.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SBPH": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "XIII": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BABY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "IMNP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "TWO-PC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "HSC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "IVC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "AAMC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CATL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "VVUS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MNK": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MIMO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AFIN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "PICO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ALQA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MDLY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "GRCY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "PTE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BFGC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CPTA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DHCP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RACA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AACQ": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "N.A.": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BPR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SYRG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "AKU": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BIOC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "NSTG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "XPEPX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "RPLRT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "WPG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "TCS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ANW": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "FRAN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "INSY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "TWMC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CLNY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RMGH": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SFT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "HBKA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "VISI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ACHI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SUNL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "GPCM": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "VIVMF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "VGAC.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SVMK": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "HCDI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "FUV": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "FRBK": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "UFAB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TRCH": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CYXT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ECLO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "NEBC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BIG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "HTBX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "MTSL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "QNGY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "VIHD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "XALFA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CLVS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CBMG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MDCRE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CCTC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "FNHC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "VALF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "KAL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "IILG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SCON": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "STBR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NVTR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BFGCD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ORCN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "FNSI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "THLD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GTMM.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BASI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BRS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "INAP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ENDP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "LL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CTDH": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NWGI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PRTFTM": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RASFP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "IMN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "TSO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "PRSC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MKGI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RMES": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "AKRX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ACRG.A.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DLA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CORR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "LLNW": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "EMG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "LKSD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "OHRP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GBL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "VLDR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NBA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SUNW": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CBB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "QPWR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RASFO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "LPI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "TLGT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SEEL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DTRC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BNMV": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BBLS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NLS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "NHPIF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BBI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "APY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RGSE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CRDC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "YRCW": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RASFN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BXRX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "NIR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SCRI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "RVA.AX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GRIF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ASNA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MMAT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "FDEF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CELP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BXS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "EPE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RAD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "OPHT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GLS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "LRY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RASF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ACPW": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BDR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "TSLF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "NPS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "ZEST": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AFH": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PGUS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CCHW": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BLSK": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "KA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MTST.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BTLN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TKOI.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "EVOJ.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CINR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "GQM": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PUB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "MBLX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "IRNT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "EQVU": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TRMR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "EGZ": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TTNP.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ENG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GMDA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "KTYB.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NWY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NVIV": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "NTEC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ISUN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MDTW": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SHPW": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RCPI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "GNMC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "INS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "LOGG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "IMDS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "EIOM": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ADMP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "IBERU": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AEY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BBEP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SWTF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ACY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "GFOR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AUXO.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "VTNR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "WEIN.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "KPAY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MPAC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SNBP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "UPLC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BHTG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SCHN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "DFBG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DAKP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BURG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "AXP.AX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "OTCQX-HDYN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TLR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CPJTD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PACD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "TPUB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SGYP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NAKD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "IRG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SRRY": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "OWOO": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "FXCM": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "HTR.R": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CVGVW": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CNAB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SIAF.QX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NVLN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ODIF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RASF0": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "LKI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BRTI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ADEX.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BHRT.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MDVA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TMBR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "UBOF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MBVX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "VEGL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "HCCC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "DSOX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MDGN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SYRB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NETC.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "IRNC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SGBYD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "UDF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "FLLF": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "HZNB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "EXXP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "NETD.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ANDA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RSLSD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RHE-A": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "QFTA.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DTOR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "LNBK": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "WFE": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PARI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "PREDEX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DCBF.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RHNOD": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "XARKX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SXL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "WJNR": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "EMGL": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "CADXX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MFC0": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "HICKA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "JAEN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GDPP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MEDA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "MMPW": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "RMLX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MKGI.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MKRS.OB": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "DNRG": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BBX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "STLT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "VWIN": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "MOSCU": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ATMS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "ILCC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BWMC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "QSP": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "EVK": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "SMMC": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SLPA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BTAQ.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "CBAH": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "FAII": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "LAAA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GVBT": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "пустой ряд"
+  },
+  "BWCA": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "XPAX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SUAC.U": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "GNRS": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "BGXX": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "TBCV": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "MAAI": {
+   "tries": 3,
+   "last": "2026-08-16",
+   "why": "HTTP 404"
+  },
+  "SRG-PA": {
+   "tries": 3,
+   "last": "2026-08-19",
+   "why": "HTTP 404"
+  },
+  "EDVA": {
+   "tries": 3,
+   "last": "2026-08-22",
+   "why": "пустой ряд"
+  },
+  "NONE.": {
+   "tries": 3,
+   "last": "2026-08-26",
+   "why": "HTTP 404"
+  },
+  "MDV.PA": {
+   "tries": 3,
+   "last": "2026-08-26",
+   "why": "HTTP 404"
+  },
+  "RNAQ": {
+   "tries": 3,
+   "last": "2026-08-29",
+   "why": "HTTP 404"
+  }
+ },
+ "updated": "2026-09-05"
+}
