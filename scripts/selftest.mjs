@@ -932,7 +932,7 @@ ok('notify: новая позиция даёт ровно одну карточ�
   const out = notify([nRow('AAA', nDay(-2), 'Smith John', 3e5), nRow('BBB', nDay(-1), 'Lee Anna', 4e5)]);
   assert.match(out, /новых позиций: 1/);
   assert.equal((out.match(/— новая позиция/g) ?? []).length, 1);
-  assert.match(out, /BBB — новая позиция/);
+  assert.match(out, /Инсайдерский радар · BBB — новая позиция/);
   assert.match(out, /вход до .+ выход /, 'в карточке есть срок входа и дата выхода');
 });
 ok('notify: докупка в открытой позиции письма не даёт', () => {
@@ -969,7 +969,7 @@ ok('notify: залп больше четырёх позиций сворачив
   const five = ['D1', 'D2', 'D3', 'D4', 'D5'].map((t, i) => nRow(t, nDay(0), 'Buyer ' + i, 1e5 * (i + 1)));
   const out = run([nRow('ZZZ', nDay(-2), 'Old Man', 3e5), ...five]);
   assert.match(out, /новых позиций: 5/);
-  assert.match(out, /Рабочий набор: 5 новых позиций/);
+  assert.match(out, /Инсайдерский радар · 5 новых позиций/);
   assert.ok(!out.includes('— новая позиция'), 'вместо пяти карточек одна сводка');
 });
 
@@ -1045,7 +1045,7 @@ await okAsync('notify: сбой Telegram не помечает позицию о
     assert.ok(sentOf(dir).includes(`AAA|${aaa.fdate}`), 'доставленная позиция запомнена');
     assert.notEqual(r1.code, 0, 'недоставка обязана давать ненулевой код выхода');
     assert.equal(api.calls.tg.length, 2);
-    assert.match(headOf(api.calls.tg[0]), /AAA<\/b> — новая позиция/);
+    assert.equal(headOf(api.calls.tg[0]), '🔔 <b>Инсайдерский радар · AAA — новая позиция</b>');
     assert.match(r1.out, /НЕ доставлено: 1 из 2/);
     // Зеркало в NEXUS — с ключом позиции: досылка на следующий день ляжет на ту же запись хаба.
     assert.deepEqual(api.calls.nexus.map(b => b.eventId), [`840|AAA|${aaa.fdate}`, `840|BBB|${bbb.fdate}`]);
@@ -1053,7 +1053,7 @@ await okAsync('notify: сбой Telegram не помечает позицию о
     const r2 = await liveNotify(dir, api.base);
     assert.equal(r2.code, 0, r2.out);
     assert.equal(api.calls.tg.length, 3, 'досылается ровно одно сообщение — недоставленное');
-    assert.match(headOf(api.calls.tg[2]), /BBB<\/b> — новая позиция/);
+    assert.equal(headOf(api.calls.tg[2]), '🔔 <b>Инсайдерский радар · BBB — новая позиция</b>');
     assert.equal(api.calls.nexus.at(-1).eventId, `840|BBB|${bbb.fdate}`);
     assert.ok(sentOf(dir).includes(`BBB|${bbb.fdate}`));
 
@@ -1117,6 +1117,107 @@ await okAsync('notify: сводка помечает отправленными 
     assert.equal(api.calls.tg.length, 1);
     assert.match(api.calls.nexus[0].eventId, /^840\|digest\|[0-9a-f]{16}$/);
     for (const p of five) assert.ok(sentOf(dir).includes(`${p.t}|${p.fdate}`), p.t);
+  } finally { await api.close(); }
+});
+// ---------- единый стиль сообщений (стандарт 29.10.2026, TELEGRAM-STYLE-2026-10-29.md) ----------
+// Пометка панели первым словом заголовка, одна эмодзи, подвал «ссылка · время МСК», русские числа
+// (запятая, «−», «$» перед числом, процент слитно), ни ISO-дат, ни сырых float. В ленту NEXUS уходит
+// тот же текст без разметки — он читается так же.
+const SITE = 'https://ml371kl.github.io/temp-zero-inode-840/';
+function styleFaults(html) {
+  const bad = [];
+  const lines = html.split('\n');
+  if (!/^(🔔|ℹ️) <b>Инсайдерский радар · [^<\n]+<\/b>$/u.test(lines[0])) bad.push(`заголовок: ${lines[0]}`);
+  if (!new RegExp(`^<a href="${SITE.replace(/[.]/g, '\\.')}">Открыть панель</a> · \\d\\d\\.\\d\\d(\\.\\d{4})?, \\d\\d:\\d\\d МСК$`).test(lines.at(-1))) bad.push(`подвал: ${lines.at(-1)}`);
+  if (lines.at(-2) !== '') bad.push('перед подвалом нет пустой строки');
+  if (html.length > 4096) bad.push(`длиннее 4096: ${html.length}`);
+  const plain = html.replace(/<[^>]+>/g, '').replace(/&amp;/g, '&');
+  const body = plain.replace(/\b\d\d\.\d\d(\.\d{4})?\b/g, 'ДАТА');
+  for (const [re, what] of [
+    [/UTC|\d{4}-\d\d-\d\d|\d:\d\dZ/, 'ISO или UTC'], [/\d\.\d/, 'десятичная точка'], [/(^|[\s(~])-\d/m, 'дефис вместо минуса'],
+    [/\d[ \u00a0]%/, 'процент через пробел'], [/\d[ \u00a0]?\$/, 'доллар после числа'], [/\d[.,]\d{4,}/, 'сырой float'],
+    [/\d \d{3}(?!\d)/, 'разряды обычным пробелом'], [/\d (тыс\.|млн)/, 'обычный пробел перед тыс./млн'], [/(^|\n)\s*·|·\s*($|\n)/, 'висящая «·»'],
+    [/\b(янв|фев|мар|апр|мая|июн|июл|авг|сен|окт|ноя|дек)\b/, 'дата словами'],
+  ]) if (re.test(body)) bad.push(`${what}: «${(body.match(re) || [''])[0]}»`);
+  for (const l of lines.slice(1)) if (/^\p{Extended_Pictographic}/u.test(l)) bad.push(`эмодзи не в заголовке: ${l}`);
+  return bad;
+}
+await okAsync('стиль: карточка и сводка — пометка панели, МСК, русские числа, подвал', async () => {
+  const dir = seededDir('data-style');
+  const big = nRow('BRK', nDay(-1), 'BUFFETT WARREN E', 12.34e6, { sh: 20, cur: 721111.5, entryPx: 715000.25, chg: -0.0123, dd: -0.0456, dv: 2.5e7, role: 'C', exit: '2027-01-26' });
+  const cheap = nRow('PNY', nDay(-1), 'SMITH JOHN', 4.5e4, { sh: 98533, cur: 0.5, entryPx: 0.45, chg: 0.111, dd: -0.003, dv: 9.9e5 });
+  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), big, cheap]);
+  const api = await fakeApis([]);
+  try {
+    const r = await liveNotify(dir, api.base);
+    assert.equal(r.code, 0, r.out);
+    const texts = api.calls.tg.map(c => c.body.text);
+    assert.equal(texts.length, 2);
+    for (const t of texts) assert.deepEqual(styleFaults(t), [], styleFaults(t).join("; ") + " :: " + t);
+    const brk = texts.find(t => t.includes('BRK'));
+    assert.match(brk, /Куплено на <b>\$12\u00a0млн<\/b> по \$617\u00a0000,00/, brk);
+    assert.match(brk, /На 4,6% ниже 52-недельного максимума, оборот \$25\u00a0млн в день/, brk);
+    assert.match(brk, /Вход \$715\u00a0000,25 → сейчас <b>\$721\u00a0111,50<\/b> \(−1,2%\)/, brk);
+    assert.match(brk, /выход 26\.01\.2027/, 'дата не текущего года — с годом');
+    const pny = texts.find(t => t.includes('PNY'));
+    assert.match(pny, /Куплено на <b>\$45\u00a0тыс\.<\/b> по \$0,457/, pny);
+    assert.match(pny, /\(\+11,1%\)/);
+    // лента NEXUS — тот же текст без разметки, с ключом позиции
+    assert.equal(api.calls.nexus.length, 2);
+    for (const b of api.calls.nexus) {
+      assert.match(b.text, /^🔔 Инсайдерский радар · [A-Z]+ — новая позиция\n/, b.text);
+      assert.match(b.text, /\n\nОткрыть панель · \d\d\.\d\d, \d\d:\d\d МСК$/, b.text);
+    }
+  } finally { await api.close(); }
+});
+await okAsync('стиль: длинная сводка режется по границе блока на части не длиннее предела', async () => {
+  const dir = seededDir('data-style-digest');
+  const many = Array.from({ length: 60 }, (_, i) => nRow(`T${String(i).padStart(2, '0')}`, nDay(-1), 'Buyer ' + i, 1e5 * (i + 1)));
+  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), ...many]);
+  const api = await fakeApis([]);
+  try {
+    const r = await liveNotify(dir, api.base);
+    assert.equal(r.code, 0, r.out);
+    const texts = api.calls.tg.map(c => c.body.text);
+    assert.ok(texts.length >= 2, `сводка из 60 позиций обязана разрезаться: ${texts.length}`);
+    texts.forEach((t, k) => {
+      assert.deepEqual(styleFaults(t), [], t);
+      assert.ok(t.startsWith(`🔔 <b>Инсайдерский радар · 60 новых позиций (${k + 1}/${texts.length})</b>\n\n<b>T`), t.slice(0, 120));
+    });
+    const blocks = texts.flatMap(t => t.split('\n\n').filter(b => /^<b>T\d\d<\/b>/.test(b)));
+    assert.equal(blocks.length, 60, 'каждая позиция — ровно в одной части, блок не рвётся');
+    for (const p of many) assert.ok(sentOf(dir).includes(`${p.t}|${p.fdate}`), p.t);
+    assert.equal(new Set(api.calls.nexus.map(b => b.eventId)).size, texts.length, 'у каждой части свой ключ состава');
+  } finally { await api.close(); }
+});
+await okAsync('стиль: «can\'t parse entities» — повтор тем же текстом без разметки', async () => {
+  const dir = seededDir('data-parse');
+  const hhh = nRow('HHH', nDay(-1), 'Smith John', 3e5, { name: 'H&M <TEST> INC' });
+  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), hhh]);
+  const api = await fakeApis([{ status: 400, body: { ok: false, error_code: 400, description: "Bad Request: can't parse entities: unexpected end tag at byte offset 12" } }]);
+  try {
+    const r = await liveNotify(dir, api.base);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(api.calls.tg.length, 2);
+    assert.equal(api.calls.tg[0].body.parse_mode, 'HTML');
+    assert.equal(api.calls.tg[1].body.parse_mode, undefined, 'повтор — без разметки');
+    assert.match(api.calls.tg[1].body.text, /^🔔 Инсайдерский радар · HHH — новая позиция\nH&M <Test> Inc\n/, api.calls.tg[1].body.text);
+    assert.ok(sentOf(dir).includes(`HHH|${hhh.fdate}`));
+  } finally { await api.close(); }
+});
+await okAsync('стиль: проверка связи — пометка панели и подвал', async () => {
+  const api = await fakeApis([]);
+  try {
+    const out = await new Promise(resolve => execFile(process.execPath,
+      ['--import', pathToFileURL(REDIRECT).href, join(ROOT, 'scripts', 'notify.mjs'), '--test'],
+      { encoding: 'utf8', env: { ...process.env, FAKE_TG_BASE: api.base, TELEGRAM_BOT_TOKEN: 'TEST', TELEGRAM_CHAT_ID: '1', NEXUS_EVENTS_URL: api.base + '/nexus', NEXUS_INGEST_TOKEN: 'TEST' } },
+      (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: stdout + stderr })));
+    // Windows: Node при process.exit() во время закрытия сетевого дескриптора падает с 0xC0000409
+    // уже ПОСЛЕ отправки; на раннере Ubuntu выход нулевой. Само сообщение проверяется ниже.
+    if (!(process.platform === 'win32' && out.code === 3221226505)) assert.equal(out.code, 0, out.out);
+    const t = api.calls.tg[0].body.text;
+    assert.ok(t.startsWith('ℹ️ <b>Инсайдерский радар · Проверка связи</b>\n'), t);
+    assert.deepEqual(styleFaults(t), [], t);
   } finally { await api.close(); }
 });
 rmSync(NTMP, { recursive: true, force: true });
