@@ -9,10 +9,13 @@
 // считается от первой покупки. Правило группировки повторяет скринер (web/app.js,
 // groupPositions) — чтобы письмо не могло разойтись с дашбордом.
 //
-// Без секретов (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) скрипт тихо выходит — прод не блокирует.
-// Состояние «что уже отправлено» — data/state/notify.json (живёт на ветке data).
+// Без секретов (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) в чат ничего не уходит — прод не блокирует.
+// Состояние «что уже отправлено» — data/state/notify.json (живёт на ветке data). Позиция
+// попадает туда только ПОСЛЕ того, как Telegram принял сообщение о ней; недоставленное
+// сообщение даёт ненулевой код выхода и уходит следующим прогоном.
 import { readJson, writeJson, isoToday, addDaysIso } from './lib/util.mjs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 const args = process.argv.slice(2);
 function argVal(name, def) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; }
@@ -26,21 +29,66 @@ const token = process.env.TELEGRAM_BOT_TOKEN, chat = process.env.TELEGRAM_CHAT_I
 
 // ---------- отправка ----------
 const plain = s => String(s).replace(/<[^>]+>/g, '');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Сроки ответа. Без них зависший Telegram или хаб держали бы шаг минутами (у fetch свой
+// срок — 300 с на заголовки), а прогон радара целиком — до его общего тайм-аута.
+const TG_TIMEOUT_MS = 15000;
+const NEXUS_TIMEOUT_MS = 5000;
+// 429 с запретом длиннее минуты не ждём: позиция останется неотправленной и уйдёт следующим
+// прогоном, а держать ежедневное обновление ради одного письма незачем.
+const RETRY_AFTER_MAX_S = 60;
 
+// Один запрос к Telegram. Обрыв соединения, срок ответа и тело ошибки разбираются здесь же:
+// до 29.10.2026 сетевая ошибка вылетала необработанным исключением, а позиция к этому
+// моменту уже числилась отправленной.
+async function tgOnce(payload) {
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chat, parse_mode: 'HTML', disable_web_page_preview: true, ...payload }),
+      signal: AbortSignal.timeout(TG_TIMEOUT_MS),
+    });
+    if (res.ok) return { ok: true };
+    const body = await res.text().catch(() => '');
+    let retryAfter = null;
+    try { retryAfter = JSON.parse(body)?.parameters?.retry_after ?? null; } catch { /* не JSON */ }
+    return { ok: false, status: res.status, retryAfter, why: `HTTP ${res.status}: ${body.slice(0, 300)}` };
+  } catch (error) {
+    const why = error?.name === 'TimeoutError'
+      ? `нет ответа за ${TG_TIMEOUT_MS / 1000} с`
+      : `сеть: ${error?.cause?.code || error?.cause?.message || error?.message || error}`;
+    return { ok: false, status: 0, retryAfter: null, why };
+  }
+}
+
+// Повтор в том же прогоне — только на 429: там Telegram сам называет срок, и второй запрос
+// не может продублировать уже доставленное. Прочие отказы не повторяются здесь — позиция
+// остаётся неотправленной до следующего прогона, а шаг завершается с ошибкой.
 async function tg(payload) {
-  const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: chat, parse_mode: 'HTML', disable_web_page_preview: true, ...payload }),
-  });
-  if (!res.ok) console.error(`[notify] Telegram HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  return res.ok;
+  let r = await tgOnce(payload);
+  if (!r.ok && r.status === 429) {
+    const wait = r.retryAfter == null ? 1 : Number(r.retryAfter);
+    if (Number.isFinite(wait) && wait >= 0 && wait <= RETRY_AFTER_MAX_S) {
+      console.log(`[notify] Telegram 429: повтор через ${wait} с`);
+      await sleep(wait * 1000);
+      r = await tgOnce(payload);
+    } else {
+      console.error(`[notify] Telegram 429 с запретом на ${r.retryAfter} с — в этом прогоне не ждём`);
+    }
+  }
+  if (!r.ok) console.error(`[notify] Telegram не принял сообщение — ${r.why}`);
+  return r.ok;
 }
 
 // Копия каждого сообщения уходит в приватную ленту NEXUS. Канал best-effort: его отказ
 // никогда не блокирует Telegram и ежедневную публикацию радара. Молчать при этом нельзя —
 // раньше ненастроенное зеркало не оставляло в логе ни строчки, и «почему на хабе пусто»
 // было нечем ответить.
-async function sendNexusEvent(text) {
+// eventId — ключ дедупликации хаба (он хранит событие по хешу «источник + eventId» и повтор
+// игнорирует). Без него ключом служил сам текст, а в карточке есть цена «сейчас», которая
+// меняется каждый день: досылка недоставленного письма на следующий день легла бы в ленту
+// второй записью.
+async function sendNexusEvent(text, eventId) {
   const url = process.env.NEXUS_EVENTS_URL;
   const nexusToken = process.env.NEXUS_INGEST_TOKEN;
   if (!url || !nexusToken) {
@@ -51,7 +99,8 @@ async function sendNexusEvent(text) {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${nexusToken}` },
-      body: JSON.stringify({ source: '840', text: plain(text), occurredAt: new Date().toISOString() }),
+      body: JSON.stringify({ source: '840', text: plain(text), occurredAt: new Date().toISOString(), ...(eventId ? { eventId } : {}) }),
+      signal: AbortSignal.timeout(NEXUS_TIMEOUT_MS),
     });
     if (!res.ok) { console.error('[notify] NEXUS HTTP', res.status, (await res.text()).slice(0, 200)); return false; }
     console.log('[notify] NEXUS: событие принято');
@@ -66,12 +115,15 @@ async function sendNexusEvent(text) {
 // NEXUS — иначе очередной путь (тест, предпросмотр, боевая рассылка) молча обойдёт зеркало.
 // Ровно это и случилось: предпросмотр слал только в чат, и на хабе сообщения не было.
 // Отсутствие секретов Telegram больше не отменяет зеркало: это два независимых канала.
-async function send(text, markup) {
-  let ok = false;
-  if (token && chat) ok = await tg({ text, reply_markup: markup });
+// Исход — по Telegram: 'sent' (принял), 'fail' (не принял — позиция остаётся неотправленной),
+// 'off' (секретов нет, слать некуда; состояние в этом случае двигается, иначе подключение
+// секретов вывалило бы разом всю неделю).
+async function send(text, markup, eventId) {
+  let outcome = 'off';
+  if (token && chat) outcome = (await tg({ text, reply_markup: markup })) ? 'sent' : 'fail';
   else console.log('[notify] секреты Telegram не заданы — отправка в чат пропущена');
-  await sendNexusEvent(text);
-  return ok;
+  await sendNexusEvent(text, eventId);
+  return outcome;
 }
 
 // ---------- форматирование ----------
@@ -112,7 +164,7 @@ if (args.includes('--test')) {
     console.error(`  чат:   ${chat ? chat : 'ОТСУТСТВУЕТ'}`);
     process.exit(1);
   }
-  const ok = await send(
+  const ok = 'sent' === await send(
     '✅ <b>Инсайдерский радар</b> — связка работает.\n\n'
     + 'Сюда приходит ровно одно событие: <b>в рабочем наборе открылась новая позиция</b> — '
     + 'инсайдер купил на существенную сумму у 52-недельного максимума в ликвидной бумаге.\n\n'
@@ -236,7 +288,7 @@ if (PREVIEW) {
   // и без пометки она читается на хабе как новый сигнал.
   const text = card(p) + '\n\n<i>Это образец формата, а не новый сигнал.</i>';
   if (DRY) { console.log('\n' + plain(text)); process.exit(0); }
-  const ok = await send(text, kb(p));
+  const ok = 'sent' === await send(text, kb(p));
   console.log(ok ? '[notify] предпросмотр отправлен' : '[notify] предпросмотр в чат НЕ отправлен');
   process.exit(0);
 }
@@ -245,45 +297,70 @@ if (PREVIEW) {
 // Ключ — позиция (бумага + дата её первой покупки), а не форма. Версия нужна, чтобы смена
 // правила ключа не отправила разом всю неделю: первый прогон новой версии молча пересевает
 // состояние.
+//
+// «Отправил → запомнил»: позиция попадает в sentPositions только после того, как Telegram
+// принял сообщение о ней, и состояние уходит на диск после КАЖДОГО такого сообщения. До
+// 29.10.2026 оно писалось до отправки, и сбой Telegram терял сигнал молча (аудит 28.10.2026,
+// C1). Неотправленная позиция остаётся в окне свежести (--fresh-days, по умолчанию 7 дней от
+// подачи) и уходит следующим прогоном; сам прогон завершается с ошибкой.
 const NOTIFY_VERSION = 3;
 const seeding = !state.sentPositions || state.version !== NOTIFY_VERSION;
 const sent = new Set(state.version === NOTIFY_VERSION ? (state.sentPositions ?? []) : []);
 state.version = NOTIFY_VERSION;
-
-const fresh = [];
-for (const p of positions) {
-  const id = `${p.t}|${p.first}`;
-  if (sent.has(id)) continue;
-  sent.add(id);
-  fresh.push(p);
-}
-state.sentPositions = [...sent].slice(-2000);
 delete state.sentTrades;      // ключи прежней схемы («набор|тикер|дата») больше не читаются
-writeJson(statePath, state, true);
+const posId = p => `${p.t}|${p.first}`;
+function saveState() {
+  state.sentPositions = [...sent].slice(-2000);
+  writeJson(statePath, state, true);
+}
 
 if (seeding) {
+  for (const p of positions) sent.add(posId(p));
+  saveState();
   console.log(`[notify] первый прогон схемы v${NOTIFY_VERSION}: состояние пересеяно (${sent.size} позиций), письма не шлём`);
   process.exit(0);
 }
+const fresh = positions.filter(p => !sent.has(posId(p)));
+saveState();
 if (!fresh.length) { console.log('[notify] новых позиций нет'); process.exit(0); }
 console.log(`[notify] новых позиций: ${fresh.length}`);
 
 // ---------- отправка ----------
+// eventId карточки — «840|тикер|дата подачи»: та же позиция, досланная на следующий день, на
+// хабе ляжет на прежнюю запись. У сводки ключ — отпечаток её состава.
 const MAX_CARDS = 4;
+const digestId = list => '840|digest|' + createHash('sha256').update(list.map(posId).sort().join('\n')).digest('hex').slice(0, 16);
 const messages = fresh.length > MAX_CARDS
-  ? [{ text: digest(fresh), markup: { inline_keyboard: [[{ text: 'Открыть скринер', url: SITE_URL }]] } }]
-  : fresh.map(p => ({ text: card(p), markup: kb(p) }));
+  ? [{ text: digest(fresh), markup: { inline_keyboard: [[{ text: 'Открыть скринер', url: SITE_URL }]] },
+      ids: fresh.map(posId), eventId: digestId(fresh) }]
+  : fresh.map(p => ({ text: card(p), markup: kb(p), ids: [posId(p)], eventId: `840|${posId(p)}` }));
 
 if (DRY) {
-  for (const m of messages) console.log('\n' + '─'.repeat(46) + '\n' + plain(m.text));
+  // Пробный прогон «доставляет» в консоль и двигает состояние так же, как боевой: на этом
+  // стоят самотесты последовательных прогонов. В сеть он не ходит.
+  for (const m of messages) {
+    console.log('\n' + '─'.repeat(46) + '\n' + plain(m.text));
+    for (const id of m.ids) sent.add(id);
+  }
+  saveState();
   process.exit(0);
 }
 
-let okCount = 0;
+let okCount = 0, failCount = 0;
 for (const [k, m] of messages.entries()) {
   // Telegram душит бота примерно на одном сообщении в секунду на чат; карточек бывает до
   // четырёх подряд, поэтому между ними пауза — иначе часть вернётся с 429.
-  if (k) await new Promise(r => setTimeout(r, 1200));
-  if (await send(m.text, m.markup)) okCount++;
+  if (k) await sleep(1200);
+  const outcome = await send(m.text, m.markup, m.eventId);
+  if (outcome === 'fail') { failCount++; continue; }
+  if (outcome === 'sent') okCount++;
+  for (const id of m.ids) sent.add(id);
+  saveState();
 }
 console.log('[notify] отправлено в Telegram:', okCount, 'из', messages.length);
+if (failCount) {
+  // Ненулевой код — сигнал workflow: шаг помечается упавшим, а в конце прогона (после снимка
+  // данных и публикации) отдельный шаг красит весь прогон.
+  console.error(`[notify] НЕ доставлено: ${failCount} из ${messages.length} — позиции остались неотправленными и уйдут следующим прогоном`);
+  process.exit(1);
+}
