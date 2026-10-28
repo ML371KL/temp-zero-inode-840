@@ -1,10 +1,11 @@
 // Самотесты на фиксированных фикстурах. Правило: никаких утверждений, зависящих от дня
 // недели запуска; динамические ряды строятся «до сегодня» так, чтобы классификация не менялась.
 import { strict as assert } from 'node:assert';
-import { execFileSync } from 'node:child_process';
-import { rmSync, mkdirSync, readFileSync } from 'node:fs';
+import { execFileSync, execFile } from 'node:child_process';
+import { rmSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz, isIsoDate } from './lib/util.mjs';
 import { zipCreate, zipExtract } from './lib/zip.mjs';
 import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, SHARD_VERSION } from './lib/edgar.mjs';
@@ -970,6 +971,153 @@ ok('notify: залп больше четырёх позиций сворачив
   assert.match(out, /новых позиций: 5/);
   assert.match(out, /Рабочий набор: 5 новых позиций/);
   assert.ok(!out.includes('— новая позиция'), 'вместо пяти карточек одна сводка');
+});
+
+// ---------- доставка: сбой Telegram не теряет позицию (аудит 28.10.2026, C1) ----------
+// Боевой прогон скрипта против подставного Telegram: preload-модуль переадресует
+// api.telegram.org на локальный сервер, так что проверяется настоящий код отправки без
+// единой правки под тест. До 29.10.2026 позиция записывалась отправленной ДО запроса —
+// эти проверки на прежнем коде падают.
+async function okAsync(name, fn) {
+  try { await fn(); passed++; }
+  catch (e) { console.error(`FAIL: ${name}\n  ${e.message}`); process.exitCode = 1; }
+}
+const TG_OK = { status: 200, body: { ok: true, result: { message_id: 1 } } };
+const TG_429 = s => ({ status: 429, body: { ok: false, error_code: 429, description: `Too Many Requests: retry after ${s}`, parameters: { retry_after: s } } });
+// script — ответы Telegram по порядку запросов ('drop' — оборвать соединение); дальше — 200.
+function fakeApis(script) {
+  const calls = { tg: [], nexus: [] };
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', c => { raw += c; });
+    req.on('end', () => {
+      const body = raw ? JSON.parse(raw) : null;
+      if (req.url.startsWith('/bot')) {
+        const step = script[calls.tg.length] ?? TG_OK;
+        calls.tg.push({ at: Date.now(), body });
+        if (step === 'drop') { req.socket.destroy(); return; }
+        res.writeHead(step.status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(step.body));
+      } else if (req.url === '/nexus') {
+        calls.nexus.push(body);
+        res.writeHead(202, { 'content-type': 'application/json' });
+        res.end('{"accepted":true}');
+      } else { res.writeHead(404); res.end(); }
+    });
+  });
+  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({
+    calls, base: `http://127.0.0.1:${server.address().port}`,
+    close: () => new Promise(r => server.close(r)),
+  })));
+}
+const REDIRECT = join(NTMP, 'tg-redirect.mjs');
+writeFileSync(REDIRECT, [
+  'const base = process.env.FAKE_TG_BASE;',
+  'const real = globalThis.fetch;',
+  "globalThis.fetch = (url, init) => real(String(url).replace('https://api.telegram.org', base), init);",
+].join('\n'));
+function liveNotify(dir, base) {
+  return new Promise(resolve => execFile(process.execPath,
+    ['--import', pathToFileURL(REDIRECT).href, join(ROOT, 'scripts', 'notify.mjs'), '--site', join(NTMP, 'site'), '--data', dir],
+    { encoding: 'utf8', env: { ...process.env, FAKE_TG_BASE: base, TELEGRAM_BOT_TOKEN: 'TEST', TELEGRAM_CHAT_ID: '1',
+      NEXUS_EVENTS_URL: base + '/nexus', NEXUS_INGEST_TOKEN: 'TEST' } },
+    (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: stdout + stderr })));
+}
+// Состояние с уже пересеянной схемой: в нём одна старая позиция.
+function seededDir(name) {
+  const dir = join(NTMP, name);
+  mkdirSync(join(dir, 'state'), { recursive: true });
+  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5)]);
+  execFileSync(process.execPath, [join(ROOT, 'scripts', 'notify.mjs'), '--dry-run', '--site', join(NTMP, 'site'), '--data', dir], { encoding: 'utf8' });
+  return dir;
+}
+const sentOf = dir => readJson(join(dir, 'state', 'notify.json'), {}).sentPositions ?? [];
+const headOf = call => call.body.text.split('\n')[0];
+
+await okAsync('notify: сбой Telegram не помечает позицию отправленной, следующий прогон досылает её одну', async () => {
+  const dir = seededDir('data-fail');
+  const aaa = nRow('AAA', nDay(-1), 'Smith John', 3e5), bbb = nRow('BBB', nDay(-2), 'Lee Anna', 4e5);
+  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), aaa, bbb]);
+  const api = await fakeApis([TG_OK, { status: 500, body: { ok: false, error_code: 500, description: 'Internal Server Error' } }]);
+  try {
+    const r1 = await liveNotify(dir, api.base);
+    assert.ok(!sentOf(dir).includes(`BBB|${bbb.fdate}`), 'недоставленная позиция не должна числиться отправленной');
+    assert.ok(sentOf(dir).includes(`AAA|${aaa.fdate}`), 'доставленная позиция запомнена');
+    assert.notEqual(r1.code, 0, 'недоставка обязана давать ненулевой код выхода');
+    assert.equal(api.calls.tg.length, 2);
+    assert.match(headOf(api.calls.tg[0]), /AAA<\/b> — новая позиция/);
+    assert.match(r1.out, /НЕ доставлено: 1 из 2/);
+    // Зеркало в NEXUS — с ключом позиции: досылка на следующий день ляжет на ту же запись хаба.
+    assert.deepEqual(api.calls.nexus.map(b => b.eventId), [`840|AAA|${aaa.fdate}`, `840|BBB|${bbb.fdate}`]);
+
+    const r2 = await liveNotify(dir, api.base);
+    assert.equal(r2.code, 0, r2.out);
+    assert.equal(api.calls.tg.length, 3, 'досылается ровно одно сообщение — недоставленное');
+    assert.match(headOf(api.calls.tg[2]), /BBB<\/b> — новая позиция/);
+    assert.equal(api.calls.nexus.at(-1).eventId, `840|BBB|${bbb.fdate}`);
+    assert.ok(sentOf(dir).includes(`BBB|${bbb.fdate}`));
+
+    const r3 = await liveNotify(dir, api.base);
+    assert.equal(r3.code, 0);
+    assert.equal(api.calls.tg.length, 3, 'после доставки повторов нет');
+    assert.match(r3.out, /новых позиций нет/);
+  } finally { await api.close(); }
+});
+await okAsync('notify: обрыв соединения не роняет скрипт необработанной ошибкой и не теряет позицию', async () => {
+  const dir = seededDir('data-drop');
+  const ccc = nRow('CCC', nDay(-1), 'Smith John', 3e5);
+  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), ccc]);
+  const api = await fakeApis(['drop']);
+  try {
+    const r1 = await liveNotify(dir, api.base);
+    assert.ok(!sentOf(dir).includes(`CCC|${ccc.fdate}`), 'позиция не должна числиться отправленной');
+    assert.notEqual(r1.code, 0);
+    assert.match(r1.out, /Telegram не принял сообщение — сеть/);
+    const r2 = await liveNotify(dir, api.base);
+    assert.equal(r2.code, 0, r2.out);
+    assert.equal(api.calls.tg.length, 2);
+    assert.ok(sentOf(dir).includes(`CCC|${ccc.fdate}`));
+  } finally { await api.close(); }
+});
+await okAsync('notify: 429 — один повтор через retry_after, без потери и без дубля', async () => {
+  const dir = seededDir('data-429');
+  const ddd = nRow('DDD', nDay(-1), 'Smith John', 3e5);
+  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), ddd]);
+  const api = await fakeApis([TG_429(1)]);
+  try {
+    const r = await liveNotify(dir, api.base);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(api.calls.tg.length, 2, 'ровно один повтор');
+    assert.ok(api.calls.tg[1].at - api.calls.tg[0].at >= 950, 'повтор не раньше retry_after');
+    assert.ok(sentOf(dir).includes(`DDD|${ddd.fdate}`));
+  } finally { await api.close(); }
+});
+await okAsync('notify: повторный 429 и запрет длиннее минуты — без ожидания, позиция ждёт следующего прогона', async () => {
+  const dir = seededDir('data-429x');
+  const eee = nRow('EEE', nDay(-1), 'Smith John', 3e5), fff = nRow('FFF', nDay(-2), 'Lee Anna', 3e5);
+  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), eee, fff]);
+  const api = await fakeApis([TG_429(1), TG_429(1), TG_429(3600)]);
+  try {
+    const t0 = Date.now();
+    const r = await liveNotify(dir, api.base);
+    assert.notEqual(r.code, 0);
+    assert.equal(api.calls.tg.length, 3, 'EEE: запрос и один повтор; FFF: запрос без повтора');
+    assert.ok(Date.now() - t0 < 30000, 'час ожидания не берётся');
+    assert.ok(!sentOf(dir).includes(`EEE|${eee.fdate}`) && !sentOf(dir).includes(`FFF|${fff.fdate}`));
+  } finally { await api.close(); }
+});
+await okAsync('notify: сводка помечает отправленными все свои позиции и несёт ключ состава', async () => {
+  const dir = seededDir('data-digest');
+  const five = ['G1', 'G2', 'G3', 'G4', 'G5'].map((t, i) => nRow(t, nDay(-1), 'Buyer ' + i, 1e5 * (i + 1)));
+  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), ...five]);
+  const api = await fakeApis([]);
+  try {
+    const r = await liveNotify(dir, api.base);
+    assert.equal(r.code, 0, r.out);
+    assert.equal(api.calls.tg.length, 1);
+    assert.match(api.calls.nexus[0].eventId, /^840\|digest\|[0-9a-f]{16}$/);
+    for (const p of five) assert.ok(sentOf(dir).includes(`${p.t}|${p.fdate}`), p.t);
+  } finally { await api.close(); }
 });
 rmSync(NTMP, { recursive: true, force: true });
 
