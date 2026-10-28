@@ -76,6 +76,12 @@ async function tg(payload) {
       console.error(`[notify] Telegram 429 с запретом на ${r.retryAfter} с — в этом прогоне не ждём`);
     }
   }
+  // Разметку Telegram не разобрал — тот же текст простым: сообщение важнее шрифта (стандарт 29.10.2026).
+  if (!r.ok && r.status === 400 && /can't parse entities/i.test(r.why)) {
+    console.error(`[notify] Telegram не разобрал разметку — повтор простым текстом (${r.why.slice(0, 120)})`);
+    const text = plain(payload.text).replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+    r = await tgOnce({ ...payload, text, parse_mode: undefined });
+  }
   if (!r.ok) console.error(`[notify] Telegram не принял сообщение — ${r.why}`);
   return r.ok;
 }
@@ -126,18 +132,47 @@ async function send(text, markup, eventId) {
   return outcome;
 }
 
-// ---------- форматирование ----------
+// ---------- форматирование (единый стиль сообщений панелей, 29.10.2026) ----------
+// Пометка панели — первым словом заголовка, как на карточке хаба NEXUS. Числа — по-русски: запятая,
+// «−», разряды неразрывным пробелом с 10 000 (четырёхзначные слитно), «$» перед числом, процент
+// слитно. Даты — «27.10», год — только не текущий; время — по Москве с пометкой «МСК».
+const PANEL_TAG = 'Инсайдерский радар';
+const NBSP = ' ';
+const MINUS = '−';
+const MSK_MS = 3 * 3600e3;
 const today = isoToday();
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const MONTHS = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+// Одна функция на число: digits — знаков после запятой; fixed — держать нули («$22,70»); sign — «+».
+function fmtNum(x, digits = 1, { fixed = false, sign = false } = {}) {
+  if (!Number.isFinite(x)) return '—';
+  const [int, frac = ''] = Math.abs(x).toFixed(digits).split('.');
+  const tail = fixed ? frac : frac.replace(/0+$/, '');
+  const zero = /^0*$/.test(int + tail);
+  const body = (int.length >= 5 ? int.replace(/\B(?=(\d{3})+$)/g, NBSP) : int) + (tail ? ',' + tail : '');
+  return (zero ? '' : x < 0 ? MINUS : sign ? '+' : '') + body;
+}
+const p2 = n => String(n).padStart(2, '0');
+const mskYear = () => new Date(Date.now() + MSK_MS).getUTCFullYear();
+// «2026-10-27» -> «27.10»; дата не текущего года — с годом: «26.01.2027».
 function fmtDate(iso) {
   if (!/^\d{4}-\d{2}-\d{2}/.test(iso ?? '')) return '';
   const [y, m, d] = iso.slice(0, 10).split('-').map(Number);
-  return `${d} ${MONTHS[m - 1]}` + (String(y) === today.slice(0, 4) ? '' : ` ${y}`);
+  return `${p2(d)}.${p2(m)}` + (y === mskYear() ? '' : `.${y}`);
 }
-const money = v => v >= 1e6 ? '$' + (v / 1e6).toFixed(v >= 1e7 ? 0 : 1) + ' млн' : '$' + Math.round(v / 1e3) + ' тыс.';
-const price = p => p == null ? '—' : '$' + (p >= 10 ? p.toFixed(2) : p.toFixed(3));
-const signed = x => (x >= 0 ? '+' : '−') + Math.abs(x * 100).toFixed(1) + '%';
+// Момент по Москве: «29.10, 09:15 МСК».
+function fmtMoment(ms) {
+  const d = new Date(ms + MSK_MS);
+  return `${p2(d.getUTCDate())}.${p2(d.getUTCMonth() + 1)}${d.getUTCFullYear() === mskYear() ? '' : '.' + d.getUTCFullYear()}, ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())} МСК`;
+}
+const money = v => v >= 1e6 ? `$${fmtNum(v / 1e6, v >= 1e7 ? 0 : 1)}${NBSP}млн` : `$${fmtNum(v / 1e3, 0)}${NBSP}тыс.`;
+// Цена — два знака; у бумаг дешевле доллара — три, иначе «$0,00» не отличить от нуля.
+const price = p => p == null ? '—' : '$' + fmtNum(p, p >= 1 ? 2 : 3, { fixed: true });
+const signed = x => fmtNum(x * 100, 1, { fixed: true, sign: true }).replace(/^(?=\d)/, '+') + '%';
+const pct = x => fmtNum(x, 1, { fixed: true }) + '%';
+// Заголовок и подвал — одни на все сообщения панели: «<эмодзи> Панель · событие» и
+// «Открыть панель · время МСК». У событий радара своего времени нет — в подвале время прогона.
+const head = (emoji, title) => `${emoji} <b>${esc(PANEL_TAG)} · ${title}</b>`;
+const footer = () => `<a href="${SITE_URL}">Открыть панель</a> · ${fmtMoment(Date.now())}`;
 const ROLE = { F: 'CFO', C: 'CEO', O: 'топ-менеджер', D: 'директор', T: 'владелец 10%+', X: 'инсайдер' };
 const ROMAN = /^(?:I{1,3}|IV|VI{0,3}|IX|X)$/;
 const FORCE = { LTD: 'Ltd', LTDA: 'Ltda' };   // юрформы без гласных, которые всё же не аббревиатуры
@@ -165,13 +200,12 @@ if (args.includes('--test')) {
     process.exit(1);
   }
   const ok = 'sent' === await send(
-    '✅ <b>Инсайдерский радар</b> — связка работает.\n\n'
-    + 'Сюда приходит ровно одно событие: <b>в рабочем наборе открылась новая позиция</b> — '
-    + 'инсайдер купил на существенную сумму у 52-недельного максимума в ликвидной бумаге.\n\n'
+    head('ℹ️', 'Проверка связи') + '\n'
+    + 'Связка работает. Сюда приходит ровно одно событие: <b>в рабочем наборе открылась новая позиция</b> — '
+    + 'инсайдер купил на существенную сумму у 52-недельного максимума в ликвидной бумаге.\n'
     + 'Повторные покупки в уже открытой позиции не присылаются: входить второй раз не нужно. '
     + 'В тихие недели писем не будет вовсе — набор даёт около восьми сигналов в месяц, '
-    + 'а в отдельные месяцы не даёт ни одного.',
-    { inline_keyboard: [[{ text: 'Открыть радар', url: SITE_URL }]] });
+    + 'а в отдельные месяцы не даёт ни одного.\n\n' + footer());
   if (ok) console.log('[notify] тестовое сообщение отправлено');
   process.exit(ok ? 0 : 1);
 }
@@ -232,18 +266,20 @@ const positions = allPositions.filter(p => p.first >= freshCut);
 // дальше по одному факту на строку в порядке убывания важности, в конце — что делать и когда.
 // Постоянных пояснений про стратегию в письме нет: они не меняются от письма к письму и
 // быстро превращаются в шум, их место — на дашборде.
-function card(p) {
+// Каркас — общий стандарт сообщений: заголовок «🔔 Инсайдерский радар · ТИКЕР — новая позиция»
+// (новая позиция в рабочем наборе — главное событие панели), факты, срок, подвал со ссылкой и
+// временем. Эмодзи одна — в заголовке.
+function card(p, note = '') {
   const r = p.lead;
   const many = p.who.length > 1;
   const dd = Math.abs((r.dd ?? 0) * 100);
   const lines = [
-    `📈 <b>${esc(p.t)}</b> — новая позиция`,
+    head('🔔', `${esc(p.t)} — новая позиция`),
     `<i>${esc(nameCase(p.name))}</i>`,
-    '',
     `${many ? 'Покупатели' : 'Покупатель'}: ${esc(nameCase(p.who[0] ?? '—'))}`
       + ` (${ROLE[r.role] ?? esc(r.role)})` + (many ? ` и ещё ${p.who.length - 1}` : ''),
-    `Куплено на ${money(p.val)} по ${p.rows.length > 1 ? '~' : ''}${price(p.px)}`,
-    `${dd < 0.5 ? 'Прямо на 52-недельном максимуме' : `На ${dd.toFixed(1)}% ниже 52-недельного максимума`}`
+    `Куплено на <b>${money(p.val)}</b> по ${p.rows.length > 1 ? '~' : ''}${price(p.px)}`,
+    `${dd < 0.5 ? 'Прямо на 52-недельном максимуме' : `На ${pct(dd)} ниже 52-недельного максимума`}`
       + `, оборот ${money(r.dv ?? 0)} в день`,
   ];
   // Изменение считается от цены ВХОДА (закрытие первого торгового дня после подачи), а не от
@@ -251,32 +287,49 @@ function card(p) {
   // ÷ цена сделки» дало бы другой знак. Поэтому цена входа стоит рядом с числом, а не
   // подразумевается. Пока входа нет (форма подана сегодня) — показываем только цену.
   if (r.entryPx && r.cur) {
-    lines.push(`Вход ${price(r.entryPx)} → сейчас ${price(r.cur)}`
+    lines.push(`Вход ${price(r.entryPx)} → сейчас <b>${price(r.cur)}</b>`
       + (r.chg != null && Math.abs(r.chg) >= 0.005 ? ` (${signed(r.chg)})` : ''));
   } else if (r.cur) {
-    lines.push(`Сейчас ${price(r.cur)}`);
+    lines.push(`Сейчас <b>${price(r.cur)}</b>`);
   }
-  lines.push('');
-  lines.push(`🗓 Подача ${fmtDate(p.first)} · вход до ${fmtDate(p.deadline)} · выход ${fmtDate(p.exit)}`);
+  lines.push(`Подача ${fmtDate(p.first)} · вход до ${fmtDate(p.deadline)} · выход ${fmtDate(p.exit)}`);
+  if (note) lines.push('', note);
+  lines.push('', footer());
   return lines.join('\n');
 }
 
 // Когда позиций много (после простоя или редкого «залпа»), пять карточек подряд — уже не
-// сигнал, а лента. Тогда шлём одну сводку строками.
-function digest(list) {
-  const head = `📈 <b>Рабочий набор: ${plural(list.length, 'новая позиция', 'новые позиции', 'новых позиций')}</b>`;
-  const rows = list.map(p => {
-    const dd = Math.abs((p.lead.dd ?? 0) * 100);
-    return `<b>${esc(p.t)}</b> · ${money(p.val)} · ${dd < 0.5 ? 'у максимума' : `−${dd.toFixed(1)}% от максимума`}`
-      + ` · вход до ${fmtDate(p.deadline)}`;
-  });
-  return [head, '', ...rows, '', 'Держать три месяца от подачи, доли равные.'].join('\n');
+// сигнал, а лента. Тогда шлём одну сводку: заголовок «Панель · N новых позиций», дальше блоки по
+// позиции через пустую строку, у каждого своя жирная первая строка. Сводка длиннее предела
+// Telegram режется по границе блока на несколько сообщений «(1/2)», «(2/2)»; блок не рвётся.
+const TG_TEXT_LIMIT = 4000;
+function digestBlock(p) {
+  const dd = Math.abs((p.lead.dd ?? 0) * 100);
+  return `<b>${esc(p.t)}</b> · ${esc(nameCase(p.name))}\n`
+    + `${money(p.val)} · ${dd < 0.5 ? 'у максимума' : `${MINUS}${pct(dd)} от максимума`} · вход до ${fmtDate(p.deadline)}`;
+}
+function digests(list) {
+  const title = plural(list.length, 'новая позиция', 'новые позиции', 'новых позиций');
+  const tail = ['Держать три месяца от подачи, доли равные.', footer()].join('\n\n');
+  const room = TG_TEXT_LIMIT - tail.length - 120;
+  const chunks = [[]];
+  let size = 0;
+  for (const p of list) {
+    const b = digestBlock(p);
+    if (chunks.at(-1).length && size + b.length + 2 > room) { chunks.push([]); size = 0; }
+    chunks.at(-1).push({ p, b });
+    size += b.length + 2;
+  }
+  return chunks.map((c, k) => ({
+    list: c.map(x => x.p),
+    text: [head('🔔', title + (chunks.length > 1 ? ` (${k + 1}/${chunks.length})` : '')), ...c.map(x => x.b), tail].join('\n\n'),
+  }));
 }
 
+// Ссылка на панель — в подвале; кнопка ведёт прямо в карточку бумаги.
 const kb = p => ({
   inline_keyboard: [[
     { text: `Карточка ${p.t}`, url: `${SITE_URL}#ticker/${encodeURIComponent(p.t)}` },
-    { text: 'Все позиции', url: SITE_URL },
   ]],
 });
 
@@ -286,7 +339,7 @@ if (PREVIEW) {
   const p = allPositions[0];
   // Оговорка обязательна в обоих каналах: карточка предпросмотра неотличима от боевой,
   // и без пометки она читается на хабе как новый сигнал.
-  const text = card(p) + '\n\n<i>Это образец формата, а не новый сигнал.</i>';
+  const text = card(p, '<i>Это образец формата, а не новый сигнал.</i>');
   if (DRY) { console.log('\n' + plain(text)); process.exit(0); }
   const ok = 'sent' === await send(text, kb(p));
   console.log(ok ? '[notify] предпросмотр отправлен' : '[notify] предпросмотр в чат НЕ отправлен');
@@ -330,9 +383,10 @@ console.log(`[notify] новых позиций: ${fresh.length}`);
 // хабе ляжет на прежнюю запись. У сводки ключ — отпечаток её состава.
 const MAX_CARDS = 4;
 const digestId = list => '840|digest|' + createHash('sha256').update(list.map(posId).sort().join('\n')).digest('hex').slice(0, 16);
+// Сводка, разрезанная на части, несёт ключ состава КАЖДОЙ части; обычная сводка — одна часть, и её
+// ключ тот же, что раньше (состав всей сводки).
 const messages = fresh.length > MAX_CARDS
-  ? [{ text: digest(fresh), markup: { inline_keyboard: [[{ text: 'Открыть скринер', url: SITE_URL }]] },
-      ids: fresh.map(posId), eventId: digestId(fresh) }]
+  ? digests(fresh).map(d => ({ text: d.text, markup: undefined, ids: d.list.map(posId), eventId: digestId(d.list) }))
   : fresh.map(p => ({ text: card(p), markup: kb(p), ids: [posId(p)], eventId: `840|${posId(p)}` }));
 
 if (DRY) {
