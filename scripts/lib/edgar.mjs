@@ -9,6 +9,10 @@ import { zipExtract } from './zip.mjs';
 import { rowFootnoteFlags, fnIds } from './footnotes.mjs';
 
 export const SHARD_VERSION = 3;
+// Ревизия разбора уже собранных строк (сноски, даты). Рост номера НЕ сбрасывает шард и не задерживает
+// сегодняшний день: live.mjs перечитывает окно [from, lastDay] в остаток бюджета (state.reread) и
+// замещает строки подач свежим разбором. 1 — разбор до 11.2026.
+export const PARSER_REV = 1;
 
 // Остаток владения (SHRS_OWND_FOLWNG_TRANS) относится к КОНКРЕТНОЙ форме владения, а не
 // к лицу: прямой пакет и пакет «через траст» — разные счётчики. Строки одной подачи мы
@@ -190,24 +194,40 @@ export async function fetchQuarter(q) {
 
 // ---- Живой контур: daily-index ----
 
+// Строка form.idx: «Form Type | Company Name | CIK | Date Filed | File Name» колонками фиксированной
+// ширины. Резать по «2+ пробела» нельзя: в именах подателей встречается двойной пробел
+// («DANIELS  ROBERT P», «MURDOCH  KEITH RUPERT») — колонки съезжают, путь превращается в дату и уходит
+// в 404 (17 строк за 65 дней в 08–11.2026). Поэтому поля берутся с КОНЦА строки: путь, дата, CIK.
+const IDX_LINE_RE = /^(4|4\/A)\s{2,}.*?\s(\d{1,10})\s+(\d{8}|\d{4}-\d{2}-\d{2})\s+(edgar\/data\/\S+\.txt)\s*$/;
+export const accOfPath = p => /(\d{10}-\d{2}-\d{6})\.txt$/.exec(p ?? '')?.[1] ?? String(p ?? '').replace(/^.*\//, '').replace(/\.txt$/, '');
 export function parseFormIdx(text) {
   const out = [];
   for (const line of text.split('\n')) {
-    const m = /^(4|4\/A)\s{2,}/.exec(line);
+    const m = IDX_LINE_RE.exec(line.replace(/\r$/, ''));
     if (!m) continue;
-    const parts = line.trim().split(/\s{2,}/);
-    if (parts.length < 5) continue; // Form Type | Company | CIK | Date Filed | File Name
-    out.push({ form: parts[0], cik: Number(parts[2]), path: parts[4].trim() });
+    out.push({ form: m[1], cik: Number(m[2]), path: m[4], acc: accOfPath(m[4]) });
   }
   return out;
 }
+// Одна подача стоит в индексе по строке на эмитента и на каждого подателя (в среднем 2,08 строки):
+// качать её нужно один раз. Порядок — первое вхождение.
+export function uniqueFilings(entries) {
+  const byAcc = new Map();
+  for (const e of entries ?? []) if (!byAcc.has(e.acc)) byAcc.set(e.acc, e);
+  return [...byAcc.values()];
+}
 
-export async function fetchDayIndex(iso) {
+// Корень архива EDGAR. Переопределяется только самотестами (EDGAR_BASE — локальный сервер).
+export const edgarBase = () => process.env.EDGAR_BASE ?? 'https://www.sec.gov';
+
+// Дневной индекс. entries === null — файла нет (праздник или ещё не вышел: SEC отвечает 403 хранилища).
+// Сбой сети, 5xx и лимит SEC после повторов — исключение: «индекса нет» и «не достучались» — разные вещи.
+export async function fetchDayIndex(iso, { retries = 4 } = {}) {
   const [y, m, d] = iso.split('-');
   const qtr = 'QTR' + Math.ceil(Number(m) / 3);
-  const url = `https://www.sec.gov/Archives/edgar/daily-index/${y}/${qtr}/form.${y}${m}${d}.idx`;
-  const { status, body } = await politeFetch(url, { as: 'text' });
-  if (!body) return { status, entries: null }; // 403/404 = выходной или ещё не опубликован
+  const url = `${edgarBase()}/Archives/edgar/daily-index/${y}/${qtr}/form.${y}${m}${d}.idx`;
+  const { status, body } = await politeFetch(url, { as: 'text', retries });
+  if (!body) return { status, entries: null };
   return { status, entries: parseFormIdx(body) };
 }
 
@@ -231,6 +251,15 @@ function allBlocks(xml, name) {
   return out;
 }
 function boolVal(s) { return s === '1' || s === 'true'; }
+// Дата XML-формы иногда приходит со смещением пояса: «2026-10-28-05:00» (агенты 0001477932 и 0001654954 —
+// NEGG, ASPI, COSM, FONR, EML). Это та же календарная дата; раньше строка не проходила isIsoDate и
+// транзакция выбрасывалась целиком. Возвращает «ГГГГ-ММ-ДД» или исходную строку без изменений.
+export function normalizeXmlDate(s) {
+  if (s === null || s === undefined) return s;
+  const t = String(s).trim();
+  const m = /^(\d{4}-\d{2}-\d{2})(?:T[\d:.]+)?(?:Z|[+-]\d{2}:?\d{2})$/.exec(t);
+  return m ? m[1] : t;
+}
 function unescapeXml(s) {
   return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
     .replace(/&apos;/g, "'").replace(/&#\d+;/g, ' ').replace(/&amp;/g, '&');
@@ -268,7 +297,7 @@ export function parseForm4Txt(txt, acc, fdate) {
   const t = (tag(issuer, 'issuerTradingSymbol') || '').trim().toUpperCase();
   const b5 = boolVal(tagVal(xml, 'aff10b5One')) ? 1 : 0;
   const at = acceptedAt(txt.slice(0, xm.index));
-  const orig = tagVal(xml, 'dateOfOriginalSubmission');
+  const orig = normalizeXmlDate(tagVal(xml, 'dateOfOriginalSubmission'));
   const remarks = unescapeXml(tag(xml, 'remarks') || '');
 
   const owners = allBlocks(xml, 'reportingOwner').map(o => {
@@ -306,7 +335,7 @@ export function parseForm4Txt(txt, acc, fdate) {
     if (code !== 'P' && code !== 'S') continue;
     rows++;
     if (boolVal(tag(coding, 'equitySwapInvolved'))) continue;
-    const tdate = tagVal(tr, 'transactionDate');
+    const tdate = normalizeXmlDate(tagVal(tr, 'transactionDate'));
     const amounts = tag(tr, 'transactionAmounts') ?? '';
     const sh = num(tagVal(amounts, 'transactionShares'));
     const px = num(tagVal(amounts, 'transactionPricePerShare'));
@@ -360,8 +389,9 @@ export function parseForm4Txt(txt, acc, fdate) {
   return { trades, amend };
 }
 
-export async function fetchFiling(path) {
-  const { body } = await politeFetch(`https://www.sec.gov/Archives/${path}`, { as: 'text' });
+// Полный .txt подачи; null — подачи нет (404). Сбой и лимит SEC — исключение.
+export async function fetchFiling(path, { retries = 4 } = {}) {
+  const { body } = await politeFetch(`${edgarBase()}/Archives/${path}`, { as: 'text', retries });
   return body;
 }
 
