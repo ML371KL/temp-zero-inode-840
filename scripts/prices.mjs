@@ -15,7 +15,7 @@ import { fetchTickerRef } from './lib/edgar.mjs';
 import { OPENS_FROM, OPENS_BENCH, readOpens, writeOpens, pickOpens, mergeOpens } from './lib/opens.mjs';
 import { fetchYahooDaily, fetchStooqDaily, readPriceCache, writePriceCache, hasPriceCache, listedThrough } from './lib/prices.mjs';
 import { fetchSymbolRanges, writeSymbolRanges, loadSymbolRanges } from './lib/symbols.mjs';
-import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
+import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker, exchangeCounts } from './lib/universe.mjs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -204,6 +204,9 @@ writeJson(qPath, {
   droppedBarsLastRun: quality.droppedBars,
   dirtySeriesLastRun: quality.dirtySeries,
   exchangesLastRun: quality.exchanges,
+  // Эмитенты справочника SEC по биржам: новая площадка (как TXSE в 2026) видна здесь сразу
+  issuerExchanges: exchangeCounts(ref),
 }, true);
+console.log(`[prices] эмитенты справочника по биржам: ${Object.entries(exchangeCounts(ref)).map(([k, v]) => `${k} ${v}`).join(', ')}`);
 console.log(`[prices] готово: обновлено ${ok}, сохранён кэш ${kept}, нет данных ${miss}, бюджет ${budgetOut ? 'ИСЧЕРПАН (нужен ещё прогон)' : 'ок'}`);
 console.log(`[prices] гигиена: отвергнуто как чужой инструмент ${Object.keys(quality.rejectedMeta).length}, снято выбросов ${quality.droppedBars} в ${quality.dirtySeries} рядах`);

@@ -23,6 +23,9 @@ const DATA = argVal('--data', 'data');
 const BUDGET_MS = Number(argVal('--time-budget-min', '300')) * 60000;
 const REREAD_BUDGET_MS = Number(argVal('--reread-budget-min', '25')) * 60000;
 const RETRIES = Number(argVal('--retries', '4'));
+// Фоновое перечитывание качает в несколько потоков: общий троттлинг по хосту (lib/util.mjs) всё равно
+// держит не больше ~7 запросов в секунду к SEC, а очередь окна — десятки тысяч подач.
+const REREAD_CONCURRENCY = Number(argVal('--reread-concurrency', '4'));
 const today = argVal('--today', isoToday());   // --today — только для самотестов и ручной проверки
 const started = Date.now();
 const nowIso = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z');
@@ -93,6 +96,14 @@ function ingest(txt, acc, fdate, { replace = false } = {}) {
   }
   for (const a of parsed.amend) if (replace || !amendByAcc.has(a.acc)) amendByAcc.set(a.acc, a);
   return parsed.trades.length;
+}
+
+// Простой пул: fn по элементам, не больше n одновременно; stop() — прекратить выдачу новых.
+async function pool(items, n, fn, stop = () => false) {
+  let i = 0;
+  const worker = async () => { while (i < items.length && !stop()) { const k = i++; await fn(items[k]); } };
+  await Promise.all(Array.from({ length: Math.max(1, n) }, worker));
+  return i >= items.length;
 }
 
 // Скачать подачу по любому из её путей (под CIK эмитента и под CIK каждого подателя).
@@ -265,35 +276,40 @@ async function run() {
 
   // ---------- 4. фоновое перечитывание после исправления парсера ----------
   // PARSER_REV растёт, когда меняется разбор уже собранных строк (сноски, даты). Окно [from, lastDay]
-  // перечитывается в остаток бюджета, НЕ задерживая сегодняшний день: он уже собран выше.
+  // перечитывается в остаток бюджета, НЕ задерживая сегодняшний день: он уже собран выше. Идём от свежих
+  // дней к старым: торговое окно (утренний список, счётчик) получает новый разбор первым.
+  // cursor — последний ещё НЕ перечитанный день; окно пройдено, когда он раньше from.
   if ((state.parserRev ?? 1) < PARSER_REV && !state.reread) {
-    state.reread = { rev: PARSER_REV, to: lastCompleted ?? from, cursor: addDaysIso(from, -1) };
+    state.reread = { rev: PARSER_REV, to: lastCompleted ?? from, cursor: lastCompleted ?? from };
     console.log(`[live] парсер ${state.parserRev ?? 1} → ${PARSER_REV}: перечитываю ${from}…${state.reread.to} в фоне`);
   }
-  if (state.reread) {
+  // Прогон, собравший новый день, окно не перечитывает: его ждут список, письмо и сборка (03:25 UTC на GitHub,
+  // 22:03 ET на VPS), а перечитывание — до 25 минут. Окно перечитывают прогоны без нового дня (расписание
+  // GitHub после утреннего, повторные запуски); ночная сборка на VPS к тому же передаёт --reread-budget-min 0.
+  if (state.reread && daysDone > 0) console.log('[live] перечитывание окна отложено: в этом прогоне собран новый день');
+  else if (state.reread) {
     const rr = state.reread;
     const rStart = Date.now();
-    let d = addDaysIso(rr.cursor, 1), n = 0;
-    if (d < from) d = from;   // окно могло сдвинуться вперёд после загрузки квартала
-    while (d <= rr.to && Date.now() - rStart < REREAD_BUDGET_MS && !overBudget()) {
-      if (isWeekend(d)) { rr.cursor = d; d = addDaysIso(d, 1); continue; }
+    let d = rr.cursor, n = 0;
+    // окно могло сдвинуться вперёд после загрузки квартала: дни раньше from не перечитываем
+    while (d >= from && Date.now() - rStart < REREAD_BUDGET_MS && !overBudget()) {
+      if (isWeekend(d)) { d = addDaysIso(d, -1); rr.cursor = d; continue; }
       let entries = null;
       try { ({ entries } = await fetchDayIndex(d, { retries: RETRIES })); } catch (e) { console.log(`[live] перечитывание: ${d} — ${e.message}, продолжу позже`); break; }
       if (entries) {
         const paths = new Map();
         for (const e of entries) (paths.get(e.acc) ?? paths.set(e.acc, []).get(e.acc)).push(e.path);
-        let ok = true;
-        for (const f of uniqueFilings(entries)) {
-          if (Date.now() - rStart >= REREAD_BUDGET_MS || overBudget()) { ok = false; break; }
+        const stopNow = () => Date.now() - rStart >= REREAD_BUDGET_MS || overBudget();
+        const ok = await pool(uniqueFilings(entries), REREAD_CONCURRENCY, async f => {
           const res = await download(paths.get(f.acc));
           if (res.txt) { ingest(res.txt, f.acc, d, { replace: true }); n++; }
-        }
+        }, stopNow);
         if (!ok) break;   // день не дочитан — продолжим с него
       }
-      rr.cursor = d; d = addDaysIso(d, 1);
+      d = addDaysIso(d, -1); rr.cursor = d;
     }
-    if (rr.cursor >= rr.to) { state.parserRev = rr.rev; delete state.reread; console.log(`[live] перечитывание окна закончено, парсер ${rr.rev}`); }
-    else console.log(`[live] перечитано подач ${n}, дошёл до ${rr.cursor} из ${rr.to}`);
+    if (rr.cursor < from) { state.parserRev = rr.rev; delete state.reread; console.log(`[live] перечитывание окна закончено, парсер ${rr.rev}`); }
+    else console.log(`[live] перечитано подач ${n}, осталось ${from}…${rr.cursor} (окно до ${rr.to})`);
   }
 }
 
