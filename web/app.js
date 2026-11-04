@@ -222,14 +222,14 @@ export const MTAG = {
   big:  ['≥$1 млн', 'gray', 'Покупки дня на сумму от $1 млн: чем крупнее сумма, тем сильнее эффект'],
 };
 const SKIP = {
-  noopen: 'нет открытия — сделка пропущена', noclose: 'нет закрытия — сделка пропущена', nobench: 'нет данных по IWM — сделка пропущена',
+  noopen: 'нет открытия — сделка пропущена', noclose: 'нет закрытия — сделка пропущена', nobench: 'нет данных по IWM или SPY — сделка пропущена',
   frozen: 'открытие ровно равно вчерашнему закрытию — котировка застыла, сделка пропущена',
   px: 'открытие ниже $5 — сделка пропущена',
 };
 const MONTH_NOM = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
 const monthRu = ym => { const [y, m] = String(ym).split('-'); return `${MONTH_NOM[Number(m) - 1] ?? ym} ${y}`; };
 
-let mLevel = 30, mDay = null;
+let mView = 'main', mDay = null;       // main — основной список (скор ≥2), all — все от $10 млн
 async function loadMorning() {
   if (!state.morning) {
     try { state.morning = await fetchJson('morning.json'); }
@@ -243,7 +243,7 @@ for (const b of document.querySelectorAll('#m-level .chip')) {
   b.addEventListener('click', () => {
     for (const x of document.querySelectorAll('#m-level .chip')) x.classList.remove('active');
     b.classList.add('active');
-    mLevel = Number(b.dataset.lvl);
+    mView = b.dataset.view;
     if (state.morning) renderMorning();
   });
 }
@@ -253,7 +253,9 @@ $('#m-day').addEventListener('change', e => {
   if (state.morning) { renderMorning(); pollLive({ force: true }); }
 });
 
-const lvlRows = day => (day?.rows ?? []).filter(x => mLevel === 30 ? x.lvl === 30 : true);
+// Основной вид — только скор ≥2, остальные от $10 млн уходят в свёрнутый блок ниже; «все» — одним списком по скору
+const viewRows = day => (day?.rows ?? []).filter(x => mView === 'all' || x.main);
+const restRows = day => mView === 'main' ? (day?.rows ?? []).filter(x => !x.main) : [];
 // Денежная сумма со знаком: +$5.4 тыс. (в таблицах панели десятичная точка)
 const sgnMoney = v => {
   if (v === null || v === undefined || !Number.isFinite(v)) return '—';
@@ -328,34 +330,42 @@ addEventListener('visibilitychange', () => {
   else stopLive();
 });
 
-// Полоса живого счётчика: те же числа, что в ревизии, но по спискам, опубликованным с запуска.
-// Тест по дням — сделки одного дня не независимы (общий рынок), поэтому t считается по средним дням.
+// Полоса живого счётчика: те же числа, что в проверке, но по спискам, опубликованным с запуска.
+// Две строки — к IWM и к S&P: внутри дня IWM отстаёт от S&P, и в живом периоде разница доходит до
+// половины перевеса, поэтому показываем оба эталона сразу. Тест по дням — сделки одного дня не
+// независимы (общий рынок), поэтому t считается по средним дням. Издержки у каждой сделки свои.
 function renderCounter() {
-  const c = state.morning.counter, s = mLevel === 30 ? c.l30 : c.l10;
-  const head = `<div class="strip-head"><b>Живой счётчик</b> с ${esc(fmtDate(c.from))} · открытие → закрытие D+1, к IWM`
-    + `${c.upTo ? ' · по ' + esc(fmtDate(c.upTo)) : ''}</div>`;
+  const c = state.morning.counter, s = mView === 'main' ? c.main : c.all;
+  const head = `<div class="strip-head"><b>Живой счётчик</b> с ${esc(fmtDate(c.from))} · ${mView === 'main' ? 'основной список' : 'все от $10 млн'}`
+    + ` · открытие → закрытие D+1${c.upTo ? ' · по ' + esc(fmtDate(c.upTo)) : ''}`
+    + `${s?.n ? ' · ' + plural(s.n, 'сделка', 'сделки', 'сделок') + ' за ' + plural(s.days, 'день', 'дня', 'дней') : ''}</div>`;
   if (!s?.n) {
     $('#m-counter').innerHTML = head + '<div class="strip-empty">Сделок пока нет — первый результат появится после первого торгового дня по спискам.</div>';
     return;
   }
-  const cell = (v, lab, hint, klass = '') => `<div class="sc" title="${esc(hint)}"><b class="${klass}">${v}</b><span>${esc(lab)}</span></div>`;
-  const tStrong = s.tDays !== null && s.tDays !== undefined && Math.abs(s.tDays) >= 2;
   const stake = state.morning.params?.stake ?? 1e4;
-  $('#m-counter').innerHTML = head + '<div class="strip-cells">'
-    + cell(String(s.n), 'сделок', `За ${plural(s.days, 'торговый день', 'торговых дня', 'торговых дней')}; одна сделка на бумагу в день`)
-    + cell(fmtPct(s.mean, 2), 'среднее к IWM', 'Доходность открытие → закрытие минус внутридневная доходность IWM того же дня', cls(s.mean))
-    + cell(fmtPct(s.median, 2), 'медиана', 'Медианная сделка: распределение скошено, среднее держат немногие крупные выигрыши', cls(s.median))
-    + cell(Math.round(s.win * 100) + '%', 'в плюсе', 'Доля сделок, обогнавших IWM в тот же день')
-    + cell(s.tDays === null || s.tDays === undefined ? '—' : String(s.tDays), 't по дням',
-      'Среднее за день, затем t-статистика по дням. От нуля отличимо при |t| ≥ 2', tStrong ? cls(s.tDays) : 'muted')
-    + cell(fmtPct(s.net, 2), `после ${pctPlain(c.cost, 1)} на круг`, 'Среднее за вычетом издержек на круг. Эффект исчезает при издержках около 0.2%', cls(s.net))
-    + cell(sgnMoney(s.cumNet * stake), `на ${fmtMoney(stake)} в сделке`,
-      `Итог всех ${s.n} сделок после издержек, если в каждую вложено по ${fmtMoney(stake)}. Это не доходность портфеля: сделки идут в разные дни, и одни и те же деньги работают снова и снова`, cls(s.cumNet))
-    + '</div>';
+  const co = c.costs ?? {};
+  const costHint = `Среднее за вычетом издержек каждой сделки: ${pctPlain(co.hi, 2)} на круг при обороте от ${fmtMoney(co.split ?? 3e7)}, ${pctPlain(co.lo, 2)} при обороте $10–30 млн; в среднем по сделкам ${pctPlain(s.cost, 3)}`;
+  const strong = t => (t !== null && t !== undefined && Math.abs(t) >= 2 ? cls(t) : 'muted');
+  const row = (lab, m, hint) => `<tr><td class="lab" title="${esc(hint)}">${esc(lab)}</td>`
+    + `<td class="${cls(m.mean)}">${fmtPct(m.mean, 2)}</td><td class="${cls(m.median)}">${fmtPct(m.median, 2)}</td>`
+    + `<td>${Math.round(m.win * 100)}%</td><td class="c-t ${strong(m.tDays)}">${m.tDays === null || m.tDays === undefined ? '—' : m.tDays}</td>`
+    + `<td class="${cls(m.net)}">${fmtPct(m.net, 2)}</td><td class="${cls(m.cumNet)}">${sgnMoney(m.cumNet * stake)}</td></tr>`;
+  $('#m-counter').innerHTML = head + `<table class="strip-t"><tr><th></th>`
+    + `<th title="Доходность открытие → закрытие минус внутридневная доходность эталона того же дня">среднее</th>`
+    + `<th title="Медианная сделка: распределение скошено, среднее держат немногие крупные выигрыши">медиана</th>`
+    + `<th title="Доля сделок, обогнавших эталон в тот же день">в плюсе</th>`
+    + `<th class="c-t" title="Среднее за день, затем t-статистика по дням. От нуля отличимо при |t| ≥ 2">t по дням</th>`
+    + `<th title="${esc(costHint)}">после издержек</th>`
+    + `<th title="${esc(`Итог всех ${s.n} сделок после издержек, если в каждую вложено по ${fmtMoney(stake)}. Это не доходность портфеля: сделки идут в разные дни, и одни и те же деньги работают снова и снова`)}">на ${esc(fmtMoney(stake))} в сделке</th></tr>`
+    + row('к IWM', s.iwm, 'Эталон хеджа: Russell 2000')
+    + row('к S&P', s.spy, 'Эталон рынка: SPY')
+    + '</table>';
 }
 
-// Плашка всплеска: z-оценка числа покупающих эмитентов за три месяца к 36 прошлым. Это сигнал
-// возврата в рынок для панели 837, а не повод покупать бумаги из списка. Справа — z за 60 месяцев.
+// Плашка всплеска: z-оценка числа покупающих эмитентов за три месяца к 36 прошлым. Справка: проверка
+// не доказала, что правило «возврат в рынок» выигрывает у 837 (просадка хуже, Шарп не растёт), и панель
+// перевеса не обещает. Справа — z за 60 месяцев.
 function renderSurge() {
   const b = state.stats?.breadth, box = $('#m-surge');
   if (!b) { box.innerHTML = ''; box.className = 'surge'; return; }
@@ -387,43 +397,47 @@ function dayNote(day, rows, liveOn = false) {
   if (!day.done) return day.entry ? '' : 'торги D+1 ещё не прошли';
   const res = rows.filter(x => x.ex !== undefined);
   if (!res.length) return `торги ${fmtDate(day.entry)}: результатов нет`;
-  const m = res.reduce((a, x) => a + x.ex, 0) / res.length;
+  const avg = k => res.reduce((a, x) => a + x[k], 0) / res.length;
   const up = res.filter(x => x.ex > 0).length;
-  return `торги ${fmtDate(day.entry)}: среднее ${fmtPct(m, 2)} к IWM, в плюсе ${up} из ${res.length}`;
+  return `торги ${fmtDate(day.entry)}: среднее ${fmtPct(avg('ex'), 2)} к IWM, ${fmtPct(avg('exS'), 2)} к S&P, в плюсе ${up} из ${res.length}`;
 }
 
 function renderMorning() {
   renderCounter();
   renderSurge();
   const days = state.morning.days;
-  // Выбор даты: десять последних дат подачи, число бумаг уровня в подписи
-  $('#m-day').innerHTML = days.map(d => `<option value="${esc(d.date)}"${d.date === mDay ? ' selected' : ''}>${esc(fmtDate(d.date))} · ${lvlRows(d).length}</option>`).join('');
+  // Выбор даты: десять последних дат подачи, число бумаг выбранного списка в подписи
+  $('#m-day').innerHTML = days.map(d => `<option value="${esc(d.date)}"${d.date === mDay ? ' selected' : ''}>${esc(fmtDate(d.date))} · ${viewRows(d).length}</option>`).join('');
   renderDay();
 }
 
-// Таблица выбранного дня. Отдельно от renderMorning: опрос живых цен перерисовывает только её,
-// не трогая выпадающий список даты (он закрывался бы под рукой).
-function renderDay() {
-  const days = state.morning.days;
-  const day = days.find(d => d.date === mDay) ?? null;
-  const rows = lvlRows(day);
-  const d1 = day ? nextBusinessDay(day.date) : null;
-  const liveOn = !!day && !day.done && rows.some(x => liveOf(x.t, d1));
-  const bq = liveOn ? liveOf('IWM', d1) : null;
-  $('#m-note').textContent = dayNote(day, rows, liveOn);
-  const past = !!day?.done;
+// Скор из четырёх баллов — в подсказке видно, из чего сложился
+function scoreHint(x) {
+  const p = state.morning.params ?? {};
+  const parts = [
+    x.val >= (p.scoreVal ?? 1e5) && `покупки дня от ${fmtMoney(p.scoreVal ?? 1e5)}`,
+    x.val >= (p.bigVal ?? 1e6) && `от ${fmtMoney(p.bigVal ?? 1e6)}`,
+    (x.tags ?? []).includes('off') && 'среди покупателей офицер',
+    (x.tags ?? []).includes('deep') && 'просадка глубже 30%',
+  ].filter(Boolean);
+  return `Скор ${x.score} из 4: ${parts.join(' + ') || 'ни одного условия'}`;
+}
+
+// Таблица бумаг дня: основная и свёрнутая «остальные» строятся одной функцией. liveOn/past задают
+// состав столбцов результата; d1 и bq — ожидаемый день входа и котировка IWM живого слоя.
+function dayTable(rows, { past, liveOn, d1, bq }) {
   const cols = past || liveOn;
-  $('#m-table').className = 'morning' + (liveOn ? ' live' : '');
   // Классы c-* нужны узкому экрану: «Кто», «Оборот», «Открытие» и «Закрытие» там прячутся
   const th = `<tr><th>Бумага</th><th class="c-who">Кто</th>
-    <th class="num" title="Сумма всех покупок бумаги в этот день подачи (покупки от $10 тыс., прошедшие гейты)">Сумма</th>
+    <th class="num c-score" title="Скор — сумма четырёх баллов: покупки дня от $100 тыс.; от $1 млн; среди покупателей офицер; просадка от 52-недельного максимума глубже 30%. Основной список — от 2">Скор</th>
+    <th class="num c-sum" title="Сумма всех покупок бумаги в этот день подачи (покупки от $10 тыс., прошедшие гейты)">Сумма</th>
     <th class="num c-dd" title="Насколько ниже 52-недельного максимума была цена на дату сделки">От макс.</th>
     <th class="num c-dv" title="Медианный дневной долларовый оборот бумаги за 60 торговых дней до сделки">Оборот</th>
     <th class="c-ses" title="Когда форма принята на EDGAR (время по Нью-Йорку): после закрытия — с 16:00. Ночью форм принимается больше всего (61%), и у них день D+1 сильнее: +0.34% против +0.21% у принятых в торги">Приём</th>
     <th class="c-marks">Пометки</th>${cols ? `<th class="num c-open" title="Цена открытия следующего торгового дня — вход">Открытие</th>
     <th class="num c-close" title="${liveOn ? 'Текущая цена и изменение от открытия; обновляется каждые 30 секунд, пока вкладка открыта' : 'Цена закрытия того же дня — выход'}">${liveOn ? 'Сейчас' : 'Закрытие'}</th>
     <th class="num" title="${liveOn ? 'Изменение от открытия минус изменение IWM от открытия' : 'Доходность открытие → закрытие минус доходность IWM за тот же день'}">К IWM</th>` : ''}</tr>`;
-  $('#m-table').innerHTML = th + (rows.length ? rows.map(x => {
+  return th + rows.map(x => {
     const who = x.nWho > 1 ? `${esc(trunc(x.who[0], 20))} <span class="sub2-inline">и ещё ${x.nWho - 1}</span>` : esc(trunc(x.who[0] ?? '—', 24));
     const marks = (x.tags ?? []).map(t => MTAG[t] ? `<span class="pill ${MTAG[t][1]}" title="${esc(MTAG[t][2])}">${esc(MTAG[t][0])}</span>` : '').join(' ');
     // Сделка пропущена — причина в подсказке; открытие и закрытие у такой строки пусты
@@ -438,7 +452,7 @@ function renderDay() {
       ? `<td class="num c-open muted">—</td><td class="num c-close muted">—</td>`
         + `<td class="num muted" title="${esc(SKIP[x.skip] ?? x.skip)}">пропуск</td>`
       : `<td class="num c-open">${fmtPrice(x.o)}</td><td class="num c-close">${fmtPrice(x.c)}</td>`
-        + `<td class="num ${cls(x.ex)}" title="${esc(`Сделка ${fmtPct(x.r, 2)}, IWM ${fmtPct(x.b, 2)}`)}">${fmtPct(x.ex, 2)}</td>`;
+        + `<td class="num ${cls(x.ex)}" title="${esc(`Сделка ${fmtPct(x.r, 2)}, IWM ${fmtPct(x.b, 2)}, S&P ${fmtPct(x.bs, 2)} (к S&P ${fmtPct(x.exS, 2)})`)}">${fmtPct(x.ex, 2)}</td>`;
     const sesLab = { post: 'после закрытия', rth: 'в торги', pre: 'до открытия' }[x.ses] ?? null;
     const sesTitle = x.at ? `Форма принята на EDGAR ${x.at.replace('T', ' ')} по Нью-Йорку` : 'Время приёма неизвестно';
     const roleLine = `${esc(ROLE_LABEL[x.role] ?? x.role)}${x.n > 1 ? ' · ' + plural(x.n, 'покупка', 'покупки', 'покупок') : ''}`;
@@ -448,15 +462,42 @@ function renderDay() {
         <span class="sub2 who-m">${esc(trunc(x.who[0] ?? '—', 18))}${x.nWho > 1 ? ' +' + (x.nWho - 1) : ''} · ${roleLine}</span>
         <span class="marks-m">${marks}${sesLab ? ` <span class="pill gray" title="${esc(sesTitle)}">${esc(sesLab)}</span>` : ''}</span></td>
       <td class="c-who">${who}<span class="sub2">${roleLine}</span></td>
-      <td class="num">${fmtMoney(x.val)}</td>
+      <td class="num c-score" title="${esc(scoreHint(x))}"><b>${x.score}</b></td>
+      <td class="num c-sum">${fmtMoney(x.val)}</td>
       <td class="num c-dd ${cls(x.dd)}">${fmtPct(x.dd, 0)}</td>
       <td class="num c-dv">${fmtMoney(x.dv)}</td>
       <td class="c-ses" title="${esc(sesTitle)}">${sesLab ? `${esc(x.at.slice(11, 16))}<span class="sub2">${esc(sesLab)}</span>` : '<span class="muted">—</span>'}</td>
       <td class="marks c-marks">${marks}</td>${result}</tr>`;
-  }).join('') : `<tr><td colspan="${cols ? 10 : 7}" class="empty">${days.length
-    ? 'В этот день подходящих покупок нет — список бывает пустым.' : 'Данные ещё не собраны.'}</td></tr>`);
-  $('#m-foot').innerHTML = 'Покупка на открытии следующего торгового дня, продажа на закрытии того же дня; сумма на бумагу одинаковая. '
-    + 'Почему так — на вкладке <a href="#stats">Статистика</a>.';
+  }).join('');
+}
+
+// Таблица выбранного дня. Отдельно от renderMorning: опрос живых цен перерисовывает только её,
+// не трогая выпадающий список даты (он закрывался бы под рукой).
+function renderDay() {
+  const days = state.morning.days;
+  const day = days.find(d => d.date === mDay) ?? null;
+  const rows = viewRows(day), rest = restRows(day);
+  const d1 = day ? nextBusinessDay(day.date) : null;
+  const liveOn = !!day && !day.done && [...rows, ...rest].some(x => liveOf(x.t, d1));
+  const bq = liveOn ? liveOf('IWM', d1) : null;
+  const ctx = { past: !!day?.done, liveOn, d1, bq };
+  $('#m-note').textContent = dayNote(day, rows, liveOn);
+  const live = liveOn ? ' live' : '';
+  $('#m-table').className = 'morning' + live;
+  const cols = ctx.past || liveOn;
+  $('#m-table').innerHTML = rows.length ? dayTable(rows, ctx)
+    : `<tr><td colspan="${cols ? 11 : 8}" class="empty">${days.length
+      ? (mView === 'main' ? 'В этот день бумаг основного списка нет — он бывает пустым.' : 'В этот день подходящих покупок нет.') : 'Данные ещё не собраны.'}</td></tr>`;
+  // Остальные бумаги от $10 млн (скор 0–1) — свёрнуты ниже: без других признаков покупки на $10–100 тыс. дают около нуля
+  const box = $('#m-rest-box');
+  box.hidden = !rest.length;
+  if (rest.length) {
+    $('#m-rest-sum').textContent = `Остальные бумаги от $10 млн, скор 0–1: ${rest.length}`;
+    $('#m-rest').className = 'morning' + live;
+    $('#m-rest').innerHTML = dayTable(rest, ctx);
+  }
+  $('#m-foot').innerHTML = 'Только заявки на аукционы: MOO до 9:28 и MOC до 15:50 по Нью-Йорку. Около 60% перевеса дня набирается в первые 5 минут — '
+    + 'покупка по рынку после открытия его съедает. Сумма на бумагу одинаковая. Скор и итоги проверки — на вкладке <a href="#stats">Статистика</a>.';
 }
 
 // ---------- ЛЕНТА ----------

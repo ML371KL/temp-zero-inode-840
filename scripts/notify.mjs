@@ -1,7 +1,7 @@
 // Telegram-уведомления. Повод ровно один: ВЫШЕЛ УТРЕННИЙ СПИСОК — покупки инсайдеров по подачам
 // последнего дня, которые можно купить на открытии следующего торгового дня и продать на его
-// закрытии (D+1; ревизия 04.11.2026, docs/ЧТО-РАБОТАЕТ.md). Одно письмо на дату подачи, только
-// если главный список (оборот от $30 млн в день) не пуст. Письма о позициях рабочего набора
+// закрытии (D+1; ревизия 04.11.2026 и независимая проверка, docs/ЧТО-РАБОТАЕТ.md). Одно письмо на
+// дату подачи, только если основной список (оборот от $10 млн в день, скор от 2) не пуст. Письма о позициях рабочего набора
 // «у максимума, 3 мес.» убраны: набор альфы не дал.
 //
 // Без секретов (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) в чат ничего не уходит — прод не блокирует.
@@ -193,8 +193,8 @@ if (args.includes('--test')) {
   const ok = 'sent' === await send(
     head('ℹ️', 'Проверка связи') + '\n'
     + 'Связка работает. Сюда приходит ровно одно событие: <b>утренний список</b> — покупки инсайдеров '
-    + 'по вчерашним подачам в ликвидных бумагах (оборот от $30\u00a0млн в день).\n'
-    + 'Покупка на открытии следующего торгового дня, продажа на закрытии того же дня. '
+    + 'по вчерашним подачам в ликвидных бумагах (оборот от $10\u00a0млн в день, скор от 2).\n'
+    + 'Только заявки на аукционы: MOO до 9:28 и MOC до 15:50 по Нью-Йорку. '
     + 'В дни без подходящих бумаг писем не будет.\n\n' + footer());
   if (ok) console.log('[notify] тестовое сообщение отправлено');
   process.exit(ok ? 0 : 1);
@@ -205,9 +205,9 @@ const morning = readJson(join(SITE, 'data', 'morning.json'), null);
 const statePath = join(DATA, 'state', 'notify.json');
 const state = readJson(statePath, {});
 
-// Список главного уровня (оборот от $30 млн) — то, что уходит в письмо; широкий — одной строкой.
-const mainOf = day => (day?.rows ?? []).filter(x => x.lvl === 30);
-const wideOf = day => (day?.rows ?? []).filter(x => x.lvl !== 30);
+// Основной список (оборот от $10 млн, скор от 2) — то, что уходит в письмо; остальные от $10 млн — одной строкой.
+const mainOf = day => (day?.rows ?? []).filter(x => x.main);
+const restOf = day => (day?.rows ?? []).filter(x => !x.main);
 const days = (morning?.days ?? []);                       // от свежего дня к старому
 
 // Следующий рабочий день после даты подачи (праздники не знаем): до его конца утренний список ещё
@@ -223,33 +223,34 @@ function nextBusinessDay(iso) {
 
 // ---------- сообщение ----------
 // Устройство письма: первая строка самодостаточна (в пуше видно только её), дальше — десять
-// крупнейших по сумме с пометками, правило одной строкой и строка счётчика. Объяснений про
+// лучших по скору и сумме с пометками, правило исполнения и строка счётчика. Объяснений про
 // методику в письме нет: они не меняются от письма к письму, их место — на панели.
 const TAG_LABEL = { off: 'офицер', deep: 'просадка глубже 30%', big: '≥$1\u00a0млн' };
 const TOP_N = 10;
 const signed2 = x => fmtNum(x * 100, 2, { fixed: true, sign: true }) + '%';
 function counterLine(c) {
-  const s = c?.l30;
+  const s = c?.main;
   const from = fmtDate(c?.from);
   if (!s?.n) return `Счётчик с ${from}: сделок пока нет.`;
-  return `Счётчик с ${from}: ${plural(s.n, 'сделка', 'сделки', 'сделок')}, среднее ${signed2(s.mean)} к IWM, в плюсе ${Math.round(s.win * 100)}%.`;
+  return `Счётчик с ${from}: ${plural(s.n, 'сделка', 'сделки', 'сделок')}, среднее ${signed2(s.iwm.mean)} к IWM, ${signed2(s.spy.mean)} к S&P, в плюсе ${Math.round(s.iwm.win * 100)}%.`;
 }
 function rowLine(x) {
   const marks = (x.tags ?? []).map(t => TAG_LABEL[t]).filter(Boolean);
-  return `<b>${esc(x.t)}</b> · ${esc(trunc(nameCase(x.name), 24))} · ${money(x.val)}` + (marks.length ? ` · ${marks.join(', ')}` : '');
+  return `<b>${esc(x.t)}</b> · ${esc(trunc(nameCase(x.name), 24))} · скор ${x.score} · ${money(x.val)}` + (marks.length ? ` · ${marks.join(', ')}` : '');
 }
 function trunc(s, n) { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 function morningMessage(day, counter, note = '') {
-  const main = mainOf(day), wide = wideOf(day);
+  const main = mainOf(day), rest = restOf(day);
   const lines = [
     head('🔔', 'утренний список'),
-    `Подачи за ${fmtDate(day.date)} · ${plural(main.length, 'бумага', 'бумаги', 'бумаг')}, оборот от ${money(morning?.params?.dvMain ?? 3e7)} в день`,
+    `Подачи за ${fmtDate(day.date)} · ${plural(main.length, 'бумага', 'бумаги', 'бумаг')}: оборот от ${money(morning?.params?.dvMin ?? 1e7)}, скор от ${morning?.params?.scoreMin ?? 2}`,
     '',
     ...main.slice(0, TOP_N).map(rowLine),
   ];
   if (main.length > TOP_N) lines.push(`и ещё ${main.length - TOP_N} — на панели`);
-  if (wide.length) lines.push('', `Ещё ${plural(wide.length, 'бумага', 'бумаги', 'бумаг')} с оборотом от ${money(morning?.params?.dvWide ?? 1e7)} — на панели.`);
-  lines.push('', 'Покупка на открытии, продажа на закрытии того же дня.', counterLine(counter));
+  if (rest.length) lines.push('', `Ещё ${plural(rest.length, 'бумага', 'бумаги', 'бумаг')} со скором 0–1 — на панели.`);
+  // Исполнение — только аукционы: около 60% перевеса дня набирается в первые 5 минут после открытия
+  lines.push('', 'Только заявки на аукционы: MOO до 9:28 и MOC до 15:50 по Нью-Йорку. Около 60% перевеса дня — первые 5 минут: покупка по рынку после открытия его съедает.', counterLine(counter));
   if (note) lines.push('', note);
   lines.push('', footer());
   return lines.join('\n');

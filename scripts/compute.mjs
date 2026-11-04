@@ -421,8 +421,8 @@ W('feed.json', feedRows);
 
 // ---------- Утренний список и живой счётчик (D+1) ----------
 // Главный экран панели с 11.2026. Список дня подачи — покупки, прошедшие гейты, от $10 тыс.,
-// в бумагах дороже $5 и с оборотом от $10 млн (уровень 30 — главный, 10 — широкий; витрина
-// переключает). Покупка на открытии следующего торгового дня, продажа на закрытии того же дня.
+// в бумагах дороже $5 и с оборотом от $10 млн; основной список — скор ≥2 (scripts/lib/morning.mjs),
+// остальные свёрнуты ниже. Покупка на открытии следующего торгового дня, продажа на закрытии того же дня.
 // Правила и числа ревизии — scripts/lib/morning.mjs и docs/ЧТО-РАБОТАЕТ.md. Считается по
 // покупкам с даты начала счётчика, а не по окну ленты (200 дней): счётчик копится с запуска
 // и не должен терять старые дни.
@@ -447,35 +447,38 @@ function dayWithResults(fd) {
   const rows = buildDay(dayCand.get(fd) ?? []).map(x => {
     const out = { ...x, who: x.who.slice(0, 2), nWho: x.who.length };
     if (done) {
-      const res = tradeResult(opensOf(opensStore, x.t, entry), opensOf(opensStore, 'IWM', entry));
+      const res = tradeResult(opensOf(opensStore, x.t, entry), opensOf(opensStore, 'IWM', entry), opensOf(opensStore, 'SPY', entry));
       Object.assign(out, res);
     }
     return out;
   });
   return { date: fd, entry: done ? entry : null, done, rows };
 }
-const counterTrades = { 30: [], 10: [] }, counterSkips = { 30: {}, 10: {} };
+// Счётчик: основной список (скор ≥2) и все от $10 млн; каждая сделка — сразу к IWM и к SPY,
+// издержки у каждой свои (оборот ≥$30 млн — 0,10% на круг, $10–30 млн — 0,15%).
+const counterTrades = { main: [], all: [] }, counterSkips = { main: {}, all: {} };
 for (const fd of allFdates) {
   if (fd < COUNTER_FROM) continue;
   const day = dayWithResults(fd);
   if (!day.done) continue;
   for (const row of day.rows) {
-    for (const lvl of row.lvl === 30 ? [30, 10] : [10]) {
-      if (row.skip) { counterSkips[lvl][row.skip] = (counterSkips[lvl][row.skip] ?? 0) + 1; continue; }
-      counterTrades[lvl].push({ day: day.entry, fd, t: row.t, lvl: row.lvl, r: row.r, b: row.b, ex: row.ex });
+    for (const k of row.main ? ['main', 'all'] : ['all']) {
+      if (row.skip) { counterSkips[k][row.skip] = (counterSkips[k][row.skip] ?? 0) + 1; continue; }
+      counterTrades[k].push({ day: day.entry, fd, t: row.t, score: row.score, cost: row.cost, r: row.r, b: row.b, bs: row.bs, ex: row.ex, exS: row.exS });
     }
   }
 }
 const counterOut = {
-  from: COUNTER_FROM, cost: MORNING.cost,
-  upTo: counterTrades[10].reduce((m, x) => (m === null || x.day > m ? x.day : m), null),
-  l30: { ...summarize(counterTrades[30]), skips: counterSkips[30] },
-  l10: { ...summarize(counterTrades[10]), skips: counterSkips[10] },
+  from: COUNTER_FROM,
+  costs: { hi: MORNING.costHi, lo: MORNING.costLo, split: MORNING.dvCost },
+  upTo: counterTrades.all.reduce((m, x) => (m === null || x.day > m ? x.day : m), null),
+  main: { ...summarize(counterTrades.main), skips: counterSkips.main },
+  all: { ...summarize(counterTrades.all), skips: counterSkips.all },
 };
 const morningDays = allFdates.slice(-MORNING.daysShown).reverse().map(dayWithResults);
 W('morning.json', {
   built: today, pricesAsOf: spy?.length ? spy[spy.length - 1][0] : null,
-  params: { minVal: MORNING.minVal, minPx: MORNING.minPx, dvMain: MORNING.dvMain, dvWide: MORNING.dvWide, stake: MORNING.stake },
+  params: { minVal: MORNING.minVal, minPx: MORNING.minPx, dvMin: MORNING.dvMin, dvCost: MORNING.dvCost, scoreMin: MORNING.scoreMin, costHi: MORNING.costHi, costLo: MORNING.costLo, stake: MORNING.stake },
   counter: counterOut, days: morningDays,
 });
 if (COUNTER_DUMP) writeJson(COUNTER_DUMP, counterTrades);
@@ -905,10 +908,11 @@ console.log(`[compute] без цен: ${noPriceTickers.size} тикеров; OTC
 console.log(`[compute] качество: чужой тикер ${quality.reassigned} строк в ${quality.reassignedTickers.size} тикерах; символ вне реестра ${quality.unknownSymbol}; вход невозможен ${quality.noEntry}; снято выбросов ${readStats.droppedBars} в ${readStats.dirtySeries} рядах; обрезано замороженных хвостов ${readStats.frozenBars} баров в ${readStats.frozenSeries} рядах`);
 console.log(`[compute] ремонт рядов: пересчитано по сплитам ${readStats.splitFixed}; обрезано по реестру ${readStats.clippedBars} баров в ${readStats.clippedSeries} рядах; срезано по разрыву данных ${readStats.brokenBars} баров в ${readStats.brokenSeries} рядах; устаревших рядов (не делистинг) ${stalePrices.size}`);
 {
-  const fmtSum = s => s.n ? `${s.n} сделок за ${s.days} дн., среднее ${(s.mean * 100).toFixed(2)}% к IWM, медиана ${(s.median * 100).toFixed(2)}%, в плюсе ${Math.round(s.win * 100)}%, t по дням ${s.tDays}, нетто ${(s.net * 100).toFixed(2)}%` : 'сделок нет';
+  const pc = x => (x * 100).toFixed(2) + '%';
+  const fmtSum = s => s.n ? `${s.n} сделок за ${s.days} дн., к IWM: среднее ${pc(s.iwm.mean)}, медиана ${pc(s.iwm.median)}, в плюсе ${Math.round(s.iwm.win * 100)}%, t по дням ${s.iwm.tDays}, нетто ${pc(s.iwm.net)}; к SPY: среднее ${pc(s.spy.mean)}, нетто ${pc(s.spy.net)}` : 'сделок нет';
   const lastDay = morningDays[0];
-  console.log(`[compute] утренний список ${lastDay?.date ?? '—'}: ${lastDay?.rows.length ?? 0} бумаг (из них ≥$30 млн: ${lastDay?.rows.filter(x => x.lvl === 30).length ?? 0})`);
-  console.log(`[compute] счётчик с ${COUNTER_FROM}: ≥$30 млн — ${fmtSum(counterOut.l30)}; ≥$10 млн — ${fmtSum(counterOut.l10)}`);
+  console.log(`[compute] утренний список ${lastDay?.date ?? '—'}: ${lastDay?.rows.length ?? 0} бумаг от $10 млн, в основном списке (скор ≥${MORNING.scoreMin}) ${lastDay?.rows.filter(x => x.main).length ?? 0}`);
+  console.log(`[compute] счётчик с ${COUNTER_FROM}: основной — ${fmtSum(counterOut.main)}; все от $10 млн — ${fmtSum(counterOut.all)}`);
   console.log(`[compute] всплеск покупок: ${breadthOut ? `на ${breadthOut.asOf} B3=${breadthOut.b3}, z=${breadthOut.z}, ${breadthOut.surge ? 'ВСПЛЕСК' : 'нет'}` : 'н/д'}`);
 }
 if (workingSet) {
