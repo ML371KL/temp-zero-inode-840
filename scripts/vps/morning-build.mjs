@@ -132,7 +132,9 @@ export async function attempt(opts, day, ctx) {
   }
   if (!opts.noLive && !st.live) {
     log(`формы дня ${day} (live.mjs)…`);
-    const code = await node('scripts/live.mjs', ['--data', opts.data, '--time-budget-min', '25'], { env });
+    // Фоновое перечитывание окна (рост PARSER_REV) здесь не нужно: копия data каждый прогон свежая, прогресс всё равно пропадёт,
+    // а список ждёт. Окно перечитывают прогоны на GitHub без нового дня.
+    const code = await node('scripts/live.mjs', ['--data', opts.data, '--time-budget-min', '25', '--reread-budget-min', '0'], { env });
     const v = liveVerdict(readJson(join(opts.data, 'state', 'live.json'), {}), day, code, ctx.lastChance);
     if (!v.ok) return fail(v.why);
     if (v.partial) log('индекс разобран не полностью — последняя попытка, идём как есть (недобор виден в coverage)');
