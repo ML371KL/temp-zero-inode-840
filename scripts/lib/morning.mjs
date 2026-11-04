@@ -127,7 +127,11 @@ export const buildDay = (rows, p = MORNING) => buildDayFull(rows, p).rows;
 export function tradeResult(entry, iwm, spy, p = MORNING) {
   if (!entry || !(entry[0] > 0)) return { skip: 'noopen' };
   if (!(entry[1] > 0)) return { skip: 'noclose' };
-  if (entry[2] !== null && entry[2] !== undefined && entry[0] === entry[2]) return { skip: 'frozen' };
+  // Застывшая котировка (торгов в день не было). Записи с объёмом: признак — нулевой объём; равенство
+  // открытия вчерашнему закрытию само по себе бывает и на настоящих торгах (CBU 31.08, BJRI 01.09, MATW 16.09,
+  // BPRE 01.10 и 20.10, DYN 07.10.2026 — обычные дни с объёмом 0,2–4,1 млн акций). Старые записи без объёма — прежнее правило.
+  const vol = entry[3];
+  if (vol !== null && vol !== undefined ? !(vol > 0) : (entry[2] !== null && entry[2] !== undefined && entry[0] === entry[2])) return { skip: 'frozen' };
   if (entry[0] < p.minPx) return { skip: 'px' };
   const ok = b => b && b[0] > 0 && b[1] > 0;
   if (!ok(iwm) || !ok(spy)) return { skip: 'nobench' };

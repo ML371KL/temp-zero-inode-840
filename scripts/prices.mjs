@@ -12,7 +12,7 @@
 // Использование: node scripts/prices.mjs --mode daily|backfill [--data data] [--time-budget-min N]
 import { readJson, writeJson, isoToday, addDaysIso } from './lib/util.mjs';
 import { fetchTickerRef } from './lib/edgar.mjs';
-import { OPENS_FROM, OPENS_BENCH, readOpens, writeOpens, pickOpens, mergeOpens } from './lib/opens.mjs';
+import { OPENS_FROM, OPENS_BENCH, readOpens, writeOpens, pickOpens, mergeOpens, dailyQueue, latestFilingDays, volumesOf } from './lib/opens.mjs';
 import { fetchYahooDaily, fetchStooqDaily, readPriceCache, writePriceCache, hasPriceCache, listedThrough } from './lib/prices.mjs';
 import { fetchSymbolRanges, writeSymbolRanges, loadSymbolRanges } from './lib/symbols.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker, exchangeCounts } from './lib/universe.mjs';
@@ -67,8 +67,9 @@ for (const r of trades) {
   if (issuerCategory(r, ref, symRanges) === 'otc') continue;
   const t = resolveTicker(r, ref);
   if (!plausibleTicker(t)) continue;
-  const e = all.get(t) ?? { recent: false, fd: [] };
+  const e = all.get(t) ?? { recent: false, fd: [], last: '' };
   if (r.fdate >= recentCut) e.recent = true;
+  if (r.fdate > e.last) e.last = r.fdate;
   if (r.fdate >= OPENS_FROM) e.fd.push(r.fdate);   // для отбора дней входа D+1
   all.set(t, e);
 }
@@ -110,14 +111,14 @@ let list;
 if (OPENS_ONLY) {
   list = [...OPENS_BENCH, ...[...all.entries()].filter(([, v]) => v.fd.some(d => d >= OPENS_SINCE)).map(([t]) => t).sort()];
 } else if (MODE === 'daily') {
-  list = [...BENCHMARKS, ...[...all.entries()].filter(([, v]) => v.recent).map(([t]) => t)];
+  // Очередь: бенчмарки, затем бумаги двух последних дней подачи (утренний список и счётчик D+1), затем остальные.
+  // До 11.2026 новые тикеры шли в конце: при исчерпании бюджета (2 раза из 86 прогонов) у бумаги без ряда
+  // не было оборота, и она молча выпадала из списка. Сканер устаревших рядов (9 мин 28.09.2026) — после основного прохода.
+  list = dailyQueue(all, BENCHMARKS, latestFilingDays(trades));
   // Повторные попытки по missing: не чаще раза в 7 дней, не более 4 попыток
   for (const [t, m] of Object.entries(state.missing)) {
     if (all.has(t) && m.tries < 4 && (!m.last || m.last < addDaysIso(today, -7))) list.push(t);
   }
-  const stale = staleTickers();
-  if (stale.length) console.log(`[prices] устаревших рядов при живом листинге: ${stale.length} — дозагружаем`);
-  list.push(...stale);
 } else {
   // backfill: тикеры без кэша и кэши без объёма — в алфавитном порядке (детерминированный резюм)
   list = [...BENCHMARKS, ...[...all.keys()].sort()].filter(t => !hasPriceCache(DATA, t) || needsVolume(t));
@@ -128,11 +129,21 @@ if (LIMIT > 0) list = list.slice(0, LIMIT); // дымовые прогоны
 console.log(`[prices] режим ${MODE}: кандидатов ${list.length}`);
 
 let ok = 0, kept = 0, miss = 0, budgetOut = false;
+let staleQueued = MODE !== 'daily' || OPENS_ONLY;   // устаревшие ряды встают в очередь после основного прохода
 // Гигиена ценового слоя: сколько рядов отвергнуто как чужой инструмент и сколько
 // одиночных «залётных» баров снято фильтром. Числа уходят в _quality.json и в meta.json,
 // чтобы порча данных была видна на панели, а не только в логе прогона.
 const quality = { rejectedMeta: {}, droppedBars: 0, dirtySeries: 0, exchanges: {} };
-for (const t of list) {
+for (let qi = 0; qi < list.length || !staleQueued; qi++) {
+  if (qi >= list.length) {
+    staleQueued = true;
+    const queued = new Set(list);
+    const stale = staleTickers().filter(t => !queued.has(t));
+    if (!stale.length) break;
+    console.log(`[prices] устаревших рядов при живом листинге: ${stale.length} — дозагружаем`);
+    list.push(...stale);
+  }
+  const t = list[qi];
   if (Date.now() - started > BUDGET_MS) { budgetOut = true; break; }
   let res, fromYahoo = true;
   try { res = await fetchYahooDaily(t, FROM); }
@@ -142,7 +153,7 @@ for (const t of list) {
     console.log(`[prices] ${t}: ответ не про американскую бумагу (${res.rejected}) — ряд отвергнут`);
   }
   if (OPENS_ONLY) {
-    if (res.ohlc) { mergeOpens(opens, t, pickOpens(res.ohlc, all.get(t)?.fd, { all: OPENS_BENCH.includes(t) })); ok++; }
+    if (res.ohlc) { mergeOpens(opens, t, pickOpens(res.ohlc, all.get(t)?.fd, { all: OPENS_BENCH.includes(t), vol: volumesOf(res.series) })); ok++; }
     else miss++;
     continue;
   }
@@ -165,7 +176,7 @@ for (const t of list) {
       if (res.exchange) quality.exchanges[res.exchange] = (quality.exchanges[res.exchange] ?? 0) + 1;
       writePriceCache(DATA, t, res.series);
       // Открытия дней входа — только из ответа Yahoo, из которого пришёл и сам ряд
-      if (fromYahoo && res.ohlc) mergeOpens(opens, t, pickOpens(res.ohlc, all.get(t)?.fd, { all: OPENS_BENCH.includes(t) }));
+      if (fromYahoo && res.ohlc) mergeOpens(opens, t, pickOpens(res.ohlc, all.get(t)?.fd, { all: OPENS_BENCH.includes(t), vol: volumesOf(res.series) }));
       // Сплиты обновляются только по ответу Yahoo: у резервного источника их нет, и «пусто»
       // от него стёрло бы известные коэффициенты, сломав сопоставление цен сделок
       if (fromYahoo) {

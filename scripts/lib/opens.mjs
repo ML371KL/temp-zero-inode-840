@@ -35,13 +35,20 @@ export function writeOpens(dataDir, store, updated) {
 // ohlc — [[iso, open|null, close|null], ...] по возрастанию даты, из одного ответа источника.
 // fdates — даты подач покупок по этой бумаге; all — взять каждый день (бенчмарки).
 // -> { [iso]: [open, close, prevClose|null] }
-export function pickOpens(ohlc, fdates, { all = false, from = OPENS_FROM } = {}) {
+// vol — Map дата -> объём дня из того же ответа (ряд цен); запись становится [open, close, prevClose, volume].
+// Объём нужен признаку «застывшей» котировки (lib/morning.mjs tradeResult): до 11.2026 им служило равенство
+// открытия вчерашнему закрытию, и оно выбрасывало настоящие торги (6 из 316 сделок 08–10.2026).
+// Старые записи без объёма читаются как раньше.
+export function pickOpens(ohlc, fdates, { all = false, from = OPENS_FROM, vol = null } = {}) {
   const out = {};
   if (!ohlc?.length) return out;
   const put = i => {
     const [d, o, c] = ohlc[i];
     if (d < from || !(o > 0)) return;
-    out[d] = [o, c > 0 ? c : null, i > 0 && ohlc[i - 1][2] > 0 ? ohlc[i - 1][2] : null];
+    const v = vol?.get(d);
+    const e = [o, c > 0 ? c : null, i > 0 && ohlc[i - 1][2] > 0 ? ohlc[i - 1][2] : null];
+    if (Number.isFinite(v)) e.push(v);   // объём — только когда известен: старые записи остаются из трёх чисел
+    out[d] = e;
   };
   if (all) {
     for (let i = 0; i < ohlc.length; i++) put(i);
@@ -65,6 +72,24 @@ export function mergeOpens(store, ticker, picked, from = OPENS_FROM) {
 }
 
 export const opensOf = (store, ticker, iso) => store?.t?.[ticker]?.[iso] ?? null;
+
+// Объёмы дней из ряда цен того же ответа: [[iso, close, adjclose, volume], ...] -> Map iso -> volume
+export const volumesOf = series => new Map((series ?? []).map(r => [r[0], r[3]]));
+
+// Две последние даты подачи покупок — их бумаги нужны утреннему списку и счётчику D+1 первыми
+export function latestFilingDays(trades, n = 2) {
+  const s = new Set();
+  for (const r of trades ?? []) if (r.code === 'P' && r.fdate) s.add(r.fdate);
+  return [...s].sort().slice(-n);
+}
+// Очередь ежедневной загрузки: бенчмарки, бумаги последних дней подачи, остальные недавние (без повторов).
+// all — Map тикер -> { recent, last } (last — последняя дата подачи покупки по бумаге).
+export function dailyQueue(all, benchmarks, hotDays) {
+  const hot = new Set(hotDays ?? []);
+  const first = [], rest = [];
+  for (const [t, v] of all) { if (!v.recent) continue; (hot.has(v.last) ? first : rest).push(t); }
+  return [...new Set([...benchmarks, ...first.sort(), ...rest])];
+}
 
 // Первый торговый день бенчмарка строго после iso (календарь D+1 одинаков для всех бумаг).
 // Дальше недели не ищем: в хранилище нет дней до OPENS_FROM и пропусков не бывает, поэтому день
