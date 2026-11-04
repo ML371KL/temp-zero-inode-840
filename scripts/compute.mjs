@@ -555,8 +555,9 @@ if (PLAN) {
     if (!day.done) continue;
     for (const row of day.rows) if (row.skip === 'noopen' || row.skip === 'noclose') (opens[row.t] ??= []).push(day.date);
   }
-  // opensPending: у прошедшего дня есть бумаги без бара D0 — их открытия станут видны только после докачки баров (второй проход плана)
-  writeJson(PLAN, { listFor, d0, bars, opens, opensPending: morningDays.some(d => d.done && d.unpriced?.length) });
+  // opensPending: день listFor уже «прошёл» (его D+1 в хранилище открытий есть) и в нём есть бумаги без бара D0 — их открытия станут видны только после
+  // докачки баров (второй проход плана). В боевой сборке день listFor ещё не прошёл, и второго прохода нет.
+  writeJson(PLAN, { listFor, d0, bars, opens, opensPending: !!(morningDays[0]?.done && morningDays[0]?.unpriced?.length) });
 }
 if (ONLY_MORNING) {
   console.log(`[compute] --only-morning: список за ${listFor}, бумаг от $10 млн ${morningDays[0]?.rows.length ?? 0}, без цены на D0 ${morningDays[0]?.unpriced?.length ?? 0}`);

@@ -342,6 +342,8 @@ async function handleBars(request, env, url, origin) {
   }
   if (!items.length) return json({ error: 'нужны symbols и from (ГГГГ-ММ-ДД)' }, 400, origin);
   if (items.length > BARS_MAX_SYMBOLS) return json({ error: 'не больше ' + BARS_MAX_SYMBOLS + ' тикеров за вызов' }, 400, origin);
+  // Ответы Yahoo не разбираются и не пересериализуются: на бесплатном плане у воркера 10 мс процессорного времени, а ответ по двадцати тикерам с историей — сотни килобайт.
+  // Текст вставляется в общий ответ как есть; не похожее на JSON-объект считается сбоем тикера.
   const bars = {}, failed = {};
   let limited = false;
   const p2 = Math.floor(Date.now() / 1000) + 86400;
@@ -352,10 +354,14 @@ async function handleBars(request, env, url, origin) {
         { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
       if (r.status === 429) { limited = true; failed[sym] = 'HTTP 429'; return; }
       if (!r.ok) { failed[sym] = 'HTTP ' + r.status; return; }
-      bars[sym] = await r.json();
+      const text = (await r.text()).trim();
+      if (text[0] !== '{') { failed[sym] = 'ответ не JSON'; return; }
+      bars[sym] = text;
     } catch (e) { failed[sym] = String(e?.message || e); }
   }));
-  return json({ ok: true, bars, failed, limited }, 200, origin, { 'Cache-Control': 'no-store' });
+  const body = '{"ok":true,"limited":' + limited + ',"failed":' + JSON.stringify(failed) + ',"bars":{'
+    + Object.entries(bars).map(([sym, text]) => JSON.stringify(sym) + ':' + text).join(',') + '}}';
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...cors(origin) } });
 }
 
 export default {

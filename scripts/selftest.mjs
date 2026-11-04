@@ -1979,6 +1979,7 @@ await okAsync('воркер: /bars — только с токеном, до 25 �
     const sym = decodeURIComponent(/chart\/([^?]+)/.exec(String(url))[1]);
     if (sym === 'LIM') return new Response('', { status: 429 });
     if (sym === 'BAD') return new Response('', { status: 404 });
+    if (sym === 'HTML') return new Response('<html>captcha</html>', { status: 200 });
     return new Response(JSON.stringify(chartOf([['2026-11-03', 10, 10, 1]])), { status: 200 });
   };
   try {
@@ -1987,9 +1988,9 @@ await okAsync('воркер: /bars — только с токеном, до 25 �
     assert.equal((await call('symbols=AAPL&from=2026-10-01', 'wrong')).status, 401);
     assert.equal((await call('symbols=AAPL&from=2026-10-01', 'sekret', { PAPER: ENV.PAPER })).status, 503);
     assert.equal(seen.length, 0, 'Yahoo без токена не трогаем');
-    const r = await call('symbols=' + encodeURIComponent('AAPL,BRK.B:2025-09-01,LIM,BAD,aapl') + '&from=2026-10-01');
+    const r = await call('symbols=' + encodeURIComponent('AAPL,BRK.B:2025-09-01,LIM,BAD,HTML,aapl') + '&from=2026-10-01');
     const j = await r.json();
-    assert.equal(r.status, 200); assert.deepEqual(Object.keys(j.bars).sort(), ['AAPL', 'BRK.B']); assert.deepEqual(j.failed, { LIM: 'HTTP 429', BAD: 'HTTP 404' }); assert.equal(j.limited, true);
+    assert.equal(r.status, 200); assert.deepEqual(Object.keys(j.bars).sort(), ['AAPL', 'BRK.B']); assert.deepEqual(j.failed, { LIM: 'HTTP 429', BAD: 'HTTP 404', HTML: 'ответ не JSON' }, 'не-JSON от Yahoo не портит общий ответ'); assert.equal(j.limited, true);
     const brk = seen.find(u => u.includes('BRK-B')), p1 = Number(/period1=(\d+)/.exec(brk)[1]);
     assert.equal(p1, Date.parse('2025-09-01T00:00:00Z') / 1000, 'у BRK.B своя дата начала, символ Yahoo — с дефисом');
     assert.equal(Number(/period1=(\d+)/.exec(seen.find(u => u.includes('/AAPL?')))[1]), Date.parse('2026-10-01T00:00:00Z') / 1000, 'у AAPL — общая');
