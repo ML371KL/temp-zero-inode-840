@@ -10,19 +10,28 @@
 //
 // ОСНОВНОЙ СПИСОК — оборот ≥$10 млн и скор ≥2 (лучший вариант проверки: 2016–26 +0,344% брутто,
 // +0,225% после издержек, Шарп 1,21, вживую +0,46% к IWM). Скор бумаги за день подачи — сумма
-// четырёх баллов: покупки дня ≥$100 тыс.; ≥$1 млн; среди покупателей есть офицер (C/F/O);
-// просадка от 52-недельного максимума глубже −30%. Остальные бумаги от $10 млн (скор 0–1)
+// четырёх баллов: самая крупная покупка дня ≥$100 тыс.; ≥$1 млн; среди покупателей есть офицер
+// (C/F/O); просадка от 52-недельного максимума глубже −30%. Остальные бумаги от $10 млн (скор 0–1)
 // остаются свёрнутыми ниже: покупки на $10–100 тыс. без других признаков в 2016–26 дают −0,04%.
+//
+// ОПРЕДЕЛЕНИЯ — те же, что в проверенной стратегии (скрипты ревизии r1_events, r10_oos, r14_rank), иначе
+// панель торговала бы не то, что измерено (ревизия данных 04.11.2026, П11):
+//  - событие — эмитент × дата подачи по обыкновенным акциям; пороги суммы — по САМОЙ КРУПНОЙ строке,
+//    прошедшей гейты (а не по сумме дня);
+//  - офицер — у любого владельца любой строки события в rel есть C, F или O (директор-офицер DO — офицер);
+//  - просадка — минимум по строкам события (на дату каждой сделки);
+//  - цена ≥$5 — закрытие дня подачи D0, оборот — медиана close×volume за 20 баров, заканчивающихся D0
+//    включительно (не меньше 10 баров); D0 — последний торговый день не позже даты подачи.
 
 export const MORNING = {
   minVal: 1e4,          // сумма покупки (строки), $
-  minPx: 5,             // последнее закрытие на дату подачи / открытие D+1, $
-  dvMin: 1e7,           // нижняя граница оборота списка (медианный дневной оборот), $
+  minPx: 5,             // закрытие дня подачи D0 / открытие D+1, $
+  dvMin: 1e7,           // нижняя граница оборота списка (медиана $-оборота за 20 баров до D0 включительно), $
   dvCost: 3e7,          // оборот, с которого издержки ниже
   costHi: 0.001,        // издержки на круг при обороте ≥$30 млн, доля
   costLo: 0.0015,       // издержки на круг при обороте $10–30 млн, доля
   scoreMin: 2,          // порог скора основного списка
-  scoreVal: 1e5,        // балл за сумму покупок дня, $
+  scoreVal: 1e5,        // балл за самую крупную покупку дня, $
   bigVal: 1e6,          // второй балл за сумму, $
   deepDd: -0.3,         // балл за просадку глубже
   liveFrom: '2026-11-05',   // списки с этой даты подачи идут в живой счётчик
@@ -35,18 +44,19 @@ const ROLE_RANK = { C: 0, F: 1, O: 2, D: 3, T: 4, X: 5 };
 export const bestRole = roles => [...roles].filter(Boolean).sort((a, b) => (ROLE_RANK[a] ?? 9) - (ROLE_RANK[b] ?? 9))[0] ?? 'X';
 export const isOfficer = role => role === 'C' || role === 'F' || role === 'O';
 
-// Скор: число выполненных условий из четырёх. role — лучшая роль среди покупателей дня.
-export function scoreOf({ val, role, dd }, p = MORNING) {
-  return (val >= p.scoreVal ? 1 : 0) + (val >= p.bigVal ? 1 : 0) + (isOfficer(role) ? 1 : 0)
+// Скор: число выполненных условий из четырёх. val — самая крупная покупка дня (строка, прошедшая гейты);
+// officer — среди покупателей есть офицер (без него — по лучшей роли role, как в старых вызовах).
+export function scoreOf({ val, role, officer, dd }, p = MORNING) {
+  return (val >= p.scoreVal ? 1 : 0) + (val >= p.bigVal ? 1 : 0) + ((officer ?? isOfficer(role)) ? 1 : 0)
     + (dd !== null && dd !== undefined && dd < p.deepDd ? 1 : 0);
 }
 // Издержки на круг по обороту бумаги
 export const costOf = (dv, p = MORNING) => (dv >= p.dvCost ? p.costHi : p.costLo);
 
 // Пометки — коды; подписи живут на витрине и в сообщении.
-export function tagsOf({ role, dd, val }, p = MORNING) {
+export function tagsOf({ role, officer, dd, val }, p = MORNING) {
   const t = [];
-  if (isOfficer(role)) t.push('off');
+  if (officer ?? isOfficer(role)) t.push('off');
   if (dd !== null && dd !== undefined && dd < p.deepDd) t.push('deep');
   if (val >= p.bigVal) t.push('big');
   return t;
@@ -64,39 +74,51 @@ export function sessionOf(at) {
 
 const rnd = (v, k = 4) => Math.round(v * 10 ** k) / 10 ** k;
 
-// rows — покупки ОДНОГО дня подачи: { t, name, who, role, val, dd, dv, px, drop }.
-// Отбор по строкам (прошла гейты, сумма, цена, оборот ≥$10 млн), затем одна строка на бумагу:
-// сумма покупок дня, лучшая роль, показатели — по самой крупной покупке. Скор считается по
-// сумме дня; main — скор ≥ порога. Сортировка: скор, затем сумма (основной список — сверху).
-export function buildDay(rows, p = MORNING) {
-  const byT = new Map();
+// rows — ВСЕ покупки одного дня подачи (кроме не-обыкновенных бумаг: common === false):
+//   { cik, t, name, who, role, officer, val, dd, adv, px, at, drop }, drop — причина отсева гейтами (null — прошла).
+// Событие — эмитент (cik) × день подачи; определения — в шапке файла. Строки, не прошедшие гейты, в сумму и в
+// самую крупную покупку не входят, но офицер и просадка берутся по всем строкам события — как в проверке.
+// Цена D0 и оборот — у ведущей (самой крупной из прошедших гейты) строки. Событие, у которого нет цены или
+// оборота на D0 (ряд не дотянул до D0 или бар младше 10), в список не попадает и считается в unpriced.
+// Возвращает { rows, unpriced }: rows — по скору, затем по сумме дня (основной список сверху); main — скор ≥ порога.
+export function buildDayFull(rows, p = MORNING) {
+  const byE = new Map();
   for (const r of rows) {
-    if (r.drop) continue;
-    if (!(r.val >= p.minVal)) continue;
-    if (!(r.px >= p.minPx)) continue;
-    if (!(r.dv >= p.dvMin)) continue;
-    (byT.get(r.t) ?? byT.set(r.t, []).get(r.t)).push(r);
+    if (r.common === false) continue;
+    const k = r.cik ?? r.t;
+    (byE.get(k) ?? byE.set(k, []).get(k)).push(r);
   }
-  const out = [];
-  for (const [t, list] of byT) {
-    list.sort((a, b) => b.val - a.val);
-    const lead = list[0];
-    const val = list.reduce((s, x) => s + x.val, 0);
-    const role = bestRole(list.map(x => x.role));
-    const who = [...new Set(list.flatMap(x => x.who ?? []))];
+  const out = [], unpriced = [];
+  for (const all of byE.values()) {
+    const ok = all.filter(r => !r.drop && r.val >= p.minVal).sort((a, b) => b.val - a.val);
+    if (!ok.length) continue;
+    const lead = ok[0];
+    const adv = lead.adv ?? lead.dv ?? null;
+    if (!(lead.px > 0) || !(adv > 0)) { unpriced.push(lead.t); continue; }
+    if (!(lead.px >= p.minPx)) continue;
+    if (!(adv >= p.dvMin)) continue;
+    const mx = lead.val;
+    const val = ok.reduce((s, x) => s + x.val, 0);
+    const officer = all.some(x => x.officer ?? isOfficer(x.role));
+    const dds = all.map(x => x.dd).filter(Number.isFinite);
+    const dd = dds.length ? Math.min(...dds) : null;
+    const best = bestRole(ok.map(x => x.role));
+    const role = officer && !isOfficer(best) ? 'O' : best;   // директор-офицер показывается офицером: так он и считается
+    const who = [...new Set(ok.flatMap(x => x.who ?? []))];
     // Бумага узнаётся рынком по ПЕРВОЙ форме дня: время приёма — самое раннее
-    const at = list.map(x => x.at).filter(Boolean).sort()[0] ?? null;
-    const dd = lead.dd ?? null;
-    const score = scoreOf({ val, role, dd }, p);
+    const at = ok.map(x => x.at).filter(Boolean).sort()[0] ?? null;
+    const score = scoreOf({ val: mx, officer, dd }, p);
     out.push({
-      t, name: lead.name, who, role, val: Math.round(val), n: list.length, at, ses: sessionOf(at),
-      dd, dv: lead.dv, px: lead.px,
-      score, main: score >= p.scoreMin, cost: costOf(lead.dv, p),
-      tags: tagsOf({ role, dd, val }, p),
+      t: lead.t, name: lead.name, who, role, val: Math.round(val), mx: Math.round(mx), n: ok.length, at, ses: sessionOf(at),
+      dd, dv: adv, px: lead.px,
+      score, main: score >= p.scoreMin, cost: costOf(adv, p),
+      tags: tagsOf({ role, officer, dd, val: mx }, p),
     });
   }
-  return out.sort((a, b) => b.score - a.score || b.val - a.val || (a.t < b.t ? -1 : 1));
+  out.sort((a, b) => b.score - a.score || b.val - a.val || (a.t < b.t ? -1 : 1));
+  return { rows: out, unpriced };
 }
+export const buildDay = (rows, p = MORNING) => buildDayFull(rows, p).rows;
 
 // Результат одной сделки. entry/iwm/spy — [открытие, закрытие, вчерашнее закрытие] из одного
 // ответа источника (lib/opens.mjs). Пропуск — это причина, а не ноль: пропущенная сделка не

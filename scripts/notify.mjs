@@ -1,8 +1,10 @@
 // Telegram-уведомления. Повод ровно один: ВЫШЕЛ УТРЕННИЙ СПИСОК — покупки инсайдеров по подачам
 // последнего дня, которые можно купить на открытии следующего торгового дня и продать на его
 // закрытии (D+1; ревизия 04.11.2026 и независимая проверка, docs/ЧТО-РАБОТАЕТ.md). Одно письмо на
-// дату подачи, только если основной список (оборот от $10 млн в день, скор от 2) не пуст. Письма о позициях рабочего набора
-// «у максимума, 3 мес.» убраны: набор альфы не дал.
+// дату подачи. Если основной список (оборот от $10 млн в день, скор от 2) пуст, письмо всё равно уходит — коротким
+// «сигналов нет» за день, для которого собран список (morning.listFor): иначе тишина не отличалась бы от
+// «конвейер встал» (ревизия данных 04.11.2026, П14). Письма о позициях рабочего набора «у максимума, 3 мес.»
+// убраны: набор альфы не дал.
 //
 // Без секретов (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) в чат ничего не уходит — прод не блокирует.
 // Состояние «что уже отправлено» — data/state/notify.json (живёт на ветке data). Дата попадает
@@ -195,7 +197,7 @@ if (args.includes('--test')) {
     + 'Связка работает. Сюда приходит ровно одно событие: <b>утренний список</b> — покупки инсайдеров '
     + 'по вчерашним подачам в ликвидных бумагах (оборот от $10\u00a0млн в день, скор от 2).\n'
     + 'Только заявки на аукционы: MOO до 9:28 и MOC до 15:50 по Нью-Йорку. '
-    + 'В дни без подходящих бумаг писем не будет.\n\n' + footer());
+    + 'В дни без подходящих бумаг придёт короткое «сигналов нет»: тишина значит, что сборка не вышла.\n\n' + footer());
   if (ok) console.log('[notify] тестовое сообщение отправлено');
   process.exit(ok ? 0 : 1);
 }
@@ -239,6 +241,19 @@ function rowLine(x) {
   return `<b>${esc(x.t)}</b> · ${esc(trunc(nameCase(x.name), 24))} · скор ${x.score} · ${money(x.val)}` + (marks.length ? ` · ${marks.join(', ')}` : '');
 }
 function trunc(s, n) { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+// Пустой день: первая строка самодостаточна, как и у обычного письма. Бумаги со скором 0–1 упоминаются одной строкой.
+// Индекс разобран не полностью — это сказано в письме: «сигналов нет» по неполным данным нельзя выдавать за полное «нет».
+function emptyMessage(day, counter, cov) {
+  const rest = restOf(day);
+  const lines = [
+    head('🔕', 'утренний список пуст'),
+    `Подачи за ${fmtDate(day.date)} · основной список без бумаг: оборот от ${money(morning?.params?.dvMin ?? 1e7)}, скор от ${morning?.params?.scoreMin ?? 2}`,
+  ];
+  if (rest.length) lines.push(`Ещё ${plural(rest.length, 'бумага', 'бумаги', 'бумаг')} со скором 0–1 — на панели.`);
+  if (cov?.status === 'partial' && cov.indexed > 0) lines.push(`Индекс разобран не полностью: ${cov.collected ?? 0} из ${cov.indexed} форм.`);
+  lines.push('', counterLine(counter), '', footer());
+  return lines.join('\n');
+}
 function morningMessage(day, counter, note = '') {
   const main = mainOf(day), rest = restOf(day);
   const lines = [
@@ -294,17 +309,24 @@ if (seeding) {
   console.log(`[notify] первый прогон схемы v${NOTIFY_VERSION}: состояние пересеяно (${sent.size} списков), письма не шлём`);
   process.exit(0);
 }
-// Свежий и непустой список, о котором ещё не писали. --any-date снимает проверку свежести
+// Письма заслуживает день с основным списком и день, за который собран список (listFor), даже пустой. Покрытие индекса
+// из state/live.json: «выходной» и «индекс не вышел» — не «сигналов нет» (первое не событие, второе — тревога сторожа),
+// поэтому пустое письмо уходит при неизвестном покрытии, полном и частичном (в письме об этом сказано).
+const listFor = morning?.listFor ?? days[0]?.date ?? null;
+const cov = morning?.coverage ?? null;
+const emptyOk = !cov || cov.status === 'complete' || cov.status === 'partial';
+const hasLetter = d => mainOf(d).length > 0 || (d.date === listFor && emptyOk);
+// Свежий список, о котором ещё не писали. --any-date снимает проверку свежести
 // (ручной прогон после простоя).
-const fresh = days.filter(d => mainOf(d).length && !sent.has(dayId(d))
+const fresh = days.filter(d => hasLetter(d) && !sent.has(dayId(d))
   && (args.includes('--any-date') || today <= nextBusinessDay(d.date))).reverse();   // от старого к свежему
 saveState();
 if (!fresh.length) { console.log('[notify] новых утренних списков нет'); process.exit(0); }
-console.log(`[notify] новых утренних списков: ${fresh.length}`);
+console.log(`[notify] новых утренних списков: ${fresh.length}${fresh.some(d => !mainOf(d).length) ? ' (в том числе пустой день)' : ''}`);
 
 // ---------- отправка ----------
 // eventId — «840|morning|дата подачи»: список, доставленный повторно, на хабе ляжет на прежнюю запись.
-const messages = fresh.map(d => ({ text: morningMessage(d, morning.counter), markup: undefined, id: dayId(d), eventId: '840|' + dayId(d) }));
+const messages = fresh.map(d => ({ text: mainOf(d).length ? morningMessage(d, morning.counter) : emptyMessage(d, morning.counter, cov), markup: undefined, id: dayId(d), eventId: '840|' + dayId(d) }));
 
 if (DRY) {
   // Пробный прогон «доставляет» в консоль и двигает состояние так же, как боевой: на этом

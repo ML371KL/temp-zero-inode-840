@@ -523,3 +523,22 @@ export function mergeSeries(cached, fresh) {
   const head = cached.filter(r => r[0] < freshStart);
   return [...head, ...fresh];
 }
+
+// Оборот бумаги для утреннего списка (ревизия 04.11.2026, r10_oos.py): медиана close×volume за
+// 20 баров, ПОСЛЕДНИЙ из которых — бар дня подачи D0 (включительно); меньше 10 баров — оборота нет.
+// i — индекс бара D0 в ряду; что на нём стоит именно D0, проверяет вызывающий: ряд, не дотянувший
+// до D0, оборота не даёт. Бар с нулевым объёмом входит в окно (как в проверке), бар без объёма — нет.
+export const TURNOVER20 = { bars: 20, min: 10 };
+export function turnover20(s, i, p = TURNOVER20) {
+  if (!s || !(i >= 0) || i >= s.length) return null;
+  const vals = [];
+  for (let k = Math.max(0, i - p.bars + 1); k <= i; k++) {
+    const v = s[k][3];
+    if (v === null || v === undefined || !Number.isFinite(v) || v < 0) continue;
+    vals.push(s[k][1] * v);
+  }
+  if (vals.length < p.min) return null;
+  vals.sort((a, b) => a - b);
+  const n = vals.length;
+  return Math.round(n % 2 ? vals[(n - 1) / 2] : (vals[n / 2 - 1] + vals[n / 2]) / 2);
+}
