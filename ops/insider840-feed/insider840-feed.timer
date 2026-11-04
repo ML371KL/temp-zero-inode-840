@@ -1,0 +1,12 @@
+[Unit]
+Description=Инсайдерский радар 840 · лента формы 4 на весь день: старт в 06:00 по Нью-Йорку, будни
+
+[Timer]
+Unit=insider840-feed.service
+# Нью-йоркское время (с переходом на зимнее и летнее). В федеральные праздники SEC новых форм не принимает: лента пуста, сборщик просто работает вхолостую.
+OnCalendar=Mon..Fri *-*-* 06:00:00 America/New_York
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
