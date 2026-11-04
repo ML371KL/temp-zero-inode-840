@@ -296,6 +296,10 @@ export async function fetchYahooDaily(ticker, fromIso) {
   if (!adj || !close) return { missing: true };
   const rnd = v => Math.round(v * 10000) / 10000;
   const series = [];
+  // Открытие и «сырое» закрытие дня из того же ответа — для prices/_opens.json.gz (lib/opens.mjs).
+  // В ряд они не попадают: чистящая цепочка чтения кэша их не знает.
+  const openArr = r.indicators?.quote?.[0]?.open;
+  const ohlc = new Map();
   let prevIso = '';
   for (let i = 0; i < r.timestamp.length; i++) {
     const a = adj[i], c = close[i] ?? adj[i];
@@ -304,6 +308,8 @@ export async function fetchYahooDaily(ticker, fromIso) {
     const iso = new Date((r.timestamp[i] + (r.meta?.gmtoffset ?? -14400)) * 1000).toISOString().slice(0, 10);
     const v = vol?.[i];
     const row = [iso, rnd(Number.isFinite(c) && c > 0 ? c : a), rnd(a), Number.isFinite(v) ? v : 0];
+    const o = openArr?.[i], cRaw = close[i];
+    ohlc.set(iso, [Number.isFinite(o) && o > 0 ? rnd(o) : null, Number.isFinite(cRaw) && cRaw > 0 ? rnd(cRaw) : null]);
     if (iso === prevIso) { series[series.length - 1] = row; continue; }
     series.push(row);
     prevIso = iso;
@@ -319,8 +325,11 @@ export async function fetchYahooDaily(ticker, fromIso) {
   }
   splits.sort((a, b) => a[0] < b[0] ? -1 : 1);
   const clean = sanitizeSeries(series);
+  // Бары, снятые санитайзером как чужие, в пары открытий не попадают: тот же фильтр, что и у ряда
+  const kept = new Set(clean.series.map(x => x[0]));
   return clean.series.length
-    ? { series: clean.series, splits, dropped: clean.dropped, exchange: r.meta?.exchangeName ?? null }
+    ? { series: clean.series, splits, dropped: clean.dropped, exchange: r.meta?.exchangeName ?? null,
+        ohlc: [...ohlc].filter(([d]) => kept.has(d)).map(([d, [o, c]]) => [d, o, c]) }
     : { missing: true };
 }
 

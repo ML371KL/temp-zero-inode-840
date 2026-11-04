@@ -1,28 +1,24 @@
-// Telegram-уведомления. Повод ровно один: В РАБОЧЕМ НАБОРЕ ОТКРЫЛАСЬ НОВАЯ ПОЗИЦИЯ.
-// Всё прежнее (кластеры, крупные покупки, зоны агрегатного индикатора) убрано вместе с
-// самими сущностями — ни одна из них не пережила проверку на истории, а письма по ним
-// были чистым шумом.
-//
-// Ключевое отличие от прошлой версии: единица уведомления — ПОЗИЦИЯ, а не форма.
-// Повторная покупка в бумаге, по которой позиция уже открыта (другой инсайдер или тот же
-// через неделю), второго письма не порождает: покупать второй раз не нужно, а срок выхода
-// считается от первой покупки. Правило группировки повторяет скринер (web/app.js,
-// groupPositions) — чтобы письмо не могло разойтись с дашбордом.
+// Telegram-уведомления. Повод ровно один: ВЫШЕЛ УТРЕННИЙ СПИСОК — покупки инсайдеров по подачам
+// последнего дня, которые можно купить на открытии следующего торгового дня и продать на его
+// закрытии (D+1; ревизия 04.11.2026, docs/ЧТО-РАБОТАЕТ.md). Одно письмо на дату подачи, только
+// если главный список (оборот от $30 млн в день) не пуст. Письма о позициях рабочего набора
+// «у максимума, 3 мес.» убраны: набор альфы не дал.
 //
 // Без секретов (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) в чат ничего не уходит — прод не блокирует.
-// Состояние «что уже отправлено» — data/state/notify.json (живёт на ветке data). Позиция
-// попадает туда только ПОСЛЕ того, как Telegram принял сообщение о ней; недоставленное
-// сообщение даёт ненулевой код выхода и уходит следующим прогоном.
+// Состояние «что уже отправлено» — data/state/notify.json (живёт на ветке data). Дата попадает
+// туда только ПОСЛЕ того, как Telegram принял сообщение о ней; недоставленное сообщение даёт
+// ненулевой код выхода и уходит следующим прогоном.
+// Режимы: --dry-run (в сеть не ходит, состояние двигает), --preview (последний непустой список
+// как образец, состояние не трогает), --test (проверка связки), --any-date (не проверять свежесть).
 import { readJson, writeJson, isoToday, addDaysIso } from './lib/util.mjs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 
 const args = process.argv.slice(2);
 function argVal(name, def) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; }
 const DATA = argVal('--data', 'data');
 const SITE = argVal('--site', 'site');
 const DRY = args.includes('--dry-run');
-const PREVIEW = args.includes('--preview');   // показать последнюю позицию, не трогая состояние
+const PREVIEW = args.includes('--preview');   // показать последний непустой список, не трогая состояние
 
 const SITE_URL = 'https://ml371kl.github.io/temp-zero-inode-840/';
 const token = process.env.TELEGRAM_BOT_TOKEN, chat = process.env.TELEGRAM_CHAT_ID;
@@ -165,15 +161,10 @@ function fmtMoment(ms) {
   return `${p2(d.getUTCDate())}.${p2(d.getUTCMonth() + 1)}${d.getUTCFullYear() === mskYear() ? '' : '.' + d.getUTCFullYear()}, ${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())} МСК`;
 }
 const money = v => v >= 1e6 ? `$${fmtNum(v / 1e6, v >= 1e7 ? 0 : 1)}${NBSP}млн` : `$${fmtNum(v / 1e3, 0)}${NBSP}тыс.`;
-// Цена — два знака; у бумаг дешевле доллара — три, иначе «$0,00» не отличить от нуля.
-const price = p => p == null ? '—' : '$' + fmtNum(p, p >= 1 ? 2 : 3, { fixed: true });
-const signed = x => fmtNum(x * 100, 1, { fixed: true, sign: true }).replace(/^(?=\d)/, '+') + '%';
-const pct = x => fmtNum(x, 1, { fixed: true }) + '%';
 // Заголовок и подвал — одни на все сообщения панели: «<эмодзи> Панель · событие» и
 // «Открыть панель · время МСК». У событий радара своего времени нет — в подвале время прогона.
 const head = (emoji, title) => `${emoji} <b>${esc(PANEL_TAG)} · ${title}</b>`;
 const footer = () => `<a href="${SITE_URL}">Открыть панель</a> · ${fmtMoment(Date.now())}`;
-const ROLE = { F: 'CFO', C: 'CEO', O: 'топ-менеджер', D: 'директор', T: 'владелец 10%+', X: 'инсайдер' };
 const ROMAN = /^(?:I{1,3}|IV|VI{0,3}|IX|X)$/;
 const FORCE = { LTD: 'Ltd', LTDA: 'Ltda' };   // юрформы без гласных, которые всё же не аббревиатуры
 // «EQUITY BANCSHARES INC» -> «Equity Bancshares Inc», но «CVB» и «LLC» остаются заглавными:
@@ -201,200 +192,125 @@ if (args.includes('--test')) {
   }
   const ok = 'sent' === await send(
     head('ℹ️', 'Проверка связи') + '\n'
-    + 'Связка работает. Сюда приходит ровно одно событие: <b>в рабочем наборе открылась новая позиция</b> — '
-    + 'инсайдер купил на существенную сумму у 52-недельного максимума в ликвидной бумаге.\n'
-    + 'Повторные покупки в уже открытой позиции не присылаются: входить второй раз не нужно. '
-    + 'В тихие недели писем не будет вовсе — набор даёт около восьми сигналов в месяц, '
-    + 'а в отдельные месяцы не даёт ни одного.\n\n' + footer());
+    + 'Связка работает. Сюда приходит ровно одно событие: <b>утренний список</b> — покупки инсайдеров '
+    + 'по вчерашним подачам в ликвидных бумагах (оборот от $30\u00a0млн в день).\n'
+    + 'Покупка на открытии следующего торгового дня, продажа на закрытии того же дня. '
+    + 'В дни без подходящих бумаг писем не будет.\n\n' + footer());
   if (ok) console.log('[notify] тестовое сообщение отправлено');
   process.exit(ok ? 0 : 1);
 }
 
 // ---------- данные ----------
-const feed = readJson(join(SITE, 'data', 'feed.json'), []);
-const stats = readJson(join(SITE, 'data', 'stats.json'), null);
+const morning = readJson(join(SITE, 'data', 'morning.json'), null);
 const statePath = join(DATA, 'state', 'notify.json');
 const state = readJson(statePath, {});
 
-const HOLD = stats?.setDef?.hold ?? 3;             // месяцев удержания
-const FRESH = stats?.setDef?.freshDays ?? 45;      // сколько дней после подачи вход ещё уместен
+// Список главного уровня (оборот от $30 млн) — то, что уходит в письмо; широкий — одной строкой.
+const mainOf = day => (day?.rows ?? []).filter(x => x.lvl === 30);
+const wideOf = day => (day?.rows ?? []).filter(x => x.lvl !== 30);
+const days = (morning?.days ?? []);                       // от свежего дня к старому
 
-// Смотрим только свежие подачи: дашборд обновляется ежедневно, и всё, что старше недели,
-// либо уже отправлялось, либо пропущено из-за простоя — заваливать историей смысла нет.
-// --fresh-days N расширяет окно (после долгого простоя), --dry-run печатает вместо отправки.
-const FRESH_DAYS = Number(argVal('--fresh-days', '7'));
-const freshCut = addDaysIso(today, -FRESH_DAYS);
-
-// Одна позиция = один вход. Новая позиция по бумаге начинается только тогда, когда прежняя
-// уже закрыта к моменту сигнала. Ровно так же считают скринер и бэктест.
-function groupPositions(rows, holdMonths) {
-  const byTicker = new Map();
-  for (const r of rows) {
-    const a = byTicker.get(r.t) ?? [];
-    a.push(r); byTicker.set(r.t, a);
+// Следующий рабочий день после даты подачи (праздники не знаем): до его конца утренний список ещё
+// пригоден. После — письмо «покупай на открытии» читалось бы задним числом, и слать его не нужно.
+function nextBusinessDay(iso) {
+  let d = addDaysIso(iso, 1);
+  for (;;) {
+    const dow = new Date(d + 'T00:00:00Z').getUTCDay();
+    if (dow !== 0 && dow !== 6) return d;
+    d = addDaysIso(d, 1);
   }
-  const out = [];
-  for (const [t, list] of byTicker) {
-    list.sort((a, b) => a.fdate < b.fdate ? -1 : a.fdate > b.fdate ? 1 : 0);
-    let pos = null;
-    for (const r of list) {
-      const closed = pos && (Date.parse(r.fdate) - Date.parse(pos.first)) / 864e5 > holdMonths * 30.5;
-      if (!pos || closed) { pos = { t, name: r.name, first: r.fdate, exit: r.exit, rows: [] }; out.push(pos); }
-      pos.rows.push(r);
-    }
-  }
-  for (const p of out) {
-    p.val = p.rows.reduce((a, b) => a + (b.val ?? 0), 0);
-    p.sh = p.rows.reduce((a, b) => a + (b.sh ?? 0), 0);
-    p.px = p.sh > 0 ? p.val / p.sh : p.rows[0].px;
-    // Опорная строка — ПЕРВАЯ покупка позиции: от неё считаются и срок выхода, и изменение
-    // цены «с подачи». Скринер берёт ту же строку, поэтому письмо и таблица не разойдутся.
-    p.lead = p.rows[0];
-    p.who = [...new Set(p.rows.map(r => r.who))];
-    p.deadline = addDaysIso(p.first, FRESH);
-  }
-  return out.sort((a, b) => a.first < b.first ? 1 : a.first > b.first ? -1 : b.val - a.val);
 }
 
-// Группируем по ВСЕМУ набору, а не по свежему окну: иначе докупка в давно открытой позиции
-// выглядела бы как первая покупка и порождала бы ложное письмо.
-const allPositions = groupPositions(feed.filter(r => r.set === 1), HOLD);
-const positions = allPositions.filter(p => p.first >= freshCut);
-
-// ---------- карточка позиции ----------
-// Устройство письма: первая строка самодостаточна (в пуше видно только её — тикер и повод),
-// дальше по одному факту на строку в порядке убывания важности, в конце — что делать и когда.
-// Постоянных пояснений про стратегию в письме нет: они не меняются от письма к письму и
-// быстро превращаются в шум, их место — на дашборде.
-// Каркас — общий стандарт сообщений: заголовок «🔔 Инсайдерский радар · ТИКЕР — новая позиция»
-// (новая позиция в рабочем наборе — главное событие панели), факты, срок, подвал со ссылкой и
-// временем. Эмодзи одна — в заголовке.
-function card(p, note = '') {
-  const r = p.lead;
-  const many = p.who.length > 1;
-  const dd = Math.abs((r.dd ?? 0) * 100);
+// ---------- сообщение ----------
+// Устройство письма: первая строка самодостаточна (в пуше видно только её), дальше — десять
+// крупнейших по сумме с пометками, правило одной строкой и строка счётчика. Объяснений про
+// методику в письме нет: они не меняются от письма к письму, их место — на панели.
+const TAG_LABEL = { off: 'офицер', deep: 'просадка глубже 30%', big: '≥$1\u00a0млн' };
+const TOP_N = 10;
+const signed2 = x => fmtNum(x * 100, 2, { fixed: true, sign: true }) + '%';
+function counterLine(c) {
+  const s = c?.l30;
+  const from = fmtDate(c?.from);
+  if (!s?.n) return `Счётчик с ${from}: сделок пока нет.`;
+  return `Счётчик с ${from}: ${plural(s.n, 'сделка', 'сделки', 'сделок')}, среднее ${signed2(s.mean)} к IWM, в плюсе ${Math.round(s.win * 100)}%.`;
+}
+function rowLine(x) {
+  const marks = (x.tags ?? []).map(t => TAG_LABEL[t]).filter(Boolean);
+  return `<b>${esc(x.t)}</b> · ${esc(trunc(nameCase(x.name), 24))} · ${money(x.val)}` + (marks.length ? ` · ${marks.join(', ')}` : '');
+}
+function trunc(s, n) { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+function morningMessage(day, counter, note = '') {
+  const main = mainOf(day), wide = wideOf(day);
   const lines = [
-    head('🔔', `${esc(p.t)} — новая позиция`),
-    `<i>${esc(nameCase(p.name))}</i>`,
-    `${many ? 'Покупатели' : 'Покупатель'}: ${esc(nameCase(p.who[0] ?? '—'))}`
-      + ` (${ROLE[r.role] ?? esc(r.role)})` + (many ? ` и ещё ${p.who.length - 1}` : ''),
-    `Куплено на <b>${money(p.val)}</b> по ${p.rows.length > 1 ? '~' : ''}${price(p.px)}`,
-    `${dd < 0.5 ? 'Прямо на 52-недельном максимуме' : `На ${pct(dd)} ниже 52-недельного максимума`}`
-      + `, оборот ${money(r.dv ?? 0)} в день`,
+    head('🔔', 'утренний список'),
+    `Подачи за ${fmtDate(day.date)} · ${plural(main.length, 'бумага', 'бумаги', 'бумаг')}, оборот от ${money(morning?.params?.dvMain ?? 3e7)} в день`,
+    '',
+    ...main.slice(0, TOP_N).map(rowLine),
   ];
-  // Изменение считается от цены ВХОДА (закрытие первого торгового дня после подачи), а не от
-  // цены инсайдера: при просроченной подаче они расходятся до десятков процентов, и «сейчас
-  // ÷ цена сделки» дало бы другой знак. Поэтому цена входа стоит рядом с числом, а не
-  // подразумевается. Пока входа нет (форма подана сегодня) — показываем только цену.
-  if (r.entryPx && r.cur) {
-    lines.push(`Вход ${price(r.entryPx)} → сейчас <b>${price(r.cur)}</b>`
-      + (r.chg != null && Math.abs(r.chg) >= 0.005 ? ` (${signed(r.chg)})` : ''));
-  } else if (r.cur) {
-    lines.push(`Сейчас <b>${price(r.cur)}</b>`);
-  }
-  lines.push(`Подача ${fmtDate(p.first)} · вход до ${fmtDate(p.deadline)} · выход ${fmtDate(p.exit)}`);
+  if (main.length > TOP_N) lines.push(`и ещё ${main.length - TOP_N} — на панели`);
+  if (wide.length) lines.push('', `Ещё ${plural(wide.length, 'бумага', 'бумаги', 'бумаг')} с оборотом от ${money(morning?.params?.dvWide ?? 1e7)} — на панели.`);
+  lines.push('', 'Покупка на открытии, продажа на закрытии того же дня.', counterLine(counter));
   if (note) lines.push('', note);
   lines.push('', footer());
   return lines.join('\n');
 }
 
-// Когда позиций много (после простоя или редкого «залпа»), пять карточек подряд — уже не
-// сигнал, а лента. Тогда шлём одну сводку: заголовок «Панель · N новых позиций», дальше блоки по
-// позиции через пустую строку, у каждого своя жирная первая строка. Сводка длиннее предела
-// Telegram режется по границе блока на несколько сообщений «(1/2)», «(2/2)»; блок не рвётся.
-const TG_TEXT_LIMIT = 4000;
-function digestBlock(p) {
-  const dd = Math.abs((p.lead.dd ?? 0) * 100);
-  return `<b>${esc(p.t)}</b> · ${esc(nameCase(p.name))}\n`
-    + `${money(p.val)} · ${dd < 0.5 ? 'у максимума' : `${MINUS}${pct(dd)} от максимума`} · вход до ${fmtDate(p.deadline)}`;
-}
-function digests(list) {
-  const title = plural(list.length, 'новая позиция', 'новые позиции', 'новых позиций');
-  const tail = ['Держать три месяца от подачи, доли равные.', footer()].join('\n\n');
-  const room = TG_TEXT_LIMIT - tail.length - 120;
-  const chunks = [[]];
-  let size = 0;
-  for (const p of list) {
-    const b = digestBlock(p);
-    if (chunks.at(-1).length && size + b.length + 2 > room) { chunks.push([]); size = 0; }
-    chunks.at(-1).push({ p, b });
-    size += b.length + 2;
-  }
-  return chunks.map((c, k) => ({
-    list: c.map(x => x.p),
-    text: [head('🔔', title + (chunks.length > 1 ? ` (${k + 1}/${chunks.length})` : '')), ...c.map(x => x.b), tail].join('\n\n'),
-  }));
-}
-
-// Ссылка на панель — в подвале; кнопка ведёт прямо в карточку бумаги.
-const kb = p => ({
-  inline_keyboard: [[
-    { text: `Карточка ${p.t}`, url: `${SITE_URL}#ticker/${encodeURIComponent(p.t)}` },
-  ]],
-});
-
-// ---------- предпросмотр формата: последняя позиция, состояние не трогаем ----------
+// ---------- предпросмотр формата: последний непустой список, состояние не трогаем ----------
 if (PREVIEW) {
-  if (!allPositions.length) { console.log('[notify] позиций в наборе нет'); process.exit(0); }
-  const p = allPositions[0];
-  // Оговорка обязательна в обоих каналах: карточка предпросмотра неотличима от боевой,
-  // и без пометки она читается на хабе как новый сигнал.
-  const text = card(p, '<i>Это образец формата, а не новый сигнал.</i>');
+  const day = days.find(d => mainOf(d).length);
+  if (!day) { console.log('[notify] непустых списков нет'); process.exit(0); }
+  // Оговорка обязательна в обоих каналах: образец неотличим от боевого письма.
+  const text = morningMessage(day, morning.counter, '<i>Это образец формата, а не новый список.</i>');
   if (DRY) { console.log('\n' + plain(text)); process.exit(0); }
-  const ok = 'sent' === await send(text, kb(p));
+  const ok = 'sent' === await send(text, undefined);
   console.log(ok ? '[notify] предпросмотр отправлен' : '[notify] предпросмотр в чат НЕ отправлен');
   process.exit(0);
 }
 
 // ---------- что уже отправляли ----------
-// Ключ — позиция (бумага + дата её первой покупки), а не форма. Версия нужна, чтобы смена
-// правила ключа не отправила разом всю неделю: первый прогон новой версии молча пересевает
-// состояние.
+// Ключ — дата подачи: `morning|YYYY-MM-DD`, одно письмо на дату. Версия нужна, чтобы смена
+// схемы не отправила разом всю историю: первый прогон новой версии молча пересевает состояние
+// (версия 4 — переход с писем о позициях рабочего набора на утренний список).
 //
-// «Отправил → запомнил»: позиция попадает в sentPositions только после того, как Telegram
-// принял сообщение о ней, и состояние уходит на диск после КАЖДОГО такого сообщения. До
-// 29.10.2026 оно писалось до отправки, и сбой Telegram терял сигнал молча (аудит 28.10.2026,
-// C1). Неотправленная позиция остаётся в окне свежести (--fresh-days, по умолчанию 7 дней от
-// подачи) и уходит следующим прогоном; сам прогон завершается с ошибкой.
-const NOTIFY_VERSION = 3;
-const seeding = !state.sentPositions || state.version !== NOTIFY_VERSION;
-const sent = new Set(state.version === NOTIFY_VERSION ? (state.sentPositions ?? []) : []);
+// «Отправил → запомнил»: дата попадает в sentMorning только после того, как Telegram принял
+// сообщение, и состояние уходит на диск после КАЖДОГО такого сообщения. Недоставленное письмо
+// остаётся неотправленным и уходит следующим прогоном, пока список не устарел; сам прогон
+// при этом завершается с ошибкой.
+const NOTIFY_VERSION = 4;
+const seeding = !Array.isArray(state.sentMorning) || state.version !== NOTIFY_VERSION;
+const sent = new Set(state.version === NOTIFY_VERSION ? (state.sentMorning ?? []) : []);
 state.version = NOTIFY_VERSION;
-delete state.sentTrades;      // ключи прежней схемы («набор|тикер|дата») больше не читаются
-const posId = p => `${p.t}|${p.first}`;
+delete state.sentTrades; delete state.sentPositions;   // ключи прежних схем больше не читаются
+const dayId = d => `morning|${d.date}`;
 function saveState() {
-  state.sentPositions = [...sent].slice(-2000);
+  state.sentMorning = [...sent].slice(-400);
   writeJson(statePath, state, true);
 }
 
 if (seeding) {
-  for (const p of positions) sent.add(posId(p));
+  for (const d of days) if (mainOf(d).length) sent.add(dayId(d));
   saveState();
-  console.log(`[notify] первый прогон схемы v${NOTIFY_VERSION}: состояние пересеяно (${sent.size} позиций), письма не шлём`);
+  console.log(`[notify] первый прогон схемы v${NOTIFY_VERSION}: состояние пересеяно (${sent.size} списков), письма не шлём`);
   process.exit(0);
 }
-const fresh = positions.filter(p => !sent.has(posId(p)));
+// Свежий и непустой список, о котором ещё не писали. --any-date снимает проверку свежести
+// (ручной прогон после простоя).
+const fresh = days.filter(d => mainOf(d).length && !sent.has(dayId(d))
+  && (args.includes('--any-date') || today <= nextBusinessDay(d.date))).reverse();   // от старого к свежему
 saveState();
-if (!fresh.length) { console.log('[notify] новых позиций нет'); process.exit(0); }
-console.log(`[notify] новых позиций: ${fresh.length}`);
+if (!fresh.length) { console.log('[notify] новых утренних списков нет'); process.exit(0); }
+console.log(`[notify] новых утренних списков: ${fresh.length}`);
 
 // ---------- отправка ----------
-// eventId карточки — «840|тикер|дата подачи»: та же позиция, досланная на следующий день, на
-// хабе ляжет на прежнюю запись. У сводки ключ — отпечаток её состава.
-const MAX_CARDS = 4;
-const digestId = list => '840|digest|' + createHash('sha256').update(list.map(posId).sort().join('\n')).digest('hex').slice(0, 16);
-// Сводка, разрезанная на части, несёт ключ состава КАЖДОЙ части; обычная сводка — одна часть, и её
-// ключ тот же, что раньше (состав всей сводки).
-const messages = fresh.length > MAX_CARDS
-  ? digests(fresh).map(d => ({ text: d.text, markup: undefined, ids: d.list.map(posId), eventId: digestId(d.list) }))
-  : fresh.map(p => ({ text: card(p), markup: kb(p), ids: [posId(p)], eventId: `840|${posId(p)}` }));
+// eventId — «840|morning|дата подачи»: список, доставленный повторно, на хабе ляжет на прежнюю запись.
+const messages = fresh.map(d => ({ text: morningMessage(d, morning.counter), markup: undefined, id: dayId(d), eventId: '840|' + dayId(d) }));
 
 if (DRY) {
   // Пробный прогон «доставляет» в консоль и двигает состояние так же, как боевой: на этом
   // стоят самотесты последовательных прогонов. В сеть он не ходит.
   for (const m of messages) {
     console.log('\n' + '─'.repeat(46) + '\n' + plain(m.text));
-    for (const id of m.ids) sent.add(id);
+    sent.add(m.id);
   }
   saveState();
   process.exit(0);
@@ -402,19 +318,18 @@ if (DRY) {
 
 let okCount = 0, failCount = 0;
 for (const [k, m] of messages.entries()) {
-  // Telegram душит бота примерно на одном сообщении в секунду на чат; карточек бывает до
-  // четырёх подряд, поэтому между ними пауза — иначе часть вернётся с 429.
+  // Telegram душит бота примерно на одном сообщении в секунду на чат
   if (k) await sleep(1200);
   const outcome = await send(m.text, m.markup, m.eventId);
   if (outcome === 'fail') { failCount++; continue; }
   if (outcome === 'sent') okCount++;
-  for (const id of m.ids) sent.add(id);
+  sent.add(m.id);
   saveState();
 }
 console.log('[notify] отправлено в Telegram:', okCount, 'из', messages.length);
 if (failCount) {
   // Ненулевой код — сигнал workflow: шаг помечается упавшим, а в конце прогона (после снимка
   // данных и публикации) отдельный шаг красит весь прогон.
-  console.error(`[notify] НЕ доставлено: ${failCount} из ${messages.length} — позиции остались неотправленными и уйдут следующим прогоном`);
+  console.error(`[notify] НЕ доставлено: ${failCount} из ${messages.length} — списки остались неотправленными и уйдут следующим прогоном`);
   process.exit(1);
 }

@@ -11,8 +11,10 @@ import { zipCreate, zipExtract } from './lib/zip.mjs';
 import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, SHARD_VERSION } from './lib/edgar.mjs';
 import {
   mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo,
-  trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough,
+  trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough, fetchYahooDaily,
 } from './lib/prices.mjs';
+import { buildDay, tradeResult, summarize, breadth, bestRole, tagsOf } from './lib/morning.mjs';
+import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
 import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import { Panel, monthlyFromDaily, portfolioSeries, factorAlpha, factorSeries, vsBenchmark, neweyWestT, universeSeries, pairedDiff, turnover } from './lib/portfolio.mjs';
 import { applyGates, isPlanned, isNonCommon, isImplausible } from './lib/gates.mjs';
@@ -741,6 +743,98 @@ ok('легенда «у максимума» называет тот же пор
     `легенда обещает ${legend[1]}%, а правило набора — ${pctRule}%`);
 });
 
+// ---------- утренний список: отбор, результат D+1, счётчик, всплеск ----------
+ok('утренний список: отбор строк, свёртка по бумаге, уровни и пометки', () => {
+  const base = { name: 'X Corp', who: ['Doe'], role: 'D', val: 2e4, dd: -0.1, dv: 4e7, px: 20, drop: null };
+  const day = buildDay([
+    { ...base, t: 'AAA', val: 3e5 },
+    { ...base, t: 'AAA', val: 2e5, role: 'C', who: ['Roe'] },        // та же бумага: суммируется, лучшая роль C
+    { ...base, t: 'BBB', val: 9999 },                                   // меньше $10 тыс.
+    { ...base, t: 'CCC', px: 4.99 },                                    // дешевле $5
+    { ...base, t: 'DDD', drop: 'offering' },                            // отсеяна гейтами
+    { ...base, t: 'EEE', dv: 9.9e6 },                                   // оборот ниже $10 млн
+    { ...base, t: 'FFF', dv: 1.5e7, val: 1.2e6, dd: -0.4, role: 'O' },  // широкий уровень
+    { ...base, t: 'GGG', val: 1e4, px: 5, dv: 1e7, dd: -0.3 },          // ровно на границах: проходит
+  ]);
+  assert.deepEqual(day.map(x => x.t), ['FFF', 'AAA', 'GGG']);          // по убыванию суммы
+  const [fff, aaa, ggg] = day;
+  assert.equal(aaa.val, 5e5); assert.equal(aaa.n, 2); assert.equal(aaa.role, 'C'); assert.equal(aaa.lvl, 30);
+  assert.deepEqual(aaa.who, ['Doe', 'Roe']);
+  assert.deepEqual(aaa.tags, ['off']);
+  assert.equal(fff.lvl, 10); assert.deepEqual(fff.tags, ['off', 'deep', 'big']);
+  assert.equal(ggg.lvl, 10); assert.deepEqual(ggg.tags, [], 'просадка ровно −30% — не «глубже»');
+  assert.equal(bestRole(['D', 'O', 'T']), 'O'); assert.equal(bestRole([]), 'X');
+  assert.deepEqual(tagsOf({ role: 'F', dd: null, val: 1e6 }), ['off', 'big']);
+});
+ok('утренний список: результат сделки — от открытия до закрытия, минус IWM, причины пропуска', () => {
+  const r = tradeResult([100, 102, 99], [200, 201, 199]);
+  assert.equal(r.r, 0.02); assert.equal(r.b, 0.005); assert.equal(r.ex, 0.015);
+  assert.equal(tradeResult([100, 102, null], [200, 201, 199]).ex, 0.015, 'вчерашнего закрытия нет — это не «застывшее»');
+  assert.equal(tradeResult([100, 102, 100], [200, 201, 199]).skip, 'frozen');   // открытие ровно равно вчерашнему закрытию
+  assert.equal(tradeResult(null, [200, 201, 199]).skip, 'noopen');
+  assert.equal(tradeResult([10, null, 9], [200, 201, 199]).skip, 'noclose');
+  assert.equal(tradeResult([4.9, 5.2, 4.8], [200, 201, 199]).skip, 'px');
+  assert.equal(tradeResult([5, 5.1, 4.8], [200, 201, 199]).skip, undefined, 'ровно $5 допустимо');
+  assert.equal(tradeResult([100, 102, 99], null).skip, 'nobench');
+});
+ok('утренний список: сводка счётчика — среднее, медиана, доля, t по дням, нетто', () => {
+  const s = summarize([{ day: 'a', ex: 0.01 }, { day: 'a', ex: 0.03 }, { day: 'b', ex: -0.01 }, { day: 'c', ex: 0.02 }]);
+  // средние по дням: 0.02, −0.01, 0.02 -> среднее 0.01, sd 0.01732, t = 0.01 / (0.01732 / √3) = 1
+  assert.deepEqual(s, { n: 4, days: 3, mean: 0.0125, median: 0.015, win: 0.75, tDays: 1, net: 0.0115, cumNet: 0.046 });
+  assert.deepEqual(summarize([]), { n: 0, days: 0 });
+  assert.equal(summarize([{ day: 'a', ex: 0.01 }, { day: 'a', ex: 0.02 }]).tDays, null, 'один день — t не определён');
+  assert.equal(summarize([{ day: 'a', ex: 0.01 }, { day: 'b', ex: 0.01 }]).tDays, null, 'нулевой разброс — t не определён');
+});
+ok('всплеск покупок: z к 36 прошлым месяцам, порог 2, нужен запас в 24 месяца', () => {
+  // Малый пример руками: окно 3, запас 3. B3 = 36, 38, 37, 38, 38, 78; на последнем месяце
+  // прошлые B3 = 37, 38, 38 (среднее 37.667, sd 0.577) -> z = 40.333 / 0.577 = 69.86
+  const small = breadth(new Map([['2020-01', 10], ['2020-02', 11], ['2020-03', 15], ['2020-04', 12], ['2020-05', 10], ['2020-06', 16], ['2020-07', 12], ['2020-08', 50]]),
+    { p: { win: 3, need: 3, zThr: 2, keep: 60 } });
+  assert.equal(small.asOf, '2020-08'); assert.equal(small.b3, 78);
+  assert.ok(Math.abs(small.z - 69.86) < 0.01, `z=${small.z}`);
+  assert.equal(small.surge, true);
+  // Синтетика целиком: 60 месяцев ровного фона с шумом, затем три месяца втрое выше
+  const m = i => `${2016 + Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, '0')}`;
+  const flat = new Map(), spike = new Map();
+  for (let i = 0; i < 60; i++) { const b = 100 + ((i * 7) % 11); flat.set(m(i), b); spike.set(m(i), i >= 57 ? 300 : b); }
+  const f = breadth(flat), sp = breadth(spike);
+  assert.equal(f.surge, false); assert.ok(Math.abs(f.z) < 2, `фон: z=${f.z}`);
+  assert.equal(sp.surge, true); assert.ok(sp.z >= 2);
+  assert.equal(sp.history.length, 60); assert.equal(sp.history.at(-1).m, m(59));
+  const first = sp.history.find(x => x.z !== null);
+  assert.equal(first.m, m(26), 'первый z — когда накопилось 24 прошлых значения B3 (индекс 2 + 24)');
+  assert.ok(sp.history.slice(0, 26).every(x => x.z === null));
+  // Неполный текущий месяц не бывает «текущим значением» и помечается в истории
+  const part = breadth(spike, { partialFrom: m(59) });
+  assert.equal(part.asOf, m(58)); assert.equal(part.history.at(-1).p, 1);
+  assert.equal(breadth(new Map()), null);
+});
+ok('открытия: отбор дней входа из одного ответа, пропуски, слияние, календарь IWM', () => {
+  const ohlc = [['2026-10-29', 10, 10.5], ['2026-10-30', 10.6, 10.4], ['2026-11-02', 10.4, 10.9], ['2026-11-03', null, 11]];
+  // Подача 30.10 -> день входа 02.11: открытие 10.4, закрытие 10.9, вчерашнее закрытие 10.4
+  const p = pickOpens(ohlc, ['2026-10-30']);
+  assert.deepEqual(p, { '2026-11-02': [10.4, 10.9, 10.4] });
+  assert.equal(tradeResult(p['2026-11-02'], [100, 101, 99]).skip, 'frozen', 'открытие равно вчерашнему закрытию');
+  assert.deepEqual(pickOpens(ohlc, ['2026-11-02']), {}, 'у дня входа нет открытия — записи нет');
+  assert.deepEqual(pickOpens(ohlc, ['2026-07-30']), {}, 'подачи до OPENS_FROM не хранятся');
+  assert.deepEqual(pickOpens(ohlc, [], { all: true }), { '2026-10-29': [10, 10.5, null], '2026-10-30': [10.6, 10.4, 10.5], '2026-11-02': [10.4, 10.9, 10.4] });
+  const store = { t: { AAA: { '2026-10-02': [9, 9.1, 8.9] }, IWM: { '2026-10-30': [1, 1, 1], '2026-11-02': [1, 1, 1], '2026-11-04': [1, 1, 1] } } };
+  mergeOpens(store, 'AAA', { '2026-10-02': [9.5, 9.6, 9.4], '2026-11-02': [10.4, 10.9, 10.4] });
+  assert.deepEqual(store.t.AAA['2026-10-02'], [9.5, 9.6, 9.4], 'свежая запись замещает прежнюю по той же дате');
+  assert.deepEqual(opensOf(store, 'AAA', '2026-11-02'), [10.4, 10.9, 10.4]);
+  assert.equal(opensOf(store, 'AAA', '2026-11-03'), null);
+  assert.equal(nextTradingDay(store, '2026-10-30'), '2026-11-02');
+  assert.equal(nextTradingDay(store, '2026-11-02'), '2026-11-04', 'пропущенный день (праздник) календарь IWM перешагивает');
+  assert.equal(nextTradingDay(store, '2026-11-04'), null, 'дня входа ещё нет');
+  // запись и чтение файла
+  const od = join(ROOT, '.selftest-opens');
+  rmSync(od, { recursive: true, force: true });
+  writeOpens(od, store, '2026-11-04');
+  assert.deepEqual(readOpens(od).t, store.t);
+  assert.deepEqual(readOpens(join(od, 'нет')).t, {}, 'файла нет — пустое хранилище');
+  rmSync(od, { recursive: true, force: true });
+});
+
 // ---------- сквозной прогон compute ----------
 const TMP = join(ROOT, '.selftest-tmp');
 rmSync(TMP, { recursive: true, force: true });
@@ -862,7 +956,11 @@ ok('loadAllTrades: разные классы акций в одной подач
   rmSync(dir3, { recursive: true, force: true });
 });
 
-execFileSync(process.execPath, [join(ROOT, 'scripts', 'compute.mjs'), '--data', TMP, '--site', join(TMP, 'site')], { stdio: 'pipe' });
+// Открытия утреннего списка: день входа L1 — первый рабочий день после подачи. IWM: открытие 100,
+// закрытие 100.5 (+0.5%); LIVA: открытие 50, закрытие 51 (+2%), значит к IWM +1.5%.
+const d1L = bizDays(addDaysIso(recentF, 1), addDaysIso(recentF, 7))[0];
+writeOpens(TMP, { t: { IWM: { [d1L]: [100, 100.5, 99.8] }, LIVA: { [d1L]: [50, 51, 49.5] } } }, today);
+execFileSync(process.execPath, [join(ROOT, 'scripts', 'compute.mjs'), '--data', TMP, '--site', join(TMP, 'site'), '--counter-from', addDaysIso(today, -30)], { stdio: 'pipe' });
 const R = p => readJson(join(TMP, 'site', 'data', p));
 
 ok('compute: гейты отсекают PIPE и плановую покупку', () => {
@@ -902,81 +1000,134 @@ ok('compute: лента, признак набора, карточка тике�
   assert.ok(tick.weekly.length > 50);
 });
 
+ok('compute: утренний список, счётчик D+1 и всплеск', () => {
+  const m = R('morning.json');
+  const day = m.days.find(d => d.date === recentF);
+  assert.ok(day, 'день подачи L1 есть в файле');
+  assert.equal(day.entry, d1L); assert.equal(day.done, true);
+  assert.equal(day.rows.length, 1);
+  const row = day.rows[0];
+  assert.equal(row.t, 'LIVA'); assert.equal(row.lvl, 30); assert.equal(row.val, 275000);
+  assert.equal(row.role, 'C'); assert.ok(row.tags.includes('off'));
+  assert.equal(row.o, 50); assert.equal(row.c, 51);
+  assert.equal(row.ex, 0.015, 'сделка +2% минус IWM +0.5%');
+  assert.equal(m.counter.l30.n, 1); assert.equal(m.counter.l30.mean, 0.015); assert.equal(m.counter.upTo, d1L);
+  assert.equal(m.counter.l10.n, 1);
+  const old = m.days.find(d => d.date === '2020-02-05');
+  assert.ok(old && !old.done && old.entry === null, 'у старых подач дня входа в хранилище нет — результат не выдумывается');
+  const b = R('stats.json').breadth;
+  assert.ok(b && b.history.length <= 60 && b.thr === 2, 'поле breadth в stats.json');
+  assert.ok(b.asOf < isoToday().slice(0, 7), 'текущим считается последний ЗАВЕРШЁННЫЙ месяц');
+});
+
 // ---------- уведомления ----------
-// Единица письма — ПОЗИЦИЯ, а не форма: докупка в уже открытой позиции второго письма
-// порождать не должна. Проверяем сквозным прогоном скрипта на синтетическом фиде.
+// Единица письма — ДАТА ПОДАЧИ: одно утреннее сообщение на дату, и только если главный список
+// (оборот от $30 млн в день) не пуст. Проверяем сквозным прогоном скрипта на синтетическом
+// morning.json. Даты строятся от сегодня: «вчера» всегда свежее (следующий рабочий день не раньше
+// сегодняшнего), а несколько дат сразу проверяются с --any-date, чтобы не зависеть от дня недели.
 const NTMP = join(ROOT, '.selftest-notify');
 rmSync(NTMP, { recursive: true, force: true });
 mkdirSync(join(NTMP, 'site', 'data'), { recursive: true });
 mkdirSync(join(NTMP, 'data', 'state'), { recursive: true });
-writeJson(join(NTMP, 'site', 'data', 'stats.json'), { setDef: { hold: 3, freshDays: 45 } });
 
 const nDay = n => addDaysIso(isoToday(), n);
-const nRow = (t, fdate, who, val, extra = {}) => ({
-  t, name: t + ' HOLDINGS INC', fdate, who, role: 'D', sh: 1000, px: val / 1000, val,
-  dd: -0.012, dv: 6e6, set: 1, exit: addDaysIso(fdate, 91), cur: val / 1000, chg: 0.02, ...extra,
+const mRow = (t, val, extra = {}) => ({
+  t, name: t + ' HOLDINGS INC', who: ['Smith John'], nWho: 1, role: 'D', val, n: 1, dd: -0.05, dv: 6e7, px: 25, lvl: 30, tags: [], ...extra,
 });
-function notify(feed) {
-  writeJson(join(NTMP, 'site', 'data', 'feed.json'), feed);
-  return execFileSync(process.execPath,
-    [join(ROOT, 'scripts', 'notify.mjs'), '--dry-run', '--site', join(NTMP, 'site'), '--data', join(NTMP, 'data')],
-    { encoding: 'utf8' });
+const mDay = (date, rows) => ({ date, entry: null, done: false, rows });
+const nYear = isoToday().slice(0, 4);
+const mCounter = { from: `${nYear}-11-05`, cost: 0.001, upTo: null, l30: { n: 0 }, l10: { n: 0 } };
+const MORNING_JSON = join(NTMP, 'site', 'data', 'morning.json');
+function writeMorning(days, counter = mCounter) {
+  writeJson(MORNING_JSON, { built: isoToday(), params: { minVal: 1e4, minPx: 5, dvMain: 3e7, dvWide: 1e7 }, counter, days });
 }
+const NOTIFY_ARGS = dir => [join(ROOT, 'scripts', 'notify.mjs'), '--site', join(NTMP, 'site'), '--data', dir];
+function notify(days, { dir = join(NTMP, 'data'), counter = mCounter, args = [] } = {}) {
+  writeMorning(days, counter);
+  mkdirSync(join(dir, 'state'), { recursive: true });
+  return execFileSync(process.execPath, [...NOTIFY_ARGS(dir), '--dry-run', ...args], { encoding: 'utf8' });
+}
+const freshDir = name => { const d = join(NTMP, name); mkdirSync(join(d, 'state'), { recursive: true }); return d; };
+const sentOf = dir => readJson(join(dir, 'state', 'notify.json'), {}).sentMorning ?? [];
+const NB = '\u00a0';
 
 ok('notify: первый прогон молча пересевает состояние', () => {
-  const out = notify([nRow('AAA', nDay(-2), 'Smith John', 3e5)]);
+  const out = notify([mDay(nDay(-2), [mRow('AAA', 3e5)])]);
   assert.match(out, /состояние пересеяно/);
-  assert.ok(!out.includes('новая позиция'), 'при пересеве письма не шлются');
+  assert.ok(!out.includes('утренний список'), 'при пересеве письма не шлются');
 });
-ok('notify: новая позиция даёт ровно одну карточку', () => {
-  const out = notify([nRow('AAA', nDay(-2), 'Smith John', 3e5), nRow('BBB', nDay(-1), 'Lee Anna', 4e5)]);
-  assert.match(out, /новых позиций: 1/);
-  assert.equal((out.match(/— новая позиция/g) ?? []).length, 1);
-  assert.match(out, /Инсайдерский радар · BBB — новая позиция/);
-  assert.match(out, /вход до .+ выход /, 'в карточке есть срок входа и дата выхода');
+ok('notify: переход со схемы 3 (позиции) — пересев, старые ключи уходят', () => {
+  const dir = freshDir('data-v3');
+  writeJson(join(dir, 'state', 'notify.json'), { version: 3, sentPositions: ['OLD|2026-10-01'] });
+  const out = notify([mDay(nDay(-1), [mRow('AAA', 3e5)])], { dir });
+  assert.match(out, /первый прогон схемы v4/);
+  const st = readJson(join(dir, 'state', 'notify.json'));
+  assert.equal(st.version, 4); assert.equal(st.sentPositions, undefined);
+  assert.deepEqual(st.sentMorning, [`morning|${nDay(-1)}`], 'текущий список считается отправленным: историю не рассылаем');
 });
-ok('notify: докупка в открытой позиции письма не даёт', () => {
-  const out = notify([
-    nRow('AAA', nDay(-2), 'Smith John', 3e5), nRow('BBB', nDay(-1), 'Lee Anna', 4e5),
-    nRow('BBB', nDay(0), 'Park Wu', 2e5),
+ok('notify: новая дата подачи даёт одно письмо — топ по сумме, пометки, правило, счётчик', () => {
+  const counter = { ...mCounter, l30: { n: 23, days: 5, mean: 0.0031, median: 0.001, win: 0.58 } };
+  const day = mDay(nDay(-1), [
+    mRow('CCC', 2.5e6, { tags: ['off', 'deep', 'big'], role: 'C' }),
+    mRow('BBB', 4e5, { tags: ['off'], role: 'O' }),
+    mRow('DDD', 5e4),
+    mRow('EEE', 3e4, { lvl: 10 }),
   ]);
-  assert.match(out, /новых позиций нет/);
+  notify([mDay(nDay(-2), [mRow('AAA', 3e5)])]);                       // пересев
+  const out = notify([mDay(nDay(-2), [mRow('AAA', 3e5)]), day], { counter });
+  assert.match(out, /новых утренних списков: 1/);
+  assert.equal((out.match(/Инсайдерский радар · утренний список/g) ?? []).length, 1);
+  assert.match(out, new RegExp(`Подачи за \\d\\d\\.\\d\\d · 3 бумаги, оборот от \\$30${NB}млн в день`));
+  assert.match(out, new RegExp(`CCC · .* · \\$2,5${NB}млн · офицер, просадка глубже 30%, ≥\\$1${NB}млн`));
+  assert.match(out, new RegExp(`BBB · .* · \\$400${NB}тыс\\. · офицер\\n`));
+  assert.match(out, new RegExp(`DDD · .* · \\$50${NB}тыс\\.\\n`));
+  assert.ok(!/EEE/.test(out), 'уровень $10–30 млн в письмо построчно не идёт');
+  assert.match(out, new RegExp(`Ещё 1 бумага с оборотом от \\$10${NB}млн — на панели`));
+  assert.match(out, /Покупка на открытии, продажа на закрытии того же дня\./);
+  assert.match(out, /Счётчик с 05\.11: 23 сделки, среднее \+0,31% к IWM, в плюсе 58%\./);
+  assert.ok(out.indexOf('CCC ·') < out.indexOf('BBB ·') && out.indexOf('BBB ·') < out.indexOf('DDD ·'), 'порядок — как в списке (по сумме)');
 });
-ok('notify: повторная покупка после закрытия окна — новая позиция', () => {
-  const dir = join(NTMP, 'data2');
-  mkdirSync(join(dir, 'state'), { recursive: true });
-  const run = feed => {
-    writeJson(join(NTMP, 'site', 'data', 'feed.json'), feed);
-    return execFileSync(process.execPath,
-      [join(ROOT, 'scripts', 'notify.mjs'), '--dry-run', '--site', join(NTMP, 'site'), '--data', dir],
-      { encoding: 'utf8' });
-  };
-  const first = nRow('CCC', nDay(-100), 'Smith John', 3e5);
-  run([first]);                                                    // пересев
-  assert.match(run([first, nRow('CCC', nDay(-95), 'Smith John', 1e5)]), /новых позиций нет/);
-  assert.match(run([first, nRow('CCC', nDay(0), 'Smith John', 3e5)]), /CCC — новая позиция/);
+ok('notify: пустой счётчик и повторный прогон', () => {
+  const dir = freshDir('data-twice');
+  notify([mDay(nDay(-3), [mRow('OLD', 3e5)])], { dir });             // пересев
+  const days = [mDay(nDay(-1), [mRow('AAA', 3e5)])];
+  const out = notify(days, { dir });
+  assert.match(out, /Счётчик с 05\.11: сделок пока нет\./);
+  assert.deepEqual(sentOf(dir).filter(k => k === `morning|${nDay(-1)}`).length, 1);
+  assert.match(notify(days, { dir }), /новых утренних списков нет/, 'вторая отправка той же даты невозможна');
 });
-ok('notify: залп больше четырёх позиций сворачивается в сводку', () => {
-  const dir = join(NTMP, 'data3');
-  mkdirSync(join(dir, 'state'), { recursive: true });
-  const run = feed => {
-    writeJson(join(NTMP, 'site', 'data', 'feed.json'), feed);
-    return execFileSync(process.execPath,
-      [join(ROOT, 'scripts', 'notify.mjs'), '--dry-run', '--site', join(NTMP, 'site'), '--data', dir],
-      { encoding: 'utf8' });
-  };
-  run([nRow('ZZZ', nDay(-2), 'Old Man', 3e5)]);                     // пересев
-  const five = ['D1', 'D2', 'D3', 'D4', 'D5'].map((t, i) => nRow(t, nDay(0), 'Buyer ' + i, 1e5 * (i + 1)));
-  const out = run([nRow('ZZZ', nDay(-2), 'Old Man', 3e5), ...five]);
-  assert.match(out, /новых позиций: 5/);
-  assert.match(out, /Инсайдерский радар · 5 новых позиций/);
-  assert.ok(!out.includes('— новая позиция'), 'вместо пяти карточек одна сводка');
+ok('notify: пустой главный список писем не даёт, устаревший — тоже, --any-date снимает проверку свежести', () => {
+  const dir = freshDir('data-rules');
+  notify([mDay(nDay(-3), [mRow('OLD', 3e5)])], { dir });             // пересев
+  // только уровень $10–30 млн: список для письма пуст
+  assert.match(notify([mDay(nDay(-1), [mRow('LOW', 1e5, { lvl: 10 })])], { dir }), /новых утренних списков нет/);
+  // подача шестидневной давности: её торги D+1 давно прошли
+  const stale = [mDay(nDay(-6), [mRow('OLDD', 3e5)])];
+  assert.match(notify(stale, { dir }), /новых утренних списков нет/);
+  assert.match(notify(stale, { dir, args: ['--any-date'] }), /OLDD · /);
+});
+ok('notify: в письме не больше десяти строк, остальное — «и ещё N», длина в пределе Telegram', () => {
+  const dir = freshDir('data-top10');
+  notify([mDay(nDay(-3), [mRow('OLD', 3e5)])], { dir });
+  const rows = Array.from({ length: 13 }, (_, i) => mRow('Q' + String(i).padStart(2, '0'), 9e5 - i * 1e4, { name: 'VERY LONG COMPANY NAME NUMBER ' + i + ' HOLDINGS CORPORATION', tags: ['off', 'deep', 'big'] }));
+  const out = notify([mDay(nDay(-1), rows)], { dir });
+  assert.equal((out.match(/^Q\d\d · /gm) ?? []).length, 10);
+  assert.match(out, /и ещё 3 — на панели/);
+  assert.match(out, /Подачи за \d\d\.\d\d · 13 бумаг/);
+  assert.ok(out.length < 4096);
+});
+ok('notify: --preview печатает образец с оговоркой и не двигает состояние', () => {
+  const dir = freshDir('data-preview');
+  writeMorning([mDay(nDay(-1), [mRow('AAA', 3e5)])]);
+  const out = execFileSync(process.execPath, [...NOTIFY_ARGS(dir), '--dry-run', '--preview'], { encoding: 'utf8' });
+  assert.match(out, /AAA · /); assert.match(out, /Это образец формата, а не новый список/);
+  assert.equal(readJson(join(dir, 'state', 'notify.json'), null), null, 'состояние не создано');
 });
 
-// ---------- доставка: сбой Telegram не теряет позицию (аудит 28.10.2026, C1) ----------
+// ---------- доставка: сбой Telegram не теряет письмо (аудит 28.10.2026, C1) ----------
 // Боевой прогон скрипта против подставного Telegram: preload-модуль переадресует
 // api.telegram.org на локальный сервер, так что проверяется настоящий код отправки без
-// единой правки под тест. До 29.10.2026 позиция записывалась отправленной ДО запроса —
+// единой правки под тест. До 29.10.2026 запись шла отправленной ДО запроса —
 // эти проверки на прежнем коде падают.
 async function okAsync(name, fn) {
   try { await fn(); passed++; }
@@ -1016,107 +1167,91 @@ writeFileSync(REDIRECT, [
   'const real = globalThis.fetch;',
   "globalThis.fetch = (url, init) => real(String(url).replace('https://api.telegram.org', base), init);",
 ].join('\n'));
-function liveNotify(dir, base) {
+function liveNotify(dir, base, extra = []) {
   return new Promise(resolve => execFile(process.execPath,
-    ['--import', pathToFileURL(REDIRECT).href, join(ROOT, 'scripts', 'notify.mjs'), '--site', join(NTMP, 'site'), '--data', dir],
+    ['--import', pathToFileURL(REDIRECT).href, ...NOTIFY_ARGS(dir), ...extra],
     { encoding: 'utf8', env: { ...process.env, FAKE_TG_BASE: base, TELEGRAM_BOT_TOKEN: 'TEST', TELEGRAM_CHAT_ID: '1',
       NEXUS_EVENTS_URL: base + '/nexus', NEXUS_INGEST_TOKEN: 'TEST' } },
     (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: stdout + stderr })));
 }
-// Состояние с уже пересеянной схемой: в нём одна старая позиция.
+// Состояние с уже пересеянной схемой: в нём один старый список.
 function seededDir(name) {
-  const dir = join(NTMP, name);
-  mkdirSync(join(dir, 'state'), { recursive: true });
-  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5)]);
-  execFileSync(process.execPath, [join(ROOT, 'scripts', 'notify.mjs'), '--dry-run', '--site', join(NTMP, 'site'), '--data', dir], { encoding: 'utf8' });
+  const dir = freshDir(name);
+  notify([mDay(nDay(-9), [mRow('OLD', 3e5)])], { dir });
   return dir;
 }
-const sentOf = dir => readJson(join(dir, 'state', 'notify.json'), {}).sentPositions ?? [];
-const headOf = call => call.body.text.split('\n')[0];
+const lineOf = (call, k) => call.body.text.split('\n')[k];
 
-await okAsync('notify: сбой Telegram не помечает позицию отправленной, следующий прогон досылает её одну', async () => {
+await okAsync('notify: сбой Telegram не помечает письмо отправленным, следующий прогон досылает его одно', async () => {
   const dir = seededDir('data-fail');
-  const aaa = nRow('AAA', nDay(-1), 'Smith John', 3e5), bbb = nRow('BBB', nDay(-2), 'Lee Anna', 4e5);
-  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), aaa, bbb]);
+  const dA = nDay(-2), dB = nDay(-1);
+  writeMorning([mDay(dB, [mRow('BBB', 4e5)]), mDay(dA, [mRow('AAA', 3e5)])]);   // файл — от свежего дня к старому
   const api = await fakeApis([TG_OK, { status: 500, body: { ok: false, error_code: 500, description: 'Internal Server Error' } }]);
   try {
-    const r1 = await liveNotify(dir, api.base);
-    assert.ok(!sentOf(dir).includes(`BBB|${bbb.fdate}`), 'недоставленная позиция не должна числиться отправленной');
-    assert.ok(sentOf(dir).includes(`AAA|${aaa.fdate}`), 'доставленная позиция запомнена');
+    const r1 = await liveNotify(dir, api.base, ['--any-date']);
+    assert.ok(!sentOf(dir).includes(`morning|${dB}`), 'недоставленное письмо не должно числиться отправленным');
+    assert.ok(sentOf(dir).includes(`morning|${dA}`), 'доставленное запомнено');
     assert.notEqual(r1.code, 0, 'недоставка обязана давать ненулевой код выхода');
     assert.equal(api.calls.tg.length, 2);
-    assert.equal(headOf(api.calls.tg[0]), '🔔 <b>Инсайдерский радар · AAA — новая позиция</b>');
+    assert.equal(lineOf(api.calls.tg[0], 0), '🔔 <b>Инсайдерский радар · утренний список</b>');
     assert.match(r1.out, /НЕ доставлено: 1 из 2/);
-    // Зеркало в NEXUS — с ключом позиции: досылка на следующий день ляжет на ту же запись хаба.
-    assert.deepEqual(api.calls.nexus.map(b => b.eventId), [`840|AAA|${aaa.fdate}`, `840|BBB|${bbb.fdate}`]);
+    // Зеркало в NEXUS — с ключом даты: досылка на следующий день ляжет на ту же запись хаба.
+    assert.deepEqual(api.calls.nexus.map(b => b.eventId), [`840|morning|${dA}`, `840|morning|${dB}`]);
 
-    const r2 = await liveNotify(dir, api.base);
+    const r2 = await liveNotify(dir, api.base, ['--any-date']);
     assert.equal(r2.code, 0, r2.out);
     assert.equal(api.calls.tg.length, 3, 'досылается ровно одно сообщение — недоставленное');
-    assert.equal(headOf(api.calls.tg[2]), '🔔 <b>Инсайдерский радар · BBB — новая позиция</b>');
-    assert.equal(api.calls.nexus.at(-1).eventId, `840|BBB|${bbb.fdate}`);
-    assert.ok(sentOf(dir).includes(`BBB|${bbb.fdate}`));
+    assert.match(api.calls.tg[2].body.text, /<b>BBB<\/b> · /);
+    assert.equal(api.calls.nexus.at(-1).eventId, `840|morning|${dB}`);
+    assert.ok(sentOf(dir).includes(`morning|${dB}`));
 
-    const r3 = await liveNotify(dir, api.base);
+    const r3 = await liveNotify(dir, api.base, ['--any-date']);
     assert.equal(r3.code, 0);
     assert.equal(api.calls.tg.length, 3, 'после доставки повторов нет');
-    assert.match(r3.out, /новых позиций нет/);
+    assert.match(r3.out, /новых утренних списков нет/);
   } finally { await api.close(); }
 });
-await okAsync('notify: обрыв соединения не роняет скрипт необработанной ошибкой и не теряет позицию', async () => {
+await okAsync('notify: обрыв соединения не роняет скрипт необработанной ошибкой и не теряет письмо', async () => {
   const dir = seededDir('data-drop');
-  const ccc = nRow('CCC', nDay(-1), 'Smith John', 3e5);
-  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), ccc]);
+  const d = nDay(-1);
+  writeMorning([mDay(d, [mRow('CCC', 3e5)])]);
   const api = await fakeApis(['drop']);
   try {
     const r1 = await liveNotify(dir, api.base);
-    assert.ok(!sentOf(dir).includes(`CCC|${ccc.fdate}`), 'позиция не должна числиться отправленной');
+    assert.ok(!sentOf(dir).includes(`morning|${d}`), 'список не должен числиться отправленным');
     assert.notEqual(r1.code, 0);
     assert.match(r1.out, /Telegram не принял сообщение — сеть/);
     const r2 = await liveNotify(dir, api.base);
     assert.equal(r2.code, 0, r2.out);
     assert.equal(api.calls.tg.length, 2);
-    assert.ok(sentOf(dir).includes(`CCC|${ccc.fdate}`));
+    assert.ok(sentOf(dir).includes(`morning|${d}`));
   } finally { await api.close(); }
 });
 await okAsync('notify: 429 — один повтор через retry_after, без потери и без дубля', async () => {
   const dir = seededDir('data-429');
-  const ddd = nRow('DDD', nDay(-1), 'Smith John', 3e5);
-  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), ddd]);
+  const d = nDay(-1);
+  writeMorning([mDay(d, [mRow('DDD', 3e5)])]);
   const api = await fakeApis([TG_429(1)]);
   try {
     const r = await liveNotify(dir, api.base);
     assert.equal(r.code, 0, r.out);
     assert.equal(api.calls.tg.length, 2, 'ровно один повтор');
     assert.ok(api.calls.tg[1].at - api.calls.tg[0].at >= 950, 'повтор не раньше retry_after');
-    assert.ok(sentOf(dir).includes(`DDD|${ddd.fdate}`));
+    assert.ok(sentOf(dir).includes(`morning|${d}`));
   } finally { await api.close(); }
 });
-await okAsync('notify: повторный 429 и запрет длиннее минуты — без ожидания, позиция ждёт следующего прогона', async () => {
+await okAsync('notify: повторный 429 и запрет длиннее минуты — без ожидания, письмо ждёт следующего прогона', async () => {
   const dir = seededDir('data-429x');
-  const eee = nRow('EEE', nDay(-1), 'Smith John', 3e5), fff = nRow('FFF', nDay(-2), 'Lee Anna', 3e5);
-  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), eee, fff]);
+  const dA = nDay(-2), dB = nDay(-1);
+  writeMorning([mDay(dB, [mRow('FFF', 3e5)]), mDay(dA, [mRow('EEE', 3e5)])]);
   const api = await fakeApis([TG_429(1), TG_429(1), TG_429(3600)]);
   try {
     const t0 = Date.now();
-    const r = await liveNotify(dir, api.base);
+    const r = await liveNotify(dir, api.base, ['--any-date']);
     assert.notEqual(r.code, 0);
-    assert.equal(api.calls.tg.length, 3, 'EEE: запрос и один повтор; FFF: запрос без повтора');
+    assert.equal(api.calls.tg.length, 3, 'первое письмо: запрос и один повтор; второе: запрос без повтора');
     assert.ok(Date.now() - t0 < 30000, 'час ожидания не берётся');
-    assert.ok(!sentOf(dir).includes(`EEE|${eee.fdate}`) && !sentOf(dir).includes(`FFF|${fff.fdate}`));
-  } finally { await api.close(); }
-});
-await okAsync('notify: сводка помечает отправленными все свои позиции и несёт ключ состава', async () => {
-  const dir = seededDir('data-digest');
-  const five = ['G1', 'G2', 'G3', 'G4', 'G5'].map((t, i) => nRow(t, nDay(-1), 'Buyer ' + i, 1e5 * (i + 1)));
-  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), ...five]);
-  const api = await fakeApis([]);
-  try {
-    const r = await liveNotify(dir, api.base);
-    assert.equal(r.code, 0, r.out);
-    assert.equal(api.calls.tg.length, 1);
-    assert.match(api.calls.nexus[0].eventId, /^840\|digest\|[0-9a-f]{16}$/);
-    for (const p of five) assert.ok(sentOf(dir).includes(`${p.t}|${p.fdate}`), p.t);
+    assert.ok(!sentOf(dir).includes(`morning|${dA}`) && !sentOf(dir).includes(`morning|${dB}`));
   } finally { await api.close(); }
 });
 // ---------- единый стиль сообщений (стандарт 29.10.2026, TELEGRAM-STYLE-2026-10-29.md) ----------
@@ -1142,58 +1277,35 @@ function styleFaults(html) {
   for (const l of lines.slice(1)) if (/^\p{Extended_Pictographic}/u.test(l)) bad.push(`эмодзи не в заголовке: ${l}`);
   return bad;
 }
-await okAsync('стиль: карточка и сводка — пометка панели, МСК, русские числа, подвал', async () => {
+await okAsync('стиль: утреннее письмо — пометка панели, МСК, русские числа, подвал, зеркало NEXUS', async () => {
   const dir = seededDir('data-style');
-  const big = nRow('BRK', nDay(-1), 'BUFFETT WARREN E', 12.34e6, { sh: 20, cur: 721111.5, entryPx: 715000.25, chg: -0.0123, dd: -0.0456, dv: 2.5e7, role: 'C', exit: '2027-01-26' });
-  const cheap = nRow('PNY', nDay(-1), 'SMITH JOHN', 4.5e4, { sh: 98533, cur: 0.5, entryPx: 0.45, chg: 0.111, dd: -0.003, dv: 9.9e5 });
-  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), big, cheap]);
+  const d = nDay(-1);
+  const counter = { ...mCounter, l30: { n: 1234, days: 40, mean: -0.0012, median: -0.0005, win: 0.481 } };
+  writeMorning([mDay(d, [
+    mRow('BRK', 12.34e6, { role: 'C', tags: ['off', 'big'], name: 'BERKSHIRE HATHAWAY INC' }),
+    mRow('PNY', 4.5e4, { name: 'PENNY CORP', dv: 3.1e7 }),
+    mRow('LOW', 2e5, { lvl: 10, dv: 1.2e7 }),
+  ])], counter);
   const api = await fakeApis([]);
   try {
     const r = await liveNotify(dir, api.base);
     assert.equal(r.code, 0, r.out);
-    const texts = api.calls.tg.map(c => c.body.text);
-    assert.equal(texts.length, 2);
-    for (const t of texts) assert.deepEqual(styleFaults(t), [], styleFaults(t).join("; ") + " :: " + t);
-    const brk = texts.find(t => t.includes('BRK'));
-    assert.match(brk, /Куплено на <b>\$12\u00a0млн<\/b> по \$617\u00a0000,00/, brk);
-    assert.match(brk, /На 4,6% ниже 52-недельного максимума, оборот \$25\u00a0млн в день/, brk);
-    assert.match(brk, /Вход \$715\u00a0000,25 → сейчас <b>\$721\u00a0111,50<\/b> \(−1,2%\)/, brk);
-    assert.match(brk, /выход 26\.01\.2027/, 'дата не текущего года — с годом');
-    const pny = texts.find(t => t.includes('PNY'));
-    assert.match(pny, /Куплено на <b>\$45\u00a0тыс\.<\/b> по \$0,457/, pny);
-    assert.match(pny, /\(\+11,1%\)/);
-    // лента NEXUS — тот же текст без разметки, с ключом позиции
-    assert.equal(api.calls.nexus.length, 2);
-    for (const b of api.calls.nexus) {
-      assert.match(b.text, /^🔔 Инсайдерский радар · [A-Z]+ — новая позиция\n/, b.text);
-      assert.match(b.text, /\n\nОткрыть панель · \d\d\.\d\d, \d\d:\d\d МСК$/, b.text);
-    }
-  } finally { await api.close(); }
-});
-await okAsync('стиль: длинная сводка режется по границе блока на части не длиннее предела', async () => {
-  const dir = seededDir('data-style-digest');
-  const many = Array.from({ length: 60 }, (_, i) => nRow(`T${String(i).padStart(2, '0')}`, nDay(-1), 'Buyer ' + i, 1e5 * (i + 1)));
-  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), ...many]);
-  const api = await fakeApis([]);
-  try {
-    const r = await liveNotify(dir, api.base);
-    assert.equal(r.code, 0, r.out);
-    const texts = api.calls.tg.map(c => c.body.text);
-    assert.ok(texts.length >= 2, `сводка из 60 позиций обязана разрезаться: ${texts.length}`);
-    texts.forEach((t, k) => {
-      assert.deepEqual(styleFaults(t), [], t);
-      assert.ok(t.startsWith(`🔔 <b>Инсайдерский радар · 60 новых позиций (${k + 1}/${texts.length})</b>\n\n<b>T`), t.slice(0, 120));
-    });
-    const blocks = texts.flatMap(t => t.split('\n\n').filter(b => /^<b>T\d\d<\/b>/.test(b)));
-    assert.equal(blocks.length, 60, 'каждая позиция — ровно в одной части, блок не рвётся');
-    for (const p of many) assert.ok(sentOf(dir).includes(`${p.t}|${p.fdate}`), p.t);
-    assert.equal(new Set(api.calls.nexus.map(b => b.eventId)).size, texts.length, 'у каждой части свой ключ состава');
+    assert.equal(api.calls.tg.length, 1);
+    const t = api.calls.tg[0].body.text;
+    assert.deepEqual(styleFaults(t), [], styleFaults(t).join('; ') + ' :: ' + t);
+    assert.match(t, new RegExp(`<b>BRK</b> · Berkshire Hathaway Inc · \\$12${NB}млн · офицер, ≥\\$1${NB}млн`), t);
+    assert.match(t, new RegExp(`<b>PNY</b> · Penny Corp · \\$45${NB}тыс\\.\\n`), t);
+    assert.match(t, /Счётчик с 05\.11: 1234 сделки?|Счётчик с 05\.11: 1234 сделок, среднее −0,12% к IWM, в плюсе 48%\./, t);
+    // зеркало NEXUS — тот же текст без разметки, с ключом даты подачи
+    assert.equal(api.calls.nexus.length, 1);
+    assert.equal(api.calls.nexus[0].eventId, `840|morning|${d}`);
+    assert.match(api.calls.nexus[0].text, /^🔔 Инсайдерский радар · утренний список\n/, api.calls.nexus[0].text);
+    assert.match(api.calls.nexus[0].text, /\n\nОткрыть панель · \d\d\.\d\d, \d\d:\d\d МСК$/, api.calls.nexus[0].text);
   } finally { await api.close(); }
 });
 await okAsync('стиль: «can\'t parse entities» — повтор тем же текстом без разметки', async () => {
   const dir = seededDir('data-parse');
-  const hhh = nRow('HHH', nDay(-1), 'Smith John', 3e5, { name: 'H&M <TEST> INC' });
-  writeJson(join(NTMP, 'site', 'data', 'feed.json'), [nRow('OLD', nDay(-3), 'Old Man', 3e5), hhh]);
+  writeMorning([mDay(nDay(-1), [mRow('HHH', 3e5, { name: 'H&M <TEST> INC' })])]);
   const api = await fakeApis([{ status: 400, body: { ok: false, error_code: 400, description: "Bad Request: can't parse entities: unexpected end tag at byte offset 12" } }]);
   try {
     const r = await liveNotify(dir, api.base);
@@ -1201,8 +1313,9 @@ await okAsync('стиль: «can\'t parse entities» — повтор тем ж�
     assert.equal(api.calls.tg.length, 2);
     assert.equal(api.calls.tg[0].body.parse_mode, 'HTML');
     assert.equal(api.calls.tg[1].body.parse_mode, undefined, 'повтор — без разметки');
-    assert.match(api.calls.tg[1].body.text, /^🔔 Инсайдерский радар · HHH — новая позиция\nH&M <Test> Inc\n/, api.calls.tg[1].body.text);
-    assert.ok(sentOf(dir).includes(`HHH|${hhh.fdate}`));
+    assert.match(api.calls.tg[1].body.text, /^🔔 Инсайдерский радар · утренний список\n/, api.calls.tg[1].body.text);
+    assert.ok(api.calls.tg[1].body.text.includes('HHH · H&M <Test> Inc · '), api.calls.tg[1].body.text);
+    assert.ok(sentOf(dir).includes(`morning|${nDay(-1)}`));
   } finally { await api.close(); }
 });
 await okAsync('стиль: проверка связи — пометка панели и подвал', async () => {
@@ -1219,6 +1332,26 @@ await okAsync('стиль: проверка связи — пометка пан
     assert.ok(t.startsWith('ℹ️ <b>Инсайдерский радар · Проверка связи</b>\n'), t);
     assert.deepEqual(styleFaults(t), [], t);
   } finally { await api.close(); }
+});
+await okAsync('цены: ответ Yahoo даёт пары открытие/закрытие из одного ответа, снятые бары в них не попадают', async () => {
+  const day = (iso, h = 14, mi = 30) => Math.floor(Date.parse(`${iso}T${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}:00Z`) / 1000);
+  const days = ['2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30'];
+  const body = { chart: { result: [{
+    meta: { currency: 'USD', instrumentType: 'EQUITY', gmtoffset: -14400, exchangeName: 'NYQ' },
+    timestamp: days.map(d => day(d)),
+    indicators: {
+      quote: [{ open: [10, 11, null, 12, 12.5], close: [10.5, 11.2, 11.0, 12.4, 12.6], volume: [1e6, 1e6, 1e6, 1e6, 1e6] }],
+      adjclose: [{ adjclose: [10.5, 11.2, 11.0, 12.4, 12.6] }],
+    },
+  }] } };
+  const real = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(body), { status: 200 });
+  try {
+    const res = await fetchYahooDaily('ZZZ', '2026-10-01');
+    assert.deepEqual(res.ohlc, [
+      [days[0], 10, 10.5], [days[1], 11, 11.2], [days[2], null, 11], [days[3], 12, 12.4], [days[4], 12.5, 12.6]]);
+    assert.equal(res.series.length, 5);
+  } finally { globalThis.fetch = real; }
 });
 rmSync(NTMP, { recursive: true, force: true });
 

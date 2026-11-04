@@ -199,80 +199,71 @@ footer { padding: 14px 20px; border-top: 1px solid var(--border); }
 }
 
 
-/* ================= Скринер: карточка рабочего набора =================
-   Один экран решения, поэтому иерархия жёсткая: сначала главное число, потом правило,
-   потом всё остальное. Плоский список из шести равнозначных чисел (как было) не давал
-   понять, на что смотреть в первую очередь. */
-.hero {
+/* ================= Утренний список =================
+   Главный экран. Сверху живой счётчик (семь чисел по одной сетке), под ним плашка всплеска,
+   дальше таблица дня. Числа читаются вместе, поэтому колонки счётчика одной ширины. */
+.strip {
   background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
-  padding: 16px 18px; margin-bottom: 16px; box-shadow: var(--shadow);
+  padding: 12px 16px; margin-bottom: 10px; box-shadow: var(--shadow);
 }
-.hero-top { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
-.hero-title { flex: 1 1 380px; min-width: 280px; }
-.hero-title h2 { font-size: 20px; margin: 0 0 4px; }
-.hero-title p { margin: 0; color: var(--ink-2); font-size: 13px; max-width: 62ch; }
-.hero-title a { color: var(--accent); }
-/* Главное число — единственный крупный элемент на экране */
-.hero-figure { text-align: right; margin-left: auto; }
-.figure-val { font-size: 34px; font-weight: 700; line-height: 1.05; font-variant-numeric: tabular-nums; }
-.figure-val.pos { color: var(--c-buy); }
-.figure-val.neg { color: var(--c-sell); }
-.figure-lab { font-size: 13px; color: var(--ink); font-weight: 600; }
-.figure-note { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+.strip-head { font-size: 12.5px; color: var(--ink-2); margin-bottom: 8px; }
+.strip-head b { color: var(--ink); }
+.strip-cells { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px 16px; }
+.sc { cursor: help; min-width: 0; }
+.sc b { display: block; font-size: 18px; line-height: 1.2; font-variant-numeric: tabular-nums; }
+.sc span { font-size: 11.5px; color: var(--ink-2); }
+.sc b.pos { color: var(--c-buy); }
+.sc b.neg { color: var(--c-sell); }
+.sc b.muted { color: var(--ink-3); font-size: 18px; }
+.strip-empty { color: var(--ink-2); font-size: 13px; }
 
-/* Правило набора: четыре условия и предупреждение о сроке входа */
-.rule-chips { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; margin: 14px 0 0; padding: 0; }
-.rule-chips li {
-  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-  padding: 4px 10px; font-size: 12.5px; color: var(--ink);
+.surge {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 6px 14px; margin-bottom: 12px; font-size: 13px;
 }
-.rule-chips li span { color: var(--ink-3); margin-right: 6px; }
-/* Срок входа — не условие отбора, а требование к исполнению: выделен отдельно,
-   потому что именно он чаще всего нарушается */
-.rule-chips li.rule-warn { background: var(--warn-bg); border-color: transparent; }
+.surge:empty { display: none; }
+.surge.on { background: var(--good-bg); border-color: var(--c-buy); }
+.surge-main b { margin-right: 8px; }
+.surge-z { color: var(--ink-2); cursor: help; font-variant-numeric: tabular-nums; }
+.spark { margin-left: auto; display: block; }
+.spark-thr { stroke: var(--ink-3); stroke-dasharray: 3 3; stroke-width: 1; }
+.spark-line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+.spark-dot { fill: var(--accent); }
+.surge.on .spark-dot { fill: var(--c-buy); }
 
-/* Вторичные метрики: ровная строка без рамок — рамки конкурировали бы с карточкой */
-.hero-metrics {
-  display: flex; flex-wrap: wrap; gap: 0 28px;
-  margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--grid);
-}
-.hero-metrics .hm { cursor: help; padding: 2px 0; }
-.hero-metrics .hm b { display: block; font-size: 16px; font-variant-numeric: tabular-nums; }
-.hero-metrics .hm span { font-size: 11.5px; color: var(--ink-2); }
-
-/* Таблица-карточки: вторая строка в ячейке вместо отдельной колонки */
-.sub2 { display: block; font-size: 11.5px; color: var(--ink-2); line-height: 1.3; }
-table.cards td { vertical-align: top; }
-table.cards td.num .sub2 { color: var(--ink-3); }
-/* Протухший сигнал не прячем, а гасим: видеть, что он был, полезно */
-tr.row-dead td { opacity: .45; }
+table.morning td { vertical-align: top; }
+table.morning td.marks { white-space: normal; min-width: 150px; }
+table.morning td.marks .pill { margin: 0 2px 2px 0; }
+table.morning .who-m, table.morning .marks-m { display: none; }
 td.empty {
   color: var(--ink-2); padding: 18px 12px; line-height: 1.55;
   white-space: normal; max-width: 72ch;
 }
+/* Вторая строка в ячейке вместо отдельной колонки */
+.sub2 { display: block; font-size: 11.5px; color: var(--ink-2); line-height: 1.3; }
+/* «и ещё N» внутри строки: приглушено, но не уводится на отдельную строку */
+.sub2-inline { color: var(--ink-3); font-size: 11.5px; }
 
-/* Статистика: эталонные строки бледнее, рабочий набор подсвечен */
+/* Статистика: итоги ревизии — статичный блок, строки таблиц-эталонов бледнее */
 tr.row-strong td { background: var(--good-bg); }
 tr.muted-row td { color: var(--ink-2); }
+table.mini.rev { width: 100%; }
+table.mini.rev th:last-child, table.mini.rev td:last-child { text-align: left; }
 /* Заголовки разделов статистики: без них экран читался как одна длинная простыня */
 #tab-stats h3 {
   font-size: 16px; margin: 26px 0 4px; padding-top: 14px;
   border-top: 1px solid var(--grid);
 }
 #tab-stats h3:first-of-type { border-top: none; margin-top: 8px; padding-top: 0; }
-#set-proof h4 { font-size: 13px; margin: 16px 0 4px; color: var(--ink); }
-#set-proof .table-wrap { margin-bottom: 4px; }
 
-/* Узкий экран: карточка складывается в колонку, число уходит влево под заголовок.
-   Метрики — в две колонки: в один столбец карточка занимала бы три четверти экрана,
-   и до таблицы сигналов приходилось долистывать. */
 @media (max-width: 720px) {
   main { padding: 12px; }
-  .hero { padding: 14px; }
-  .hero-figure { text-align: left; margin-left: 0; }
-  .figure-val { font-size: 28px; }
-  .hero-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
-  .hero-metrics .hm b { font-size: 15px; }
+  .strip { padding: 10px 12px; }
+  .strip-cells { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px 10px; }
+  .sc b, .sc b.muted { font-size: 15px; }
+  .surge { padding: 6px 12px; }
+  .spark { margin-left: 0; }
   /* Шапка на телефоне съедала треть первого экрана */
   .topbar { padding: 10px 12px 8px; gap: 10px; }
   .brand .sub { display: none; }
@@ -281,22 +272,17 @@ tr.muted-row td { color: var(--ink-2); }
   .tabs { padding: 0 8px; }
   .tabs a { padding: 8px 11px; font-size: 13px; }
   #tab-stats h3 { margin-top: 20px; }
-  /* На телефоне карточка не должна съедать весь первый экран: убираем пояснение,
-     сжимаем условия и прячем метрику, дублирующую главное число */
-  .wide-only { display: none; }
-  .rule-chips { gap: 4px; margin-top: 10px; }
-  .rule-chips li { padding: 3px 8px; font-size: 12px; }
-  .hero-metrics { margin-top: 10px; padding-top: 10px; }
-  .hero-metrics .hm:nth-child(n+5) { display: none; }
+  /* На узком экране таблица обязана поместиться без прокрутки: «Кто» переезжает под название
+     бумаги, оборот, открытие и закрытие прячутся (цены остаются в подсказке и на десктопе) */
+  table.morning .c-who, table.morning .c-dv, table.morning .c-open, table.morning .c-close { display: none; }
+  table.morning .who-m, table.morning .marks-m { display: block; }
+  table.morning .c-marks { display: none; }
+  table.morning .marks-m .pill { margin: 2px 3px 0 0; }
+  table.morning { font-size: 12.5px; }
+  table.morning td, table.morning th { padding: 6px 5px; }
+  table.morning td:first-child { max-width: 150px; }
+  /* Итоги ревизии на узком экране переносят строки: три колонки текста не помещаются в одну строку */
+  table.mini.rev td, table.mini.rev th { white-space: normal; padding: 4px 6px; font-size: 12px; }
+  table.mini.rev td.num { text-align: left; }
+  table.morning .sub2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
-
-
-/* «и ещё N» внутри строки: приглушено, но не уводится на отдельную строку */
-.sub2-inline { color: var(--ink-3); font-size: 11.5px; }
-
-/* Позиция открыта, но вход уже закрыт: не гасим как истёкшую, но и не выделяем */
-tr.row-hold td { opacity: .8; }
-
-/* День входа наступил, но закрытия ещё не было: не гасим как «нет данных» —
-   это действие на сегодня, а не пропуск */
-td .pending { color: var(--c-buy); font-size: 12px; white-space: nowrap; }
