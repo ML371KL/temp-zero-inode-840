@@ -22,6 +22,8 @@ import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleT
 import { applyGates, isPlanned, DROP_LABELS } from './lib/gates.mjs';
 import { buildOwnerGroups, isPersonOwner, isFundOnly, topRole, dOwnOf } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './lib/routine.mjs';
+import { readOpens, opensOf, nextTradingDay } from './lib/opens.mjs';
+import { MORNING, BREADTH, buildDay, tradeResult, summarize, breadth } from './lib/morning.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 
@@ -29,6 +31,10 @@ const args = process.argv.slice(2);
 function argVal(name, def) { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; }
 const DATA = argVal('--data', 'data');
 const SITE = argVal('--site', 'site');
+// Начало живого счётчика утреннего списка. Переопределяется только для сверки с ревизией:
+// --counter-from 2026-08-15 [--counter-dump файл.json] (все сделки счётчика построчно).
+const COUNTER_FROM = argVal('--counter-from', MORNING.liveFrom);
+const COUNTER_DUMP = argVal('--counter-dump', null);
 
 const today = isoToday();
 const HORIZONS = { 3: 63, 6: 126, 12: 252, 24: 504 };  // месяцы -> торговые дни
@@ -282,6 +288,10 @@ for (const [t, rows] of byTicker) {
     if (r.code !== 'P') continue;
     r._dv = dollarVolumeAt(s, r.tdate);
     r._bucket = sizeBucket(r._dv);
+    // Закрытие на дату подачи в номинальных ценах (как его видел читатель): условие «цена ≥ $5»
+    // утреннего списка. Ряд, оборванный раньше подачи больше чем на неделю, цены не даёт.
+    const iF = idxAtOrBefore(s, r.fdate);
+    r._pxL = iF >= 0 && s[iF][0] >= addDaysIso(r.fdate, -7) ? rnd(s[iF][1] * nominalFactor(sp, r.fdate), 4) : null;
     r._fw = forward(r, s);
     const e = idxFirstAfter(s, r.fdate);
     // Цена, по которой подписчик реально входит: закрытие первого торгового дня после подачи.
@@ -409,6 +419,81 @@ const feedRows = buys.filter(r => r.fdate >= feedCut).map(r => ({
 feedRows.sort((a, b) => (a.fdate < b.fdate ? 1 : a.fdate > b.fdate ? -1 : b.val - a.val));
 W('feed.json', feedRows);
 
+// ---------- Утренний список и живой счётчик (D+1) ----------
+// Главный экран панели с 11.2026. Список дня подачи — покупки, прошедшие гейты, от $10 тыс.,
+// в бумагах дороже $5 и с оборотом от $10 млн (уровень 30 — главный, 10 — широкий; витрина
+// переключает). Покупка на открытии следующего торгового дня, продажа на закрытии того же дня.
+// Правила и числа ревизии — scripts/lib/morning.mjs и docs/ЧТО-РАБОТАЕТ.md. Считается по
+// покупкам с даты начала счётчика, а не по окну ленты (200 дней): счётчик копится с запуска
+// и не должен терять старые дни.
+const opensStore = readOpens(DATA);
+const dayCand = new Map();
+// Строки-кандидаты нужны только для последних дней и для счётчика: старше — не копим в памяти
+const DAY_CUT = COUNTER_FROM < addDaysIso(today, -30) ? COUNTER_FROM : addDaysIso(today, -30);
+for (const r of buys) {
+  if (r._dv === null || r._dv === undefined || r.fdate < DAY_CUT) continue;
+  (dayCand.get(r.fdate) ?? dayCand.set(r.fdate, []).get(r.fdate)).push({
+    t: r.T, name: ref.get(r.cik)?.name ?? r.t, who: (r.owners ?? []).map(o => o.name),
+    role: r._role, val: r.val, dd: r._dd, dv: r._dv, px: r._pxL ?? null,
+    drop: r._gate.ok ? null : (r._gate.drop ?? 'x'),
+  });
+}
+const allFdates = [...new Set(buys.map(r => r.fdate))].sort();
+// День D+1 состоялся и закрыт, только если он раньше сегодняшнего: сборка в середине сессии
+// увидела бы незавершённый бар, а результат дня не должен меняться задним числом.
+function dayWithResults(fd) {
+  const entry = nextTradingDay(opensStore, fd);
+  const done = entry !== null && entry < today;
+  const rows = buildDay(dayCand.get(fd) ?? []).map(x => {
+    const out = { ...x, who: x.who.slice(0, 2), nWho: x.who.length };
+    if (done) {
+      const res = tradeResult(opensOf(opensStore, x.t, entry), opensOf(opensStore, 'IWM', entry));
+      Object.assign(out, res);
+    }
+    return out;
+  });
+  return { date: fd, entry: done ? entry : null, done, rows };
+}
+const counterTrades = { 30: [], 10: [] }, counterSkips = { 30: {}, 10: {} };
+for (const fd of allFdates) {
+  if (fd < COUNTER_FROM) continue;
+  const day = dayWithResults(fd);
+  if (!day.done) continue;
+  for (const row of day.rows) {
+    for (const lvl of row.lvl === 30 ? [30, 10] : [10]) {
+      if (row.skip) { counterSkips[lvl][row.skip] = (counterSkips[lvl][row.skip] ?? 0) + 1; continue; }
+      counterTrades[lvl].push({ day: day.entry, fd, t: row.t, lvl: row.lvl, r: row.r, b: row.b, ex: row.ex });
+    }
+  }
+}
+const counterOut = {
+  from: COUNTER_FROM, cost: MORNING.cost,
+  upTo: counterTrades[10].reduce((m, x) => (m === null || x.day > m ? x.day : m), null),
+  l30: { ...summarize(counterTrades[30]), skips: counterSkips[30] },
+  l10: { ...summarize(counterTrades[10]), skips: counterSkips[10] },
+};
+const morningDays = allFdates.slice(-MORNING.daysShown).reverse().map(dayWithResults);
+W('morning.json', {
+  built: today, pricesAsOf: spy?.length ? spy[spy.length - 1][0] : null,
+  params: { minVal: MORNING.minVal, minPx: MORNING.minPx, dvMain: MORNING.dvMain, dvWide: MORNING.dvWide },
+  counter: counterOut, days: morningDays,
+});
+if (COUNTER_DUMP) writeJson(COUNTER_DUMP, counterTrades);
+
+// ---------- Всплеск покупок ----------
+// Число разных эмитентов с прошедшими гейты покупками от $10 тыс. по месяцам подачи. Только
+// сводка: в 837 пока не отдаётся (решение владельца впереди).
+const breadthSets = new Map();
+for (const r of buys) {
+  if (!r._gate.ok || !(r.val >= MORNING.minVal)) continue;
+  const m = r.fdate.slice(0, 7);
+  (breadthSets.get(m) ?? breadthSets.set(m, new Set()).get(m)).add(r.cik);
+}
+// --breadth-keep N — длина истории в файле (для сверки с эпизодами ревизии; на витрине 60 месяцев)
+const breadthOut = breadth(new Map([...breadthSets].map(([m, set]) => [m, set.size])), {
+  partialFrom: today.slice(0, 7), p: { ...BREADTH, keep: Number(argVal('--breadth-keep', BREADTH.keep)) },
+});
+
 // Бэктест: ВСЕ покупки с ценами, включая отсеянные (с причиной) — экран «Статистика»
 // проверяет на собственных данных, что гейты режут именно шум, а не сигнал.
 // В бэктест идут ТОЛЬКО point-in-time версии кластера и скора (см. фазу C)
@@ -432,7 +517,7 @@ const bucketDdLabel = d => d === null ? 'н/д' : d <= -0.30 ? 'просадка
 // «что здесь на самом деле есть», и по каждому уже известен ответ (docs/ЧТО-РАБОТАЕТ.md).
 // Срез «кластер» убран вместе с кластерами, срез «скор» — вместе со скором.
 const DIMS = {
-  set: r => r.set ? '✓ рабочий набор' : 'вне набора',
+  set: r => r.set ? '✓ у максимума, 3 мес.' : 'вне набора',
   gate: r => r.gate === 'ok' ? '✓ прошли гейты' : (DROP_LABELS[r.gate] ?? r.gate),
   all: () => 'прошедшие гейты',
   role: r => r.role,
@@ -691,6 +776,8 @@ W('stats.json', {
   // затухание при задержке входа. Страница показывает, но не считает.
   set: workingSet, avoid, reference, roundTrip: ROUND_TRIP,
   setDef: { maxDd: SET_MAX_DD, minVal: SET_MIN_VAL, minDv: SET_MIN_DV, hold: SET_HOLD_MONTHS, freshDays: SET_FRESH_DAYS },
+  // Всплеск числа покупающих эмитентов (z ≥ 2 к 36 прошлым месяцам); история ~60 месяцев
+  breadth: breadthOut,
   // Диагностические срезы: что на самом деле лежит в каждой группе сделок
   portfolio: portAgg,
   method: { minDv: PORT_MIN_DV, hold: PORT_HOLD, split: PORT_SPLIT, minNames: 5, minMonths: PORT_MIN_MONTHS, thin: PORT_THIN },
@@ -817,6 +904,13 @@ console.log(`[compute] бэктест ${backtestRows.length}, в рабочем 
 console.log(`[compute] без цен: ${noPriceTickers.size} тикеров; OTC отсечено строк: ${cntOtc} (из них по реестру символов: ${cntOtcByRegistry})`);
 console.log(`[compute] качество: чужой тикер ${quality.reassigned} строк в ${quality.reassignedTickers.size} тикерах; символ вне реестра ${quality.unknownSymbol}; вход невозможен ${quality.noEntry}; снято выбросов ${readStats.droppedBars} в ${readStats.dirtySeries} рядах; обрезано замороженных хвостов ${readStats.frozenBars} баров в ${readStats.frozenSeries} рядах`);
 console.log(`[compute] ремонт рядов: пересчитано по сплитам ${readStats.splitFixed}; обрезано по реестру ${readStats.clippedBars} баров в ${readStats.clippedSeries} рядах; срезано по разрыву данных ${readStats.brokenBars} баров в ${readStats.brokenSeries} рядах; устаревших рядов (не делистинг) ${stalePrices.size}`);
+{
+  const fmtSum = s => s.n ? `${s.n} сделок за ${s.days} дн., среднее ${(s.mean * 100).toFixed(2)}% к IWM, медиана ${(s.median * 100).toFixed(2)}%, в плюсе ${Math.round(s.win * 100)}%, t по дням ${s.tDays}, нетто ${(s.net * 100).toFixed(2)}%` : 'сделок нет';
+  const lastDay = morningDays[0];
+  console.log(`[compute] утренний список ${lastDay?.date ?? '—'}: ${lastDay?.rows.length ?? 0} бумаг (из них ≥$30 млн: ${lastDay?.rows.filter(x => x.lvl === 30).length ?? 0})`);
+  console.log(`[compute] счётчик с ${COUNTER_FROM}: ≥$30 млн — ${fmtSum(counterOut.l30)}; ≥$10 млн — ${fmtSum(counterOut.l10)}`);
+  console.log(`[compute] всплеск покупок: ${breadthOut ? `на ${breadthOut.asOf} B3=${breadthOut.b3}, z=${breadthOut.z}, ${breadthOut.surge ? 'ВСПЛЕСК' : 'нет'}` : 'н/д'}`);
+}
 if (workingSet) {
   console.log(`[compute] рабочий набор: ${workingSet.n} бумаг, к SPY ${(workingSet.spy * 100).toFixed(1)}% (t=${workingSet.spyT}), `
     + `α к 3 факторам ${(workingSet.a * 100).toFixed(1)}% (t=${workingSet.t}), Шарп ${workingSet.sharpe}, `

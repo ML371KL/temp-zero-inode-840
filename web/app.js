@@ -14,7 +14,8 @@ const ROLE_LABEL = { F: 'CFO', C: 'CEO/През', O: 'Офицер', D: 'Дир�
 export const FEAT = {
   // Число здесь обязано совпадать с SET_MAX_DD в scripts/compute.mjs — за этим следит
   // инвариант в scripts/selftest.mjs: легенда, разошедшаяся с правилом, хуже её отсутствия.
-  high:          ['М',  'У максимума', 'Акция не более чем на 7% ниже 52-недельного максимума: инсайдер платит высокую цену. Ключевое условие рабочего набора', 'buy'],
+  // Метка нейтральная: набор «у максимума, 3 мес.» на ревизии 04.11.2026 альфы не дал.
+  high:          ['М',  'У максимума', 'Акция не более чем на 7% ниже 52-недельного максимума: инсайдер платит высокую цену. Фильтр ленты, не рекомендация', 'gray'],
   'first-ever':  ['1',  'Первая покупка', 'Первая покупка этого инсайдера в наших данных. Лучше сопоставимых бумаг, но индекс не обгоняет', 'gray'],
   // Помечен нейтрально сознательно: на проверке вне выборки признак дал отрицательный
   // эффект (−2.4%) и в скоринг v3 не вошёл — зелёная метка вводила бы в заблуждение
@@ -55,7 +56,7 @@ $('#theme-toggle').addEventListener('click', () => {
 const state = {
   feed: null, stats: null, meta: null,
   tickersIndex: null, tickerData: null, chart: null, feedShown: 100, sort: null,
-  live: null,          // последний ответ воркера котировок, null — живого слоя нет
+  morning: null,       // morning.json: списки последних дней подачи и живой счётчик
 };
 async function fetchJson(path) {
   const res = await fetch('data/' + path, { cache: 'no-cache' });
@@ -65,14 +66,15 @@ async function fetchJson(path) {
 
 // ---------- Роутинг ----------
 const tabs = document.querySelectorAll('.tabs a');
-const TABS = ['screener', 'feed', 'ticker', 'stats'];
+const TABS = ['morning', 'feed', 'ticker', 'stats'];
 function route() {
-  const hash = location.hash || '#screener';
+  const hash = location.hash || '#morning';
   let [tab, arg] = hash.slice(1).split('/');
-  if (!TABS.includes(tab)) { tab = 'screener'; arg = undefined; }  // неизвестный якорь — не белый экран
+  if (tab === 'screener') tab = 'morning';                          // старые ссылки на «Скринер»
+  if (!TABS.includes(tab)) { tab = 'morning'; arg = undefined; }  // неизвестный якорь — не белый экран
   for (const a of tabs) a.classList.toggle('active', a.dataset.tab === tab);
   for (const p of document.querySelectorAll('.tab-panel')) p.classList.toggle('active', p.id === 'tab-' + tab);
-  if (tab === 'screener') { loadScreener(); startLive(); } else stopLive();
+  if (tab === 'morning') loadMorning();
   if (tab === 'feed') loadFeed(arg);
   if (tab === 'stats') loadStats();
   if (tab === 'ticker') { loadTickerIndex(); if (arg) openTicker(decodeURIComponent(arg)); }
@@ -88,7 +90,6 @@ addEventListener('hashchange', route);
       `<span class="badge">EDGAR до <b>${esc(m.liveLastDay ?? '—')}</b></span>`,
       `<span class="badge">цены <b>${esc(m.pricesUpdated ?? '—')}</b></span>`,
       `<span class="badge" title="Покупок всего / прошли фильтры информативности">покупок <b>${fmtInt(m.trades?.buys)}</b> → <b>${fmtInt(m.gates?.ok)}</b> (${okPct}%)</span>`,
-      m.set ? `<span class="badge" title="Сделок в рабочем наборе за всю историю / из них действующих прямо сейчас">набор <b>${fmtInt(m.set.rows)}</b> · сейчас <b>${fmtInt(m.set.live)}</b></span>` : '',
       m.universe?.noPrices > 200 ? `<span class="badge warn" title="Эмитенты без ценовых данных не входят в бэктест — остаточная ошибка выжившего">без цен: ${fmtInt(m.universe.noPrices)}</span>` : '',
     ].join('');
   } catch { $('#meta-badges').innerHTML = '<span class="badge warn">meta.json недоступен — данные ещё собираются</span>'; }
@@ -204,334 +205,147 @@ function renderFeatLegend() {
   }
 }
 
-// ---------- СКРИНЕР: рабочий набор ----------
-// Единственный торговый экран. Показывает сделки, попавшие в набор, и главное для решения:
-// сколько дней сигналу и когда выходить. Сигнал живёт около месяца — после этого позиция
-// уже не окупается, поэтому возраст вынесен в отдельную колонку со статусом.
-let setAge = 'fresh';
-async function loadScreener() {
-  if (!state.feed) {
-    try { state.feed = await fetchJson('feed.json'); }
-    catch { $('#set-table').innerHTML = '<tr><td>Данные ещё не собраны.</td></tr>'; return; }
-  }
-  if (!state.stats) { try { state.stats = await fetchJson('stats.json'); } catch { /* числа появятся позже */ } }
-  renderSetHeader();
-  renderSet();
-  pollLive({ force: true });   // первый опрос сразу после данных, а не через период таймера
-}
-for (const b of document.querySelectorAll('#set-age .chip')) {
-  b.addEventListener('click', () => {
-    for (const x of document.querySelectorAll('#set-age .chip')) x.classList.remove('active');
-    b.classList.add('active');
-    setAge = b.dataset.age;
-    renderSet();
-  });
-}
-function renderSetHeader() {
-  const d = state.stats?.setDef, s = state.stats?.set;
-  if (d) {
-    // Правило — не абзац, а список условий: его читают глазами перед каждой сделкой,
-    // и в такой форме видно, что условий ровно четыре.
-    $('#set-rule').innerHTML = [
-      ['цена', `не ниже ${Math.abs(Math.round(d.maxDd * 100))}% от 52-нед. максимума`],
-      ['сумма', `от ${fmtMoney(d.minVal)}`],
-      ['оборот', `от ${fmtMoney(d.minDv)} в день`],
-      ['держать', `${d.hold} месяца`],
-    ].map(([k, v]) => `<li><span>${esc(k)}</span>${esc(v)}</li>`).join('') +
-      `<li class="rule-warn"><span>входить</span>в течение месяца после подачи</li>`;
-  }
-  if (!s) return;
-  $('#set-headline').innerHTML =
-    `<div class="figure-val ${cls(s.spy)}">${fmtPct(s.spy)}</div>` +
-    `<div class="figure-lab">к S&P 500 в год</div>` +
-    `<div class="figure-note">t = ${s.spyT} · после издержек ${fmtPct(s.net)}</div>`;
-  const ref = (state.stats.reference ?? []).find(r => r.key === 'spy');
-  const m = (v, lab, hint) => `<div class="hm" title="${esc(hint)}"><b>${v}</b><span>${esc(lab)}</span></div>`;
-  $('#set-numbers').innerHTML =
-    m(String(s.sharpe), `коэффициент Шарпа${ref ? ` · у индекса ${ref.sharpe}` : ''}`,
-      'Доходность сверх безрисковой на единицу волатильности. Выше, чем у индекса, — значит набор лучше не только по доходности, но и по риску.') +
-    m(fmtPct(s.a), 'альфа к трём факторам',
-      `Рынок, размер и моментум. t = ${s.t}. Моментум обязателен: набор отбирает бумаги у максимума и по построению сидит в победителях моментума.`) +
-    (s.control ? m(fmtPct(s.control.ex), 'сверх бумаг у максимума',
-      `t = ${s.control.t}. Контроль — ${s.control.name}, собранные тем же способом. Столько добавляет сам факт покупки инсайдера.`) : '') +
-    m(String(s.n), 'бумаг в портфеле', `В среднем за ${s.mo} месяцев наблюдений.`) +
-    m(pctPlain(s.cagr, 1), `среднегодовая доходность${ref ? ` · индекс ${pctPlain(ref.cagr, 1)}` : ''}`,
-      `Волатильность ${pctPlain(s.vol, 1)}, максимальная просадка ${pctPlain(s.dd, 1)}.`);
-}
-// Две РАЗНЫЕ вещи, которые прежний статус путал:
-//   успеваю ли я войти — сигнал живёт около месяца после подачи (проверено: вход через
-//     два месяца превращает +7.4% к индексу в +1.6%);
-//   держится ли позиция — три месяца от первой покупки независимо от того, поздно я
-//     узнал о сигнале или нет.
-// Позиция, открытая 60 дней назад, для нового участника закрыта, но у того, кто вошёл
-// вовремя, она ещё живёт — раньше такая строка помечалась «протух» и путала.
-function setStatus(age, fresh, holdDays) {
-  if (age <= fresh * 0.7) return ['ok', 'можно входить'];
-  if (age <= fresh) return ['warn', 'поздно входить'];
-  if (age <= holdDays) return ['hold', 'держим'];
-  return ['dead', 'окно закрыто'];
-}
-// Русское склонение после числа: 1 покупка, 2-4 покупки, 5+ покупок (и 11-14 — покупок).
-// Без этого в таблице появлялось «17 покупки».
+// ---------- УТРЕННИЙ СПИСОК ----------
+// Главный экран. Покупки инсайдеров по подачам одного дня: покупка на открытии следующего
+// торгового дня (D+1), продажа на закрытии того же дня. Всё, что показано, считает сборка
+// (scripts/compute.mjs -> morning.json, stats.breadth); страница только раскладывает и ни одной
+// цифры о результатах не хранит.
+// Русское склонение после числа: 1 бумага, 2-4 бумаги, 5+ бумаг (и 11-14 — бумаг).
 const plural = (n, one, few, many) => {
   const a = Math.abs(n) % 100, b = a % 10;
   return n + ' ' + (a > 10 && a < 20 ? many : b === 1 ? one : b >= 2 && b <= 4 ? few : many);
 };
-
-// Одна строка таблицы = одна ПОЗИЦИЯ, а не одна форма. Повторная покупка в той же бумаге
-// (другой инсайдер или тот же на следующей неделе) не требует второй покупки: позиция уже
-// открыта, и срок выхода отсчитывается от ПЕРВОГО сигнала. Проверено на истории — вариант
-// «входить только на первый сигнал» даёт тот же результат (+7.3% против +7.4% к индексу),
-// то есть повторные сигналы ничего не добавляют и покупать по ним второй раз незачем.
-function groupPositions(rows, holdMonths) {
-  const byTicker = new Map();
-  for (const r of rows) (byTicker.get(r.t) ?? byTicker.set(r.t, []).get(r.t)).push(r);
-  const out = [];
-  for (const [t, list] of byTicker) {
-    list.sort((a, b) => a.fdate < b.fdate ? -1 : 1);       // от старых к свежим
-    let pos = null;
-    for (const r of list) {
-      // Новая позиция начинается, если прежняя уже закрыта к моменту этого сигнала
-      const closed = pos && (Date.parse(r.fdate) - Date.parse(pos.first)) / 86400000 > holdMonths * 30.5;
-      if (!pos || closed) {
-        pos = { t, name: r.name, first: r.fdate, age: r.age, exit: r.exit, rows: [] };
-        out.push(pos);
-      }
-      pos.rows.push(r);
-      pos.last = r.fdate;
-    }
-  }
-  for (const p of out) {
-    p.val = p.rows.reduce((a, b) => a + (b.val ?? 0), 0);
-    p.n = p.rows.length;
-    p.who = [...new Set(p.rows.map(x => x.who))];
-    p.px = p.rows[0].px; p.cur = p.rows[0].cur;
-    p.entryPx = p.rows[0].entryPx; p.entryDate = p.rows[0].entryDate;
-    p.chg = p.rows[0].chg; p.dd = p.rows[0].dd; p.dv = p.rows[0].dv;
-    p.role = p.rows[0].role; p.title = p.rows[0].title;
-  }
-  return out.sort((a, b) => a.first < b.first ? 1 : a.first > b.first ? -1 : b.val - a.val);
-}
-
-// ---------- ЖИВЫЕ ЦЕНЫ ----------
-// Yahoo не отдаёт CORS-заголовок, поэтому спросить цену напрямую браузер не может.
-// Посредник — свой воркер на краю Cloudflare (worker/index.js): он держит ответ 30 секунд
-// в кэше края, так что опрос отсюда не может разогнать обращения к источнику.
-// Слой необязательный: если воркер молчит, страница остаётся на ценах снимка и работает
-// целиком — живой слой ничего не добавляет к решению, только к наблюдению.
-const QUOTES_URL = 'https://radar840-quotes.financehub.workers.dev/quotes';
-const LIVE_PERIOD_MS = 30000;
-const ySym = t => String(t).replace(/[./]/g, '-');   // BRK.B -> BRK-B, как в сборке
-let liveTimer = null;
-
-const onScreener = () => location.hash === '' || location.hash.startsWith('#screener');
-
-// force — разовый опрос по явному поводу (экран только что отрисован, вкладка стала видимой).
-// Требование видимости относится к ПОВТОРНОМУ опросу по таймеру: именно он в фоновой вкладке
-// тянул бы источник сутками. Один запрос на отрисовку не стоит того, чтобы им рисковать.
-async function pollLive({ force = false } = {}) {
-  if ((!force && document.visibilityState !== 'visible') || !onScreener()) return;
-  const today = new Date().toISOString().slice(0, 10);
-  // Спрашиваем только по открытым позициям: закрытые живая цена не меняет, а список
-  // короче — значит и ответ меньше, и в потолок воркера по числу тикеров не упираемся.
-  const syms = [...new Set((state.feed ?? [])
-    .filter(r => r.set === 1 && (!r.exit || r.exit >= today)).map(r => r.t))].slice(0, 60);
-  if (!syms.length) return;
-  try {
-    const res = await fetch(`${QUOTES_URL}?symbols=${encodeURIComponent(syms.join(','))}`);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const body = await res.json();
-    if (!body?.quotes) throw new Error('пустой ответ');
-    state.live = body;
-  } catch (error) {
-    // Тихо: снимок остаётся на месте. Единственный след — колонка не назовётся живой.
-    state.live = null;
-    console.warn('[live] котировки недоступны:', error?.message || error);
-  }
-  if (onScreener()) renderSet();
-}
-
-function startLive() {
-  if (liveTimer) return;
-  pollLive({ force: true });
-  liveTimer = setInterval(pollLive, LIVE_PERIOD_MS);
-}
-function stopLive() { clearInterval(liveTimer); liveTimer = null; }
-// Опрос идёт только у видимой вкладки: фоновая вкладка сутками тянула бы источник впустую.
-addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && onScreener()) startLive();
-  else stopLive();
-});
-
-// Живая цена подменяет снимок, а «изм.» пересчитывается так, чтобы НЕ потерять дивиденды:
-// снимочное изменение уже полное (adjClose), поэтому его достаточно домножить на отношение
-// живой цены к цене снимка. Прямое «живая ÷ вход» дало бы ценовую доходность и разошлось
-// бы с бэктестом. Снимочные значения сохраняются: из них считается сам множитель.
-function applyLive(pos) {
-  const q = state.live?.quotes;
-  for (const p of pos) {
-    p.curSnap = p.cur; p.chgSnap = p.chg; p.live = null;
-    const x = q?.[ySym(p.t)];
-    if (!x || typeof x.p !== 'number' || !p.curSnap) continue;
-    p.live = x;
-    p.cur = x.p;
-    p.chg = p.chgSnap === null || p.chgSnap === undefined
-      ? (p.entryPx ? x.p / p.entryPx - 1 : null)
-      : (1 + p.chgSnap) * (x.p / p.curSnap) - 1;
-  }
-}
-
-const MARKET_STATE = {
-  REGULAR: 'торги идут', PRE: 'предторги', POST: 'постторги',
-  PREPRE: 'до предторгов', POSTPOST: 'после постторгов', CLOSED: 'рынок закрыт',
+// Пометки строки: код из сборки -> [подпись, стиль, подсказка]
+export const MTAG = {
+  off:  ['офицер', 'buy', 'CEO, CFO или другой офицер: у офицеров эффект сильнее, чем у директоров'],
+  deep: ['просадка >30%', 'warn', 'На дату сделки бумага ниже 52-недельного максимума больше чем на 30%'],
+  big:  ['≥$1 млн', 'gray', 'Покупки дня на сумму от $1 млн: чем крупнее сумма, тем сильнее эффект'],
 };
-// Время котировки — в нью-йоркском, а не в местном: цена принадлежит своей сессии,
-// и «16:45» в Куала-Лумпуре ничего не говорит о том, открыт ли рынок.
-function liveStamp() {
-  const at = state.live?.at;
-  if (!at) return null;
-  const time = new Date(at * 1000).toLocaleTimeString('ru-RU', {
-    timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit',
+const SKIP = {
+  noopen: 'нет открытия — сделка пропущена', noclose: 'нет закрытия — сделка пропущена', nobench: 'нет данных по IWM — сделка пропущена',
+  frozen: 'открытие ровно равно вчерашнему закрытию — котировка застыла, сделка пропущена',
+  px: 'открытие ниже $5 — сделка пропущена',
+};
+const MONTH_NOM = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
+const monthRu = ym => { const [y, m] = String(ym).split('-'); return `${MONTH_NOM[Number(m) - 1] ?? ym} ${y}`; };
+
+let mLevel = 30, mDay = null;
+async function loadMorning() {
+  if (!state.morning) {
+    try { state.morning = await fetchJson('morning.json'); }
+    catch { $('#m-table').innerHTML = '<tr><td class="empty">Данные ещё не собраны.</td></tr>'; return; }
+  }
+  if (!state.stats) { try { state.stats = await fetchJson('stats.json'); } catch { /* плашка всплеска появится позже */ } }
+  if (mDay === null || !state.morning.days.some(d => d.date === mDay)) mDay = state.morning.days[0]?.date ?? null;
+  renderMorning();
+}
+for (const b of document.querySelectorAll('#m-level .chip')) {
+  b.addEventListener('click', () => {
+    for (const x of document.querySelectorAll('#m-level .chip')) x.classList.remove('active');
+    b.classList.add('active');
+    mLevel = Number(b.dataset.lvl);
+    if (state.morning) renderMorning();
   });
-  const st = Object.values(state.live.quotes ?? {})[0]?.st;
-  return `живые цены · ${time} Нью-Йорк${st && MARKET_STATE[st] ? ` · ${MARKET_STATE[st]}` : ''}`
-    + (state.live.stale ? ' · источник молчит, показано последнее' : '');
 }
+$('#m-day').addEventListener('change', e => { mDay = e.target.value; if (state.morning) renderMorning(); });
 
-// «Сейчас» — это закрытие последнего дня снимка, а не текущая цена: сборка идёт раз в сутки
-// после закрытия рынка. Когда живого слоя нет, дата снимка должна стоять на виду — иначе
-// колонка выдаёт себя за настоящее время и вводит в заблуждение тем сильнее, чем дольше
-// не было сборки.
-function pricesAsOfHint() {
-  if (state.live?.at) return liveStamp() + ' — цена обновляется каждые 30 секунд, пока вкладка открыта';
-  const d = state.stats?.pricesAsOf;
-  if (!d) return 'Последняя цена в снимке';
-  const days = Math.round((Date.parse(new Date().toISOString().slice(0, 10)) - Date.parse(d)) / 864e5);
-  return `Закрытие ${fmtDate(d)}` + (days > 0 ? ` — снимок обновляется раз в сутки после закрытия рынка, сейчас ему ${plural(days, 'день', 'дня', 'дней')}` : '');
-}
+const lvlRows = day => (day?.rows ?? []).filter(x => mLevel === 30 ? x.lvl === 30 : true);
 
-// «Ждём» — неверное слово для позиции, у которой день входа наступил ПРЯМО СЕЙЧАС.
-// Форма подана после последнего закрытия в снимке, значит вход по правилу — на ближайшем
-// закрытии рынка; если торги идут, это сегодняшнее. Прежняя надпись читалась как «пока
-// нельзя, ждите следующего дня» и откладывала вход ровно на сутки, которых правило
-// не требует: затухание сигнала считается днями, а не неделями.
-const marketOpenNow = () => {
-  const st = Object.values(state.live?.quotes ?? {})[0]?.st;
-  return st === 'REGULAR' || st === 'PRE';
-};
-const entryDueLabel = () => marketOpenNow() ? 'сегодня на закрытии' : 'ближайшее закрытие';
-const entryDueHint = () => 'Форма подана после последнего закрытия в данных. Вход по правилу набора — '
-  + 'на ближайшем закрытии рынка'
-  + (marketOpenNow() ? ' — то есть сегодня.' : '.')
-  + ' Цена входа появится здесь, как только этот день закроется; до тех пор считать «изм.» не от чего.';
-
-// Тонкая бумага печатается раз в несколько минут, и неподвижная цена выглядит как
-// сломанный живой слой. Время последней печати снимает вопрос.
-function curHint(p) {
-  if (!p.live) {
-    const d = state.stats?.pricesAsOf;
-    return d ? `Закрытие ${fmtDate(d)} — живой цены по этой бумаге сейчас нет` : 'Цена из последнего снимка';
+// Полоса живого счётчика: те же числа, что в ревизии, но по спискам, опубликованным с запуска.
+// Тест по дням — сделки одного дня не независимы (общий рынок), поэтому t считается по средним дням.
+function renderCounter() {
+  const c = state.morning.counter, s = mLevel === 30 ? c.l30 : c.l10;
+  const head = `<div class="strip-head"><b>Живой счётчик</b> с ${esc(fmtDate(c.from))} · открытие → закрытие D+1, к IWM`
+    + `${c.upTo ? ' · по ' + esc(fmtDate(c.upTo)) : ''}</div>`;
+  if (!s?.n) {
+    $('#m-counter').innerHTML = head + '<div class="strip-empty">Сделок пока нет — первый результат появится после первого торгового дня по спискам.</div>';
+    return;
   }
-  const t = p.live.t
-    ? new Date(p.live.t * 1000).toLocaleTimeString('ru-RU', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' })
-    : null;
-  // Пояснение про тонкую бумагу нужно только там, где печать реально застарела:
-  // на ликвидной бумаге оно сбивало бы с толку, а не помогало.
-  const ageMin = p.live.t ? Math.floor((Date.now() / 1000 - p.live.t) / 60) : 0;
-  return (t ? `Последняя печать ${t} Нью-Йорк` : 'Живая цена')
-    + (typeof p.live.prev === 'number' ? ` · вчерашнее закрытие ${fmtPrice(p.live.prev)}` : '')
-    + (ageMin >= 2 ? `. Сделок нет уже ${plural(ageMin, 'минуту', 'минуты', 'минут')} — у малоликвидной бумаги цена стоит между сделками, это не сбой` : '');
+  const cell = (v, lab, hint, klass = '') => `<div class="sc" title="${esc(hint)}"><b class="${klass}">${v}</b><span>${esc(lab)}</span></div>`;
+  const tStrong = s.tDays !== null && s.tDays !== undefined && Math.abs(s.tDays) >= 2;
+  $('#m-counter').innerHTML = head + '<div class="strip-cells">'
+    + cell(String(s.n), 'сделок', `За ${plural(s.days, 'торговый день', 'торговых дня', 'торговых дней')}; одна сделка на бумагу в день`)
+    + cell(fmtPct(s.mean, 2), 'среднее к IWM', 'Доходность открытие → закрытие минус внутридневная доходность IWM того же дня', cls(s.mean))
+    + cell(fmtPct(s.median, 2), 'медиана', 'Медианная сделка: распределение скошено, среднее держат немногие крупные выигрыши', cls(s.median))
+    + cell(Math.round(s.win * 100) + '%', 'в плюсе', 'Доля сделок, обогнавших IWM в тот же день')
+    + cell(s.tDays === null || s.tDays === undefined ? '—' : String(s.tDays), 't по дням',
+      'Среднее за день, затем t-статистика по дням. От нуля отличимо при |t| ≥ 2', tStrong ? cls(s.tDays) : 'muted')
+    + cell(fmtPct(s.net, 2), `после ${pctPlain(c.cost, 1)} на круг`, 'Среднее за вычетом издержек на круг. Эффект исчезает при издержках около 0.2%', cls(s.net))
+    + cell(fmtPct(s.cumNet, 1), 'сумма нетто', 'Сумма доходностей всех сделок после издержек, в долях одной позиции: столько заработала бы позиция равного размера на каждую сделку', cls(s.cumNet))
+    + '</div>';
 }
 
-// Насколько доступный вход отличался от цены инсайдера. У большинства сделок разрыв мелкий,
-// у просроченных подач — огромный; именно он и объяснял, почему «изм.» не сходилась
-// с делением цены сделки на текущую.
-function insiderPxHint(p) {
-  const gap = p.entryPx && p.px ? p.entryPx / p.px - 1 : null;
-  if (gap === null || Math.abs(gap) < 0.005) return 'Цена, по которой купил инсайдер';
-  return `Цена, по которой купил инсайдер: вход по правилу оказался `
-    + `${gap > 0 ? 'дороже' : 'дешевле'} на ${(Math.abs(gap) * 100).toFixed(1)}%`;
+// Плашка всплеска: z-оценка числа покупающих эмитентов за три месяца к 36 прошлым. Это сигнал
+// возврата в рынок для панели 837, а не повод покупать бумаги из списка. Справа — z за 60 месяцев.
+function renderSurge() {
+  const b = state.stats?.breadth, box = $('#m-surge');
+  if (!b) { box.innerHTML = ''; box.className = 'surge'; return; }
+  box.className = 'surge' + (b.surge ? ' on' : '');
+  const pts = b.history.filter(x => x.z !== null && !x.p);
+  const W = 150, H = 26, lo = -3, hi = 5, n = pts.length;
+  const X = i => (n > 1 ? (i / (n - 1)) * (W - 4) : 0) + 2, Y = z => H - 2 - ((Math.max(lo, Math.min(hi, z)) - lo) / (hi - lo)) * (H - 4);
+  const spark = n > 1 ? `<svg class="spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="z-оценка по месяцам">`
+    + `<line x1="0" x2="${W}" y1="${Y(b.thr).toFixed(1)}" y2="${Y(b.thr).toFixed(1)}" class="spark-thr"/>`
+    + `<polyline points="${pts.map((x, i) => X(i).toFixed(1) + ',' + Y(x.z).toFixed(1)).join(' ')}" class="spark-line"/>`
+    + `<circle cx="${X(n - 1).toFixed(1)}" cy="${Y(pts[n - 1].z).toFixed(1)}" r="2.5" class="spark-dot"/></svg>` : '';
+  box.innerHTML = `<span class="surge-main"><b>Всплеск покупок: ${b.surge ? 'есть' : 'нет'}</b>`
+    + `<span class="surge-z" title="Число разных эмитентов с покупками от $10 тыс., прошедшими гейты, за 3 месяца против среднего за 36 прошлых месяцев. Порог всплеска z ≥ ${b.thr}.">`
+    + ` z = ${b.z === null ? '—' : b.z} · ${esc(monthRu(b.asOf))}</span></span>` + spark;
 }
 
-// Число в колонке «Изм.» — полная доходность (с дивидендами), как в бэктесте. Деление
-// видимых на экране цен даёт чуть меньше у дивидендных бумаг (у AAT за 85 дней +11.6%
-// по ценам против +13.2% с дивидендами). Показываем обе величины, чтобы расхождение
-// не выглядело ошибкой счёта.
-function chgHint(p) {
-  if (p.chg === null || p.chg === undefined) {
-    return p.entryPx ? 'Позиция открылась в последний торговый день данных — измерять пока нечего'
-      : 'Первый торговый день после подачи ещё не закрылся — считать не от чего';
-  }
-  const base = `Вход ${fmtPrice(p.entryPx)} → ${p.live ? 'живая цена' : 'закрытие'} ${fmtPrice(p.cur)}`;
-  const byPrice = p.entryPx && p.cur ? p.cur / p.entryPx - 1 : null;
-  return byPrice !== null && Math.abs(byPrice - p.chg) >= 0.002
-    ? `${base}: по ценам ${fmtPct(byPrice)}, с дивидендами ${fmtPct(p.chg)}`
-    : `${base} = ${fmtPct(p.chg)}`;
+function dayNote(day, rows) {
+  if (!day) return '';
+  if (!rows.length) return '';
+  if (!day.done) return day.entry ? '' : 'торги D+1 ещё не прошли';
+  const res = rows.filter(x => x.ex !== undefined);
+  if (!res.length) return `торги ${fmtDate(day.entry)}: результатов нет`;
+  const m = res.reduce((a, x) => a + x.ex, 0) / res.length;
+  const up = res.filter(x => x.ex > 0).length;
+  return `торги ${fmtDate(day.entry)}: среднее ${fmtPct(m, 2)} к IWM, в плюсе ${up} из ${res.length}`;
 }
 
-function renderSet() {
-  const fresh = state.stats?.setDef?.freshDays ?? 45;
-  const hold = state.stats?.setDef?.hold ?? 3;
-  const holdDays = Math.round(hold * 30.5);
-  const today = new Date().toISOString().slice(0, 10);
-  let pos = groupPositions(state.feed.filter(r => r.set === 1), hold);
-  // Открыта ли позиция — решает ДАТА ВЫХОДА, которую считает сборка, а не приблизительный
-  // возраст в днях: иначе строка с уже прошедшей датой выхода оставалась в списке.
-  if (setAge === 'fresh') pos = pos.filter(p => !p.exit || p.exit >= today);
-  applyLive(pos);          // до сортировки: сортировать надо по тому, что видно
-  pos = sortRows(pos);
-  const sig = pos.reduce((a, p) => a + p.n, 0);
-  const canEnter = pos.filter(p => p.age <= fresh).length;
-  $('#set-count').textContent = pos.length
-    ? (setAge === 'fresh'
-      ? `${plural(pos.length, 'открытая позиция', 'открытые позиции', 'открытых позиций')} · войти ещё можно в ${canEnter}`
-      : `${plural(pos.length, 'позиция', 'позиции', 'позиций')} за 200 дней`) +
-      (sig > pos.length ? ` · ${plural(sig, 'сигнал', 'сигнала', 'сигналов')}, повторные покупки второй позиции не требуют` : '') +
-      // В режиме «все за 200 дней» живыми будут только открытые позиции: по закрытым
-      // текущая цена ничего не значит, их и не спрашиваем. Подпись обязана это назвать,
-      // иначе «живые цены» над таблицей, где половина строк из снимка, — неправда.
-      (liveStamp() ? ` · ${liveStamp()}${setAge === 'fresh' ? '' : ' (по открытым позициям)'}`
-        : state.stats?.pricesAsOf ? ` · цены на закрытие ${fmtDate(state.stats.pricesAsOf)}` : '')
-    : '';
-  const th = `<tr>
-    <th>Бумага</th><th>Покупали</th>
-    <th class="num sortable" data-sort="age" title="Дата первой покупки в позиции и сколько дней прошло">Открыта ⇅</th>
-    <th title="Успеваю ли я войти и держится ли позиция — это разные вещи">Статус</th>
-    <th class="num sortable" data-sort="val" title="Сумма всех покупок инсайдеров в этой позиции">Куплено ⇅</th>
-    <th class="num" title="Цена, по которой можно было войти по правилу набора: закрытие первого торгового дня после подачи формы. Мелким — цена самого инсайдера; при просроченной подаче она бывает намного ниже, и считать изменение от неё нельзя">Вход</th>
-    <th class="num" title="${esc(pricesAsOfHint())}">Сейчас</th>
-    <th class="num sortable" data-sort="chg" title="Изменение от ЦЕНЫ ВХОДА, а не от цены инсайдера: инсайдерская цена подписчику недоступна. Считается полная доходность — с дивидендами, как в бэктесте, поэтому у дивидендных бумаг число чуть выше, чем даёт деление цен на экране (в подсказке к числу видно обе величины)">Изм. ⇅</th>
-    <th class="num sortable" data-sort="dd" title="Насколько ниже 52-недельного максимума была цена на дату сделки">До макс. ⇅</th>
-    <th class="num" title="Медианный дневной долларовый оборот бумаги">Оборот</th>
-    <th title="Три месяца от первой покупки">Выход</th></tr>`;
-  $('#set-table').innerHTML = th + (pos.length ? pos.map(p => {
-    const [st, lab] = setStatus(p.age, fresh, holdDays);
-    const who = p.who.length === 1 ? esc(trunc(p.who[0], 24))
-      : `${esc(trunc(p.who[0], 20))} <span class="sub2-inline">и ещё ${p.who.length - 1}</span>`;
-    return `<tr class="${st === 'dead' ? 'row-dead' : st === 'hold' ? 'row-hold' : ''}">
-      <td><a class="tick" href="#ticker/${encodeURIComponent(p.t)}">${esc(p.t)}</a>
-        <span class="sub2" title="${esc(p.name)}">${esc(trunc(p.name, 30))}</span></td>
-      <td>${who}<span class="sub2">${esc(ROLE_LABEL[p.role] ?? p.role)}${p.n > 1 ? ' · ' + plural(p.n, 'покупка', 'покупки', 'покупок') : ''}</span></td>
-      <td class="num">${esc(fmtDate(p.first))}<span class="sub2">${p.age} дн. назад</span></td>
-      <td><span class="pill ${st === 'ok' ? 'buy' : st === 'warn' ? 'warn' : 'gray'}" title="${esc(
-        st === 'ok' ? 'Сигнал свежий — вход по правилу набора ещё уместен'
-          : st === 'warn' ? 'Месяц почти вышел: входить уже поздно, эффект затухает'
-            : st === 'hold' ? 'Входить поздно, но открытая позиция держится до даты выхода'
-              : 'Три месяца истекли — позиция закрыта')}">${lab}</span></td>
-      <td class="num">${fmtMoney(p.val)}</td>
-      <td class="num">${p.entryPx ? fmtPrice(p.entryPx)
-        : `<span class="pending" title="${esc(entryDueHint())}">${entryDueLabel()}</span>`}
-        <span class="sub2" title="${esc(insiderPxHint(p))}">сделка ${fmtPrice(p.px)}</span></td>
-      <td class="num" title="${esc(curHint(p))}">${fmtPrice(p.cur)}</td>
-      <td class="num ${cls(p.chg)}" title="${esc(chgHint(p))}">${fmtPct(p.chg)}</td>
-      <td class="num ${cls(p.dd)}">${fmtPct(p.dd, 0)}</td>
-      <td class="num">${fmtMoney(p.dv)}</td>
-      <td class="muted">${esc(fmtDate(p.exit))}</td>
-    </tr>`;
-  }).join('') : `<tr><td colspan="11" class="empty">${setAge === 'fresh'
-      ? 'Открытых позиций сейчас нет — и это нормально: набор даёт около восьми сигналов в месяц, а в отдельные месяцы не даёт ни одного. Нажмите «Все за 200 дней», чтобы увидеть недавние.'
-      : 'За последние 200 дней в набор не попало ни одной сделки.'}</td></tr>`);
-  bindSort('#set-table', renderSet);
+function renderMorning() {
+  renderCounter();
+  renderSurge();
+  const days = state.morning.days;
+  // Выбор даты: десять последних дат подачи, число бумаг уровня в подписи
+  $('#m-day').innerHTML = days.map(d => `<option value="${esc(d.date)}"${d.date === mDay ? ' selected' : ''}>${esc(fmtDate(d.date))} · ${lvlRows(d).length}</option>`).join('');
+  const day = days.find(d => d.date === mDay) ?? null;
+  const rows = lvlRows(day);
+  $('#m-note').textContent = dayNote(day, rows);
+  const past = !!day?.done;
+  // Классы c-* нужны узкому экрану: «Кто», «Оборот», «Открытие» и «Закрытие» там прячутся
+  const th = `<tr><th>Бумага</th><th class="c-who">Кто</th>
+    <th class="num" title="Сумма всех покупок бумаги в этот день подачи (покупки от $10 тыс., прошедшие гейты)">Сумма</th>
+    <th class="num" title="Насколько ниже 52-недельного максимума была цена на дату сделки">От макс.</th>
+    <th class="num c-dv" title="Медианный дневной долларовый оборот бумаги за 60 торговых дней до сделки">Оборот</th>
+    <th class="c-marks">Пометки</th>${past ? `<th class="num c-open" title="Цена открытия следующего торгового дня — вход">Открытие</th>
+    <th class="num c-close" title="Цена закрытия того же дня — выход">Закрытие</th>
+    <th class="num" title="Доходность открытие → закрытие минус доходность IWM за тот же день">К IWM</th>` : ''}</tr>`;
+  $('#m-table').innerHTML = th + (rows.length ? rows.map(x => {
+    const who = x.nWho > 1 ? `${esc(trunc(x.who[0], 20))} <span class="sub2-inline">и ещё ${x.nWho - 1}</span>` : esc(trunc(x.who[0] ?? '—', 24));
+    const marks = (x.tags ?? []).map(t => MTAG[t] ? `<span class="pill ${MTAG[t][1]}" title="${esc(MTAG[t][2])}">${esc(MTAG[t][0])}</span>` : '').join(' ');
+    // Сделка пропущена — причина в подсказке; открытие и закрытие у такой строки пусты
+    const result = !past ? '' : x.skip
+      ? `<td class="num c-open muted">—</td><td class="num c-close muted">—</td>`
+        + `<td class="num muted" title="${esc(SKIP[x.skip] ?? x.skip)}">пропуск</td>`
+      : `<td class="num c-open">${fmtPrice(x.o)}</td><td class="num c-close">${fmtPrice(x.c)}</td>`
+        + `<td class="num ${cls(x.ex)}" title="${esc(`Сделка ${fmtPct(x.r, 2)}, IWM ${fmtPct(x.b, 2)}`)}">${fmtPct(x.ex, 2)}</td>`;
+    const roleLine = `${esc(ROLE_LABEL[x.role] ?? x.role)}${x.n > 1 ? ' · ' + plural(x.n, 'покупка', 'покупки', 'покупок') : ''}`;
+    return `<tr>
+      <td><a class="tick" href="#ticker/${encodeURIComponent(x.t)}">${esc(x.t)}</a>
+        <span class="sub2 nm" title="${esc(x.name)}">${esc(trunc(x.name, 28))}</span>
+        <span class="sub2 who-m">${esc(trunc(x.who[0] ?? '—', 18))}${x.nWho > 1 ? ' +' + (x.nWho - 1) : ''} · ${roleLine}</span>
+        <span class="marks-m">${marks}</span></td>
+      <td class="c-who">${who}<span class="sub2">${roleLine}</span></td>
+      <td class="num">${fmtMoney(x.val)}</td>
+      <td class="num ${cls(x.dd)}">${fmtPct(x.dd, 0)}</td>
+      <td class="num c-dv">${fmtMoney(x.dv)}</td>
+      <td class="marks c-marks">${marks}</td>${result}</tr>`;
+  }).join('') : `<tr><td colspan="${past ? 9 : 6}" class="empty">${days.length
+    ? 'В этот день подходящих покупок нет — список бывает пустым.' : 'Данные ещё не собраны.'}</td></tr>`);
+  $('#m-foot').innerHTML = 'Покупка на открытии следующего торгового дня, продажа на закрытии того же дня; сумма на бумагу одинаковая. '
+    + 'Почему так — на вкладке <a href="#stats">Статистика</a>.';
 }
 
 // ---------- ЛЕНТА ----------
@@ -573,27 +387,10 @@ bindRange('#f-val-max', 'valMax');
 bindRange('#f-down-min', 'downMin', 0.01);   // проценты -> доля
 bindRange('#f-down-max', 'downMax', 0.01);
 
-// Набор, переживший портфельную проверку (2026-08). Условия совпадают с проверенными
-// буква в букву, включая порог оборота: без него в набор попадают неторгуемые имена,
-// на которых он не проверялся.
-//
-// Что проверялось и почему выжил только один набор. Критерии объявлены ДО отбора: плюс
-// в обеих половинах выборки, |t|>=2 на всём периоде, средний состав от 15 бумаг и —
-// для ценовых наборов — обязательное превышение над контролем из ВСЕХ бумаг в том же
-// ценовом контексте. Последнее и отсеяло почти всё: набор, который не обгоняет «просто
-// акции у максимума», описывает моментум, а не инсайдера.
-//   · «У 52-нед максимума», удержание 3 мес: альфа +9.1% (t=2.99), половины +6.2/+11.6,
-//     сверх контроля +6.1% (t=2.30) — ПРОШЁЛ;
-//   · прежний «Сила после отчёта» (+ неделя после отчёта, + не CEO): условие отчёта
-//     сжимает состав до 13 бумаг, а превышение над контролем теряет значимость (t=1.72);
-//   · прежний «Кластер + докупка»: альфа отрицательна на всех горизонтах (−0.6% при H=3,
-//     −1.0% при H=12) и минусует на первой половине — снят.
-// Отдельная находка, сознательно НЕ вынесенная в чип: покупка при просадке >30% обгоняет
-// такие же просевшие бумаги на +5.6% (t=2.30), но её собственная альфа отрицательна
-// (−1.2%). Это фильтр внутри контрарианской корзины, а не повод покупать.
-// Каждый пресет включает СВОЙ порог оборота и подразумевает СВОЙ срок удержания —
-// вне этой конфигурации его числа не воспроизводятся. Сроки указаны в подписях чипов
-// и в блоке «Наборы» на вкладке Статистика.
+// Флажок «у максимума, 3 мес.» — прежний рабочий набор (цена не ниже 7% от 52-недельного максимума,
+// сумма от $50 тыс., оборот от $3 млн). На ревизии 04.11.2026 альфы не дал (вслепую +1.3%/год,
+// вживую −8.7% против S&P), поэтому остался только фильтром ленты. Расчёт набора и его бэктест в
+// сборке не тронуты — они нужны диагностике на вкладке «Статистика».
 for (const b of document.querySelectorAll('#f-roles .chip')) {
   b.addEventListener('click', () => {
     b.classList.toggle('active');
@@ -643,7 +440,7 @@ function renderFeed(reset) {
     <th class="num sortable" data-sort="chgT" title="Изменение цены с ДАТЫ СДЕЛКИ — результат самого инсайдера. При просроченной подаче отличается от колонки «с подачи»">с сделки ⇅</th>
     <th class="num sortable" data-sort="val">Сумма ⇅</th>
     <th class="num" title="Прирост позиции инсайдера">Δ поз.</th>
-    <th title="Попала ли сделка в рабочий набор">Набор</th><th>Признаки</th>
+    <th title="Прежний набор «у максимума, 3 мес.» — фильтр ленты, не рекомендация">У макс.</th><th>Признаки</th>
     <th class="num" title="Через неделю после того, как сигнал стал публичным">1н</th>
     <th class="num" title="Через месяц">1м</th>
     <th class="num" title="Через 6 месяцев">6м</th>
@@ -661,7 +458,7 @@ function renderFeed(reset) {
     <td class="num ${cls(r.chgT)}">${fmtPct(r.chgT)}</td>
     <td class="num">${fmtMoney(r.val)}</td>
     <td class="num">${r.dOwn === null ? '—' : (r.dOwn >= 9.99 ? 'новая' : fmtPct(r.dOwn, 0))}</td>
-    <td>${r.set === 1 ? '<span class="pill buy" title="Входит в рабочий набор">✓</span>' : ''}</td>
+    <td>${r.set === 1 ? '<span class="pill gray" title="Прежний набор «у максимума, 3 мес.»">✓</span>' : ''}</td>
     <td>${featureCell(r)}</td>
     <td class="num ${cls(r.w1)}">${fmtPct(r.w1)}</td>
     <td class="num ${cls(r.m1)}">${fmtPct(r.m1)}</td>
@@ -714,7 +511,7 @@ async function openTicker(t) {
   $('#tc-badges').innerHTML = [
     d.exchange ? `<span class="pill gray">${esc(d.exchange)}</span>` : '',
     d.bucket ? `<span class="pill gray" title="Прокси размера по дневному обороту">${esc(d.bucket)}</span>` : '',
-    d.setBuys ? `<span class="pill buy" title="Покупок этого эмитента, попавших в рабочий набор">в наборе: ${d.setBuys}</span>` : '',
+    d.setBuys ? `<span class="pill gray" title="Покупок этого эмитента, подходивших под прежний набор «у максимума, 3 мес.»">у макс.: ${d.setBuys}</span>` : '',
     d.nSells ? `<span class="pill gray" title="Продаж инсайдеров за всю историю. Показано как контекст: предсказательной силы у продаж не нашлось — портфель проданных бумаг неотличим от сопоставимых">продаж: ${fmtInt(d.nSells)}</span>` : '',
     d.cat === 'unknown' ? '<span class="pill warn" title="Эмитента нет в текущем справочнике SEC — возможен делистинг или смена структуры">возможен делистинг</span>' : '',
   ].join(' ');
@@ -746,7 +543,7 @@ function renderTickerTrades() {
   const th = `<tr>
     <th>Сделка</th><th>Подача</th><th>Тип</th><th>Инсайдер</th><th>Роль</th>
     <th class="num">Акции</th><th class="num">Цена</th><th class="num">Сумма</th>
-    <th class="num">Δ поз.</th><th class="num">Остаток</th><th>Признаки</th><th title="Сделка прошла все условия рабочего набора">Набор</th></tr>`;
+    <th class="num">Δ поз.</th><th class="num">Остаток</th><th>Признаки</th><th title="Подходит под прежний набор «у максимума, 3 мес.»">У макс.</th></tr>`;
   $('#tc-trades').innerHTML = th + rows.map(r => `<tr class="${r.drop ? 'dropped' : ''}">
     <td>${esc(r.tdate)}</td>
     <td>${esc(r.fdate)}${r.form === '4/A' ? ' <span class="pill gray">A</span>' : ''}</td>
@@ -759,7 +556,7 @@ function renderTickerTrades() {
     <td class="num">${r.code !== 'P' || r.dOwn === null ? '—' : (r.dOwn >= 9.99 ? 'новая' : fmtPct(r.dOwn, 0))}</td>
     <td class="num">${fmtInt(r.own)}</td>
     <td>${r.drop ? `<span class="pill warn feat" title="${esc('Отсеяна: ' + dropLabel(r.drop))}">${esc(DROP_CODE[r.drop] ?? r.drop.slice(0, 2))}</span> ` : ''}${r.b5 ? featPill('planned-mark') : ''}${r.di === 'I' ? featPill('indirect') : ''}${r.sec && !/^common\b/i.test(r.sec) ? `<span class="pill gray feat" title="${esc('Класс бумаги: ' + r.sec)}">Пф</span> ` : ''}</td>
-    <td>${r.set === 1 ? '<span class="pill buy">✓</span>' : ''}</td>
+    <td>${r.set === 1 ? '<span class="pill gray">✓</span>' : ''}</td>
   </tr>`).join('');
 }
 
@@ -795,11 +592,8 @@ async function loadStats() {
       `на конец каждого месяца берутся все бумаги с подходящей покупкой за последние N месяцев, ` +
       `равный вес <b>по бумагам</b> (не по числу подач), держим месяц, повторяем с 2016 года. ` +
       `Учитываются только имена с дневным оборотом от ${fmtMoney(m.minDv ?? 3e6)} на момент покупки. ` +
-      `В расчёте ${fmtInt(s.n)} покупок с котировками, из них ${fmtInt(s.nOk)} прошли фильтры ` +
-      `и ${fmtInt(s.nSet)} попали в рабочий набор.` +
-      `<br><b>Альфа считается к трём факторам</b> — рынок, размер и моментум. Моментум обязателен: ` +
-      `набор отбирает бумаги у 52-недельного максимума, то есть по построению сидит в победителях ` +
-      `моментума, и без этого фактора его результат был бы завышен.` + survivalNote();
+      `В расчёте ${fmtInt(s.n)} покупок с котировками, из них ${fmtInt(s.nOk)} прошли фильтры. ` +
+      `<b>Альфа считается к трём факторам</b> — рынок, размер и моментум.` + survivalNote();
     function survivalNote() {
       const sv = state.meta?.survival;
       if (!sv) return '';
@@ -821,77 +615,14 @@ async function loadStats() {
     });
     $('#s-hold').addEventListener('change', renderStats);
   }
-  renderSetBlock();
+  renderAvoid();
   renderStats();
 }
 
-// Главная таблица: рабочий набор рядом с эталонами. Строки эталонов нужны, чтобы «+7%»
-// читалось в контексте — сама вселенная инсайдерских имён проигрывает индексу.
-function mainRow(r, strong) {
-  return `<tr class="${strong ? 'row-strong' : 'muted-row'}">
-    <td>${strong ? '<b>' + esc(r.name) + '</b>' : esc(r.name)}</td>
-    <td class="num">${r.hold ? r.hold + ' мес' : '—'}</td>
-    <td class="num ${r.n < 15 ? 'warn-n' : ''}">${r.n}</td>
-    ${numCell(r.cagr)}<td class="num">${pctPlain(r.vol, 1)}</td>${numCell(r.dd)}
-    <td class="num">${r.sharpe ?? '—'}</td>
-    ${numCell(r.spy, true)}${tCell(r.spyT)}<td class="num">${r.ir ?? '—'}</td>
-    ${numCell(r.a, true)}${tCell(r.t)}
-    <td class="num">${r.beta ?? '—'}</td><td class="num">${r.mom ?? '—'}</td>
-    <td class="num">${r.turnover === null || r.turnover === undefined ? '—' : pctPlain(r.turnover)}</td>
-    ${numCell(r.net, true)}</tr>`;
-}
-function renderSetBlock() {
-  const s = state.stats;
-  const set = s?.set;
-  const head = `<tr><th>Портфель</th><th class="num">Держать</th><th class="num" title="средний состав">Бумаг</th>
-    <th class="num">CAGR</th><th class="num">Вол.</th><th class="num">Просадка</th><th class="num" title="доходность сверх безрисковой на единицу волатильности">Шарп</th>
-    <th class="num" title="превышение над S&P 500 в год">к SPY</th><th class="num">t</th>
-    <th class="num" title="информационный коэффициент: превышение на единицу ошибки следования">IR</th>
-    <th class="num" title="альфа к рынку, размеру и моментуму">α 3ф</th><th class="num">t</th>
-    <th class="num">β</th><th class="num" title="нагрузка на моментум">мом.</th>
-    <th class="num">Оборот</th><th class="num" title="к SPY за вычетом издержек">Нетто</th></tr>`;
-  const rows = (set ? mainRow(set, true) : '') + (s?.reference ?? []).map(r => mainRow(r, false)).join('');
-  $('#set-main').innerHTML = head + rows;
-
-  if (s?.setDef) {
-    const d = s.setDef;
-    $('#set-def-note').innerHTML =
-      `Правило: покупка не ниже <b>${Math.abs(Math.round(d.maxDd * 100))}%</b> от 52-недельного максимума, ` +
-      `сумма <b>от ${fmtMoney(d.minVal)}</b>, оборот бумаги <b>от ${fmtMoney(d.minDv)}</b> в день, ` +
-      `удержание <b>${d.hold} месяца</b>, равный вес по бумагам. Издержки в колонке «нетто» — ` +
-      `${pctPlain(s.roundTrip, 1)} на круг.`;
-  }
-  if (!set) { $('#set-proof').innerHTML = ''; return; }
-
-  // Доказательства: лестницы порогов, год за годом, затухание при задержке входа
-  let html = '';
-  if (set.control) {
-    html += `<p class="hint"><b>Сверх собственного ценового контекста: ${fmtPct(set.control.ex)} (t=${set.control.t}).</b> ` +
-      `Контроль — ${esc(set.control.name)}, собранные тем же способом и на тот же срок. Это и есть ответ на вопрос, ` +
-      `добавляет ли инсайдер что-то сверх моментума.</p>`;
-  }
-  for (const L of set.ladders ?? []) {
-    html += `<h4>Порог не подогнан: ${esc(L.name)}</h4><div class="table-wrap"><table class="mini"><tr>` +
-      L.rows.map(x => `<th>${esc(x.lab)}</th>`).join('') + '</tr><tr>' +
-      L.rows.map(x => `<td class="${cls(x.spy)}">${fmtPct(x.spy)}<br><span class="muted">t=${x.t}, ${x.n} бум.</span></td>`).join('') +
-      '</tr></table></div>';
-  }
-  if (set.lag?.length) {
-    html += `<h4>Сигнал живёт около месяца</h4><div class="table-wrap"><table class="mini"><tr>` +
-      set.lag.map(x => `<th>вход через ${x.lag} мес</th>`).join('') + '</tr><tr>' +
-      set.lag.map(x => `<td class="${cls(x.spy)}">${fmtPct(x.spy)}<br><span class="muted">t=${x.t}</span></td>`).join('') +
-      '</tr></table></div>';
-  }
-  if (set.years?.length) {
-    const pos = set.years.filter(y => y.ex > 0).length;
-    html += `<h4>Год за годом против индекса — в плюсе ${pos} из ${set.years.length}</h4>` +
-      '<div class="table-wrap"><table class="mini"><tr>' +
-      set.years.map(y => `<th>${esc(y.y)}</th>`).join('') + '</tr><tr>' +
-      set.years.map(y => `<td class="${cls(y.ex)}">${fmtPct(y.ex, 0)}</td>`).join('') + '</tr></table></div>';
-  }
-  $('#set-proof').innerHTML = html;
-
-  const av = s.avoid ?? [];
+// Чёрный список: срезы, которые системно хуже индекса (считает сборка). Итоги ревизии — статичный
+// блок в разметке: они не пересчитываются, а фиксируют вывод.
+function renderAvoid() {
+  const av = state.stats?.avoid ?? [];
   $('#avoid-table').innerHTML = av.length
     ? `<tr><th>Срез</th><th class="num">Держать</th><th class="num">Бумаг</th><th class="num">CAGR</th>
        <th class="num">к SPY</th><th class="num">t</th><th class="num">α 3ф</th><th class="num">t</th></tr>` +
