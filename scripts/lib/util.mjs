@@ -30,25 +30,53 @@ async function throttle(url, intervalMs = null) {
   if (wait > 0) await sleep(wait);
 }
 
+// База пауз между повторами. Переопределяется только самотестами (POLITE_BACKOFF_MS), иначе тест
+// сбоя сети ждал бы десятки секунд.
+const BACKOFF_MS = Number(process.env.POLITE_BACKOFF_MS ?? 1500);
+// SEC отвечает 403 в двух разных случаях. Отсутствующий объект архива (праздничный или ещё не
+// вышедший дневной индекс) — это 403 с XML хранилища `<Code>AccessDenied</Code>`: настоящий ответ,
+// повторять нечего. Превышение лимита запросов — 403 с HTML-страницей («Request Rate Threshold
+// Exceeded»): это сбой, его надо переждать и повторить, а не принимать за «файла нет» — иначе
+// подача молча выпадает (так было до 11.2026).
+// Подставной EDGAR самотестов (EDGAR_BASE) ведёт себя как SEC.
+const isSecHost = url => {
+  const u = new URL(url);
+  if (/(^|\.)sec\.gov$/i.test(u.hostname)) return true;
+  try { return !!process.env.EDGAR_BASE && u.host === new URL(process.env.EDGAR_BASE).host; } catch { return false; }
+};
+const isS3Missing = text => /<Code>(AccessDenied|NoSuchKey)<\/Code>/.test(text ?? '');
+
 // Единая точка сетевых запросов: троттлинг по хосту, ретраи с экспоненциальной паузой.
-// 404 не ретраится (это ответ, а не сбой). 429/5xx/сеть — ретраится.
+// 404 не ретраится (это ответ, а не сбой). 429/5xx/сеть — ретраится; 403 sec.gov с HTML — тоже (лимит).
+// Ответ с `missing: true` — «объекта нет» (404 или 403 хранилища); после исчерпания повторов — исключение.
 export async function politeFetch(url, { ua = SEC_UA, retries = 4, timeoutMs = 60000, as = 'buffer', intervalMs = null } = {}) {
   let lastErr;
+  const sec = isSecHost(url);
   for (let attempt = 0; attempt <= retries; attempt++) {
     await throttle(url, intervalMs);
+    let rateLimited = false;
     try {
       const res = await fetch(url, {
         headers: { 'User-Agent': ua, 'Accept-Encoding': 'gzip, deflate' },
         signal: AbortSignal.timeout(timeoutMs),
         redirect: 'follow',
       });
-      if (res.status === 404 || res.status === 403) return { status: res.status, body: null };
+      if (res.status === 404) return { status: 404, body: null, missing: true };
+      if (res.status === 403) {
+        if (!sec) return { status: 403, body: null, missing: true };
+        const text = await res.text().catch(() => '');
+        if (isS3Missing(text)) return { status: 403, body: null, missing: true };
+        rateLimited = true;
+        throw new Error('HTTP 403 (лимит SEC)');
+      }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
       return { status: res.status, body: as === 'text' ? buf.toString('utf8') : buf };
     } catch (e) {
       lastErr = e;
-      if (attempt < retries) await sleep(1500 * 2 ** attempt + Math.floor(500 * (attempt + 1) * 0.5));
+      // Лимит SEC снимается через ~10 минут бездействия; ждём дольше, чем при обычном сбое сети
+      const pause = (rateLimited ? 4 : 1) * BACKOFF_MS * 2 ** attempt + Math.floor(BACKOFF_MS / 6 * (attempt + 1));
+      if (attempt < retries) await sleep(pause);
     }
   }
   throw new Error(`politeFetch ${url}: ${lastErr?.message ?? lastErr}`);
