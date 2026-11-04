@@ -5,7 +5,7 @@ import { existsSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { addDaysIso } from './util.mjs';
 
-export const FEED = { from: '06:00', until: '22:05', intervalSec: 45, keepDays: 14, maxTries: 6 };
+export const FEED = { from: '06:00', until: '22:00', intervalSec: 45, keepDays: 14, maxTries: 6 };
 export const feedFile = (dir, nyDate) => join(dir, `${nyDate}.jsonl`);
 
 // Журнал JSONL, по записи в строке:
