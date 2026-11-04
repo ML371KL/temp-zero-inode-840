@@ -175,13 +175,89 @@ async function fetchQuotes(cache, symbols, forceChart) {
   }
 }
 
+// Число строго больше нуля, иначе null: у Yahoo «нет данных» приходит нулём
+const pos = v => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
+
+
+// ---------- журнал вечерней схемы (R2) ----------
+// Сборщик на VPS (scripts/evening/collector.mjs) присылает журнал ЦЕЛИКОМ за вечер: PUT /paper/log/ГГГГ-ММ-ДД.jsonl с
+// токеном; ежедневная сборка панели читает его без токена (GET /paper/index и GET /paper/log/...). Журнал открытый, как и сам
+// репозиторий: в нём формы EDGAR и котировки, секретов нет — токен защищает только запись.
+// Привязка R2 называется PAPER (wrangler.toml), секрет — PAPER_TOKEN (wrangler secret put PAPER_TOKEN). Нет привязки или
+// токена — приём закрыт (503), а не открыт всем.
+const PAPER_FILE = /^\/paper\/log\/(\d{4}-\d{2}-\d{2})\.jsonl$/;
+const PAPER_MAX_BYTES = 2 * 1024 * 1024;               // вечерний журнал — сотни килобайт; больше — ошибка отправителя
+const PAPER_KINDS = new Set(['event', 'q', 'run', 'stat']);
+
+// Сравнение токена за постоянное время
+function sameToken(a, b) {
+  const x = new TextEncoder().encode(a), y = new TextEncoder().encode(b);
+  let d = x.length ^ y.length;
+  for (let i = 0; i < Math.max(x.length, y.length); i++) d |= (x[i] ?? 0) ^ (y[i] ?? 0);
+  return d === 0;
+}
+// Каждая непустая строка — JSON-объект известного вида: в хранилище не должен лечь произвольный текст
+function checkJournal(text) {
+  let lines = 0;
+  const all = text.split('\n');
+  for (let i = 0; i < all.length; i++) {
+    if (!all[i].trim()) continue;
+    let r;
+    try { r = JSON.parse(all[i]); } catch { return { ok: false, line: i + 1, why: 'не JSON' }; }
+    if (!r || typeof r !== 'object' || !PAPER_KINDS.has(r.k)) return { ok: false, line: i + 1, why: 'неизвестный вид записи' };
+    lines++;
+  }
+  return { ok: true, lines };
+}
+function authorized(request, env) {
+  const m = /^Bearer (.+)$/.exec(request.headers.get('Authorization') ?? '');
+  return !!m && sameToken(m[1], env.PAPER_TOKEN);
+}
+async function handlePaper(request, env, url, origin) {
+  if (!env.PAPER) return json({ error: 'хранилище журнала не подключено' }, 503, origin);
+  const path = url.pathname, file = PAPER_FILE.exec(path);
+  const get = request.method === 'GET', put = request.method === 'PUT';
+  if (get && path === '/paper/index') {
+    const list = await env.PAPER.list({ prefix: 'log/' });
+    const files = (list.objects ?? []).map(o => ({ name: o.key.slice(4), size: o.size, uploaded: o.uploaded ? new Date(o.uploaded).toISOString() : null }))
+      .sort((a, b) => (a.name < b.name ? -1 : 1));
+    return json({ files }, 200, origin, { 'Cache-Control': 'no-store' });
+  }
+  if (get && file) {
+    const obj = await env.PAPER.get('log/' + file[1] + '.jsonl');
+    if (!obj) return json({ error: 'нет журнала за эту дату' }, 404, origin);
+    return new Response(obj.body, { status: 200, headers: { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', ...cors(origin) } });
+  }
+  if ((get && path === '/paper/ping') || (put && file)) {
+    if (!env.PAPER_TOKEN) return json({ error: 'приём журнала не настроен (нет секрета PAPER_TOKEN)' }, 503, origin);
+    if (!authorized(request, env)) return json({ error: 'нужен токен' }, 401, origin);
+    if (get) return json({ ok: true }, 200, origin);
+    if (Number(request.headers.get('Content-Length') ?? 0) > PAPER_MAX_BYTES) return json({ error: 'журнал слишком велик' }, 413, origin);
+    const text = await request.text();
+    if (text.length > PAPER_MAX_BYTES) return json({ error: 'журнал слишком велик' }, 413, origin);
+    const check = checkJournal(text);
+    if (!check.ok) return json({ error: 'строка ' + check.line + ': ' + check.why }, 400, origin);
+    // Журнал только растёт: более короткая версия — порча на стороне отправителя (пустой или усечённый файл), её не принимаем
+    const key = 'log/' + file[1] + '.jsonl';
+    const prev = await env.PAPER.head(key);
+    if (prev && Number(prev.customMetadata?.lines ?? 0) > check.lines) {
+      return json({ error: 'в хранилище записей больше, чем в присланном журнале', stored: Number(prev.customMetadata.lines), sent: check.lines }, 409, origin);
+    }
+    await env.PAPER.put(key, text, { httpMetadata: { contentType: 'application/x-ndjson' }, customMetadata: { lines: String(check.lines) } });
+    return json({ ok: true, key, lines: check.lines, bytes: text.length }, 200, origin);
+  }
+  return json({ error: 'not found' }, 404, origin);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const origin = request.headers.get('Origin') ?? '';
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors(origin) });
+    const url = new URL(request.url);
+    // Журнал вечерней схемы живёт на своих путях и принимает PUT; котировки — только GET, как и раньше
+    if (url.pathname.startsWith('/paper/')) return handlePaper(request, env, url, origin);
     if (request.method !== 'GET') return json({ error: 'method' }, 405, origin);
 
-    const url = new URL(request.url);
     if (url.pathname === '/health') return json({ ok: true, ttl: TTL }, 200, origin);
     if (url.pathname !== '/quotes') return json({ error: 'not found' }, 404, origin);
 
@@ -223,6 +299,12 @@ export default {
           // Открытие дня: утренний список считает изменение от него. Клиент сверяет дату t и
           // состояние st: до начала сессии v7 отдаёт открытие прошлого дня.
           o: typeof q.regularMarketOpen === 'number' && q.regularMarketOpen > 0 ? q.regularMarketOpen : null,
+          // Вечерняя схема на бумаге (VPS, scripts/evening/collector.mjs): bid/ask с размерами и цена вечерней
+          // (post) и утренней (pre) сессии со временем сделки. Отдаются КАК ПРИШЛИ, без интерпретации: вне
+          // основной сессии bid/ask Yahoo бывают пустыми, нулевыми или в разы шире настоящего спреда (AAPL
+          // 323.80/337.35 при цене 337) — честность книги проверяет сборщик (evening.mjs, validBook).
+          b: pos(q.bid), a: pos(q.ask), bs: pos(q.bidSize), as: pos(q.askSize),
+          pp: pos(q.postMarketPrice), pt: pos(q.postMarketTime), pre: pos(q.preMarketPrice), prt: pos(q.preMarketTime),
         };
       }
       const missing = symbols.filter(s => !quotes[s]);

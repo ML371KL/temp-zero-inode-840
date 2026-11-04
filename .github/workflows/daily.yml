@@ -96,6 +96,21 @@ jobs:
         continue-on-error: true
         run: node scripts/lows.mjs --time-budget-min 10
 
+      # Журнал вечерней схемы на бумаге: его пишет сборщик на VPS (ops/insider840-evening) и присылает в воркер котировок (R2);
+      # читается без токена. Нет журнала или воркер не отвечает — блок на панели просто не обновится: ежедневное обновление важнее.
+      - name: Журнал вечерней схемы (воркер R2, необязательно)
+        continue-on-error: true
+        env:
+          PAPER_URL: https://radar840-quotes.financehub.workers.dev
+        run: |
+          mkdir -p data/paper/log
+          curl -fsS --retry 3 --max-time 30 "$PAPER_URL/paper/index" -o /tmp/paper-index.json
+          node -e "for (const f of JSON.parse(require('fs').readFileSync('/tmp/paper-index.json', 'utf8')).files) console.log(f.name)" > /tmp/paper-files.txt
+          while read -r f; do
+            curl -fsS --retry 3 --max-time 30 "$PAPER_URL/paper/log/$f" -o "data/paper/log/$f"
+          done < /tmp/paper-files.txt
+          echo "Журнал вечерней схемы: $(wc -l < /tmp/paper-files.txt) файлов"
+
       - name: Вычисления и payload
         run: node scripts/compute.mjs
 

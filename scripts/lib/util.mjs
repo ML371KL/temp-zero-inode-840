@@ -18,9 +18,10 @@ const HOST_INTERVAL_MS = {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function throttle(url) {
+async function throttle(url, intervalMs = null) {
   const host = new URL(url).host;
-  const interval = HOST_INTERVAL_MS[host] ?? 300;
+  // intervalMs — свой минимум между запросами к хосту (вечерний сборщик держится не чаще 5 запросов в секунду к SEC)
+  const interval = Math.max(intervalMs ?? 0, HOST_INTERVAL_MS[host] ?? 300);
   const st = hostState.get(host) ?? { nextAt: 0 };
   const now = Date.now();
   const wait = Math.max(0, st.nextAt - now);
@@ -31,10 +32,10 @@ async function throttle(url) {
 
 // Единая точка сетевых запросов: троттлинг по хосту, ретраи с экспоненциальной паузой.
 // 404 не ретраится (это ответ, а не сбой). 429/5xx/сеть — ретраится.
-export async function politeFetch(url, { ua = SEC_UA, retries = 4, timeoutMs = 60000, as = 'buffer' } = {}) {
+export async function politeFetch(url, { ua = SEC_UA, retries = 4, timeoutMs = 60000, as = 'buffer', intervalMs = null } = {}) {
   let lastErr;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    await throttle(url);
+    await throttle(url, intervalMs);
     try {
       const res = await fetch(url, {
         headers: { 'User-Agent': ua, 'Accept-Encoding': 'gzip, deflate' },
