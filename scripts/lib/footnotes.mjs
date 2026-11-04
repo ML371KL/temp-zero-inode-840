@@ -53,8 +53,23 @@ export function fnIds(...fields) {
 // Итоговые флаги строки: построчные сноски + формоуровневое упоминание плана 10b5-1.
 // Формоуровневый признак применяется ТОЛЬКО когда у строки нет собственных сносок: иначе
 // в смешанной подаче (продажа по плану + дискреционная покупка) план приписывался бы и покупке.
-export function rowFootnoteFlags(rowTexts, allTexts) {
+//
+// rowTexts — сноски к полям самой сделки (код, акции, цена, дата, класс бумаги): только они определяют
+// природу сделки. holdTexts — сноски к остатку и форме владения: у строки они есть, поэтому формоуровневый
+// 10b5-1 на неё, как и раньше, не распространяется (иначе покупка с пометкой «в остатке есть акции из
+// плана» стала бы плановой).
+export function rowFootnoteFlags(rowTexts, allTexts, holdTexts = []) {
   const flags = classifyFootnotes(rowTexts);
-  if (!flags.b5 && !rowTexts?.length && FN_RULES.b5.test((allTexts ?? []).join(' \n '))) flags.b5 = 1;
+  const hasOwn = (rowTexts?.length ?? 0) + (holdTexts?.length ?? 0) > 0;
+  if (!flags.b5 && !hasOwn && FN_RULES.b5.test((allTexts ?? []).join(' \n '))) flags.b5 = 1;
   return flags;
+}
+
+// Признаки сносок к остатку и форме владения — описание пакета, а не сделки. До 11.2026 они отсеивали
+// обычные покупки: «Includes 298 shares acquired under Uber's ESPP» у покупки CEO на $10 млн.
+// Возвращает только то, чего нет в признаках самой сделки; используется для тегов, в отсев не идёт.
+export function holdingFootnoteFlags(holdTexts, rowFlags = {}) {
+  const f = classifyFootnotes(holdTexts);
+  for (const k of Object.keys(rowFlags ?? {})) delete f[k];
+  return f;
 }

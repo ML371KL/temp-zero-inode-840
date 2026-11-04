@@ -2419,7 +2419,7 @@ rmSync(NTMP, { recursive: true, force: true });
 // Ревизия данных 04.11.2026 (audit-840-data-2026-11/REVIEW-DATA.md, дефекты П1, П4, П5, П6, П7, П12).
 {
   const { missingIndexVerdict, shouldProbeNext, nextWeekday, coverageEntry, pruneCoverage, listDayOf } = await import('./lib/livecal.mjs');
-  const { uniqueFilings, normalizeXmlDate } = await import('./lib/edgar.mjs');
+  const { uniqueFilings, normalizeXmlDate, PARSER_REV } = await import('./lib/edgar.mjs');
   const { readJsonGz } = await import('./lib/util.mjs');
 
   ok('сбор/П1: праздник SEC в будний день не задерживает следующий день (07.09, 12.10, 11.11)', () => {
@@ -2561,7 +2561,8 @@ rmSync(NTMP, { recursive: true, force: true });
   const liveRows = () => readJsonGz(join(CTMP, 'trades', 'live.json.gz')).trades;
   try {
     mkdirSync(join(CTMP, 'state'), { recursive: true });
-    writeJson(join(CTMP, 'state', 'live.json'), { schema: SHARD_VERSION, from: '2026-09-01', lastDay: '2026-09-04', staleFloor: 1 });
+    // ревизия разбора — текущая: фоновое перечитывание окна здесь не нужно (его проверяет отдельный тест)
+    writeJson(join(CTMP, 'state', 'live.json'), { schema: SHARD_VERSION, from: '2026-09-01', lastDay: '2026-09-04', staleFloor: 1, parserRev: PARSER_REV });
     // строка старого парсера: дата сделки в поясе, без ownD — её должна починить сама сборка
     writeJsonGz(join(CTMP, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [
       { acc: OLD, form: '4', fdate: '2026-09-04', tdate: '2026-09-03-05:00', cik: 555000, t: 'OLD', owners: [{ cik: 777, name: 'Doe John', rel: 'OF', title: 'CFO' }], code: 'P', sh: 1000, px: 20, val: 20000, own: 10000, di: 'D', b5: 0, orig: null, sec: 'Common Stock', fn: {} },
@@ -2619,10 +2620,163 @@ rmSync(NTMP, { recursive: true, force: true });
       assert.ok(liveRows().some(x => x.t === 'CCC'));
       assert.equal(s.staleFloor, undefined, 'строк старой схемы не осталось — пол опустился до нуля');
     });
+
+    await okAsync('сбор: рост PARSER_REV — окно перечитывается в фоне, строки замещаются без дублей', async () => {
+      const st = liveState();
+      writeJson(join(CTMP, 'state', 'live.json'), { ...st, parserRev: 1 });
+      const before = liveRows().length, hitsBefore = hits.length;
+      const r = await runLive('2026-09-11');
+      assert.equal(r.code, 0, r.out);
+      const s = liveState();
+      assert.equal(s.parserRev, PARSER_REV, r.out);
+      assert.equal(s.reread, undefined, 'окно пройдено до конца');
+      assert.equal(liveRows().length, before, 'строки замещены, а не продублированы');
+      assert.ok(hits.length - hitsBefore >= 5, 'подачи окна скачаны заново');
+      assert.equal(s.lastDay, st.lastDay, 'сегодняшний день не задержан и не сдвинут');
+    });
+
+    await okAsync('сбор: прогон, собравший новый день, окно не перечитывает — список и письмо его не ждут', async () => {
+      const st = liveState();
+      writeJson(join(CTMP, 'state', 'live.json'), { ...st, parserRev: 1 });
+      index['2026-09-11'] = ['x'].join('\n');   // новый день: индекс вышел, подач в нём нет
+      const hitsBefore = hits.length;
+      const r1 = await runLive('2026-09-12');
+      assert.equal(r1.code, 0, r1.out);
+      const s1 = liveState();
+      assert.equal(s1.coverage['2026-09-11'].status, 'complete', 'новый день (пятница) собран');
+      assert.equal(s1.parserRev, 1, 'окно в этом прогоне не перечитывалось');
+      assert.ok(s1.reread, 'перечитывание стоит в очереди');
+      assert.match(r1.out, /перечитывание окна отложено/);
+      const r2 = await runLive('2026-09-12');   // следующий прогон без нового дня
+      assert.equal(r2.code, 0, r2.out);
+      const s2 = liveState();
+      assert.equal(s2.parserRev, PARSER_REV, r2.out);
+      assert.equal(s2.reread, undefined, 'окно пройдено');
+      assert.ok(hits.length - hitsBefore >= 5, 'окно перечитано вторым прогоном');
+    });
   } finally {
     await new Promise(r => server.close(r));
     rmSync(CTMP, { recursive: true, force: true });
   }
+}
+
+// ==================== ГЕЙТЫ И ВСЕЛЕННАЯ: сноски к остатку, TXSE, склейка форм, поправки, поздние формы (PR fix-collect-2) ====================
+// Ревизия данных 04.11.2026 (П2, П3, П8, П16).
+{
+  const { resolveAmendments, ALLOWED_EXCHANGES, exchangeCounts } = await import('./lib/universe.mjs');
+  const { filingLagDays, isLateFiling } = await import('./lib/gates.mjs');
+  const { holdingFootnoteFlags } = await import('./lib/footnotes.mjs');
+
+  // Покупка, у которой сноска о DRIP/ESPP висит на остатке (так подают Uber, Celsius, Insulet, Agree Realty)
+  const holdXml = (where, note) => `<SEC-DOCUMENT>\n<XML>\n<ownershipDocument><documentType>4</documentType>
+    <issuer><issuerCik>1543151</issuerCik><issuerTradingSymbol>UBER</issuerTradingSymbol></issuer><aff10b5One>0</aff10b5One>
+    <reportingOwner><reportingOwnerId><rptOwnerCik>1</rptOwnerCik><rptOwnerName>Ceo Person</rptOwnerName></reportingOwnerId>
+      <reportingOwnerRelationship><isDirector>1</isDirector><isOfficer>1</isOfficer><officerTitle>Chief Executive Officer</officerTitle></reportingOwnerRelationship></reportingOwner>
+    <nonDerivativeTable><nonDerivativeTransaction><securityTitle><value>Common Stock</value></securityTitle>
+      <transactionDate><value>2026-09-08</value></transactionDate>
+      <transactionCoding><transactionCode>P</transactionCode><equitySwapInvolved>0</equitySwapInvolved></transactionCoding>
+      <transactionAmounts><transactionShares><value>141000</value>${where === 'shares' ? '<footnoteId id="F2"/>' : ''}</transactionShares>
+        <transactionPricePerShare><value>70.96</value><footnoteId id="F1"/></transactionPricePerShare>
+        <transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode></transactionAmounts>
+      <postTransactionAmounts><sharesOwnedFollowingTransaction><value>1500000</value>${where === 'holding' ? '<footnoteId id="F2"/>' : ''}</sharesOwnedFollowingTransaction></postTransactionAmounts>
+      <ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature>
+    </nonDerivativeTransaction></nonDerivativeTable>
+    <footnotes><footnote id="F1">The price reported is a weighted average price. Prices ranged from $70.50 to $71.40.</footnote>
+      <footnote id="F2">${note}</footnote></footnotes>
+  </ownershipDocument>\n</XML>`;
+
+  ok('гейты/П2: сноска к остатку о ESPP/DRIP не отсеивает покупку, а даёт тег', () => {
+    const note = "Includes 298 shares acquired under Uber's 2019 Employee Stock Purchase Plan on May 20, 2026.";
+    const [r] = parseForm4Txt(holdXml('holding', note), '0000000000-26-000010', '2026-09-10').trades;
+    assert.equal(r.fn.espp, undefined, 'природа сделки не задета сноской к остатку');
+    assert.equal(r.fn.wavg, 1, 'сноска к цене по-прежнему работает');
+    assert.equal(r.fnh.espp, 1);
+    const g = applyGates(r, {});
+    assert.equal(g.ok, true);
+    assert.ok(g.tags.includes('hold-note'));
+    // та же сноска на поле акций — это уже описание самой сделки: отсев остаётся
+    const [s] = parseForm4Txt(holdXml('shares', note), '0000000000-26-000011', '2026-09-10').trades;
+    assert.equal(s.fn.espp, 1);
+    assert.equal(applyGates(s, {}).drop, 'espp');
+    // DRIP на остатке
+    const [d] = parseForm4Txt(holdXml('holding', 'Includes 6,263.244 shares acquired under a dividend reinvestment plan since the last Form 4.'), '0000000000-26-000012', '2026-08-31').trades;
+    assert.equal(d.fn.drip, undefined);
+    assert.equal(applyGates(d, {}).ok, true);
+  });
+
+  ok('гейты/П2: формоуровневый 10b5-1 не переходит на покупку со сноской к остатку', () => {
+    // у строки есть своя сноска (к остатку) — значит, план из примечаний формы её не касается, как и раньше
+    const f = rowFootnoteFlags([], ['Sales were made under a Rule 10b5-1 trading plan.'], ['Includes shares held in a 401(k) plan.']);
+    assert.equal(f.b5, undefined);
+    const g = rowFootnoteFlags([], ['Sales were made under a Rule 10b5-1 trading plan.'], []);
+    assert.equal(g.b5, 1, 'строка без сносок, как раньше, наследует план формы');
+    assert.deepEqual(holdingFootnoteFlags(['Includes shares acquired under the ESPP; held by trust.'], { trust: 1 }), { espp: 1 });
+  });
+
+  ok('гейты/П2: квартальный датасет — сноска к SHRS_OWND_FOLWNG_TRANS_FN идёт в fnh', () => {
+    const z = zipCreate({
+      'SUBMISSION.tsv': 'ACCESSION_NUMBER\tFILING_DATE\tDOCUMENT_TYPE\tISSUERCIK\tISSUERNAME\tISSUERTRADINGSYMBOL\tAFF10B5ONE\tDATE_OF_ORIG_SUB\tREMARKS\nQ-1\t02-SEP-2026\t4\t917251\tAgree\tADC\t0\t\t',
+      'REPORTINGOWNER.tsv': 'ACCESSION_NUMBER\tRPTOWNERCIK\tRPTOWNERNAME\tRPTOWNER_RELATIONSHIP\tRPTOWNER_TITLE\nQ-1\t5\tRakolta John\tDirector\t',
+      'NONDERIV_TRANS.tsv': 'ACCESSION_NUMBER\tTRANS_DATE\tTRANS_CODE\tEQUITY_SWAP_INVOLVED\tTRANS_SHARES\tTRANS_PRICEPERSHARE\tSHRS_OWND_FOLWNG_TRANS\tDIRECT_INDIRECT_OWNERSHIP\tTRANS_PRICEPERSHARE_FN\tSHRS_OWND_FOLWNG_TRANS_FN\nQ-1\t31-AUG-2026\tP\t0\t20000\t73.23\t90000\tD\t\tF2',
+      'FOOTNOTES.tsv': 'ACCESSION_NUMBER\tFOOTNOTE_ID\tFOOTNOTE_TXT\nQ-1\tF2\tIncludes 6,263.244 shares acquired under a dividend reinvestment plan since the last Statement.',
+    });
+    const [r] = normalizeQuarterZip(z).trades;
+    assert.equal(r.fn.drip, undefined);
+    assert.equal(r.fnh.drip, 1);
+    assert.equal(applyGates(r, {}).ok, true);
+  });
+
+  ok('вселенная/П3: TXSE — биржа; незнакомая площадка решается реестром, а не считается OTC', () => {
+    assert.ok(ALLOWED_EXCHANGES.has('TXSE'));
+    const ref = new Map([[1276187, { ticker: 'ET', exchange: 'TXSE' }], [2, { ticker: 'NEWX', exchange: 'NEWEXCH' }], [3, { ticker: 'PINK', exchange: 'OTC' }], [4, { ticker: 'GHST', exchange: 'NEWEXCH' }]]);
+    const ranges = { NEWX: [[1, '2020-01-01', '2026-11-03']], GHST: [[0, '2020-01-01', '2026-11-03']] };
+    assert.equal(issuerCategory({ cik: 1276187, tdate: '2026-08-19' }, ref, ranges), 'listed');
+    assert.equal(issuerCategory({ cik: 2, tdate: '2026-08-19' }, ref, ranges), 'listed', 'незнакомая площадка, реестр — биржа');
+    assert.equal(issuerCategory({ cik: 4, tdate: '2026-08-19' }, ref, ranges), 'otc', 'незнакомая площадка, реестр — внебиржевой');
+    assert.equal(issuerCategory({ cik: 3, tdate: '2026-08-19' }, ref, ranges), 'otc');
+    assert.equal(issuerCategory({ cik: 2, tdate: '2026-08-19' }, ref, null), 'unknown');
+    assert.deepEqual(exchangeCounts(ref), { TXSE: 1, NEWEXCH: 2, OTC: 1 });
+  });
+
+  const row = (acc, form, fdate, sh, extra = {}) => ({ acc, form, fdate, tdate: '2026-09-28', cik: 1, owners: [{ cik: 7 }], code: 'P', sec: 'Common Stock', sh, px: 80, val: sh * 80, ...extra });
+  ok('вселенная/П16: разные исходные формы одного лица за дату — разные покупки', () => {
+    // KOD 30.09.2026: три формы Baker Bros на одну дату сделки, $58,6 / $35,0 / $60,5 млн
+    const r = resolveAmendments([row('A1', '4', '2026-09-30', 807840), row('A2', '4', '2026-09-30', 418323), row('A3', '4', '2026-09-30', 681866)]);
+    assert.equal(r.rows.length, 3);
+    assert.equal(r.rows.reduce((s, x) => s + x.sh, 0), 1908029);
+    // повторная подача одного и того же — одна строка
+    assert.equal(resolveAmendments([row('B1', '4', '2026-09-11', 100000), row('B2', '4', '2026-09-11', 100000)]).rows.length, 1);
+  });
+
+  ok('вселенная/П8: поправка правит поля, дата — первой подачи', () => {
+    // CVNA: исходник 04.08, поправка 05.10 к сделке 31.07 — в списке 05.10 её быть не должно
+    const r = resolveAmendments([row('O', '4', '2026-08-04', 25000, { at: '2026-08-04T18:01' }), row('F', '4/A', '2026-10-05', 25500, { orig: '2026-08-04' })]);
+    assert.equal(r.rows.length, 1);
+    assert.equal(r.rows[0].acc, 'F', 'поля — из поправки');
+    assert.equal(r.rows[0].sh, 25500);
+    assert.equal(r.rows[0].fdate, '2026-08-04', 'дата — первой подачи');
+    assert.equal(r.rows[0].famend, '2026-10-05');
+    assert.equal(r.rows[0].at, '2026-08-04T18:01');
+    // две поправки подряд — дата остаётся первой
+    const two = resolveAmendments([row('O', '4', '2026-08-04', 25000), row('F1', '4/A', '2026-08-10', 25500, { orig: '2026-08-04' }), row('F2', '4/A', '2026-09-01', 26000, { orig: '2026-08-04' })]);
+    assert.deepEqual(two.rows.map(x => [x.acc, x.fdate]), [['F2', '2026-08-04']]);
+    // поправка к одной из двух исходных — замещает ту, на которую указывает
+    const pick = resolveAmendments([row('X1', '4', '2026-09-11', 5000), row('X2', '4', '2026-09-14', 3000), row('XA', '4/A', '2026-09-20', 3100, { orig: '2026-09-14' })]);
+    assert.deepEqual(pick.rows.map(x => [x.acc, x.fdate]).sort(), [['X1', '2026-09-11'], ['XA', '2026-09-14']]);
+    // поправка без исходника — первое раскрытие, своя дата (BPRE 29.09)
+    const solo = resolveAmendments([row('S', '4/A', '2026-09-29', 1000, { orig: '2026-09-23' }), row('T', '4', '2026-10-30', 50)]);
+    assert.ok(solo.rows.some(x => x.acc === 'S' && x.fdate === '2026-09-29'));
+  });
+
+  ok('гейты/П8: поздняя подача (сделка старше 10 рабочих дней) отсеивается', () => {
+    assert.equal(filingLagDays('2026-11-02', '2026-11-04'), 2);
+    assert.equal(filingLagDays('2026-10-30', '2026-11-02'), 1);
+    assert.equal(isLateFiling({ tdate: '2026-10-19', fdate: '2026-11-02' }), false, '10 рабочих дней — ещё вовремя');
+    assert.equal(isLateFiling({ tdate: '2026-10-16', fdate: '2026-11-02' }), true);
+    const late = { acc: 'L', form: '4', fdate: '2026-09-16', tdate: '2026-03-19', code: 'P', sh: 100, px: 10, val: 1000, sec: 'Common Stock', fn: {} };
+    assert.equal(applyGates(late, {}).drop, 'late');
+    assert.equal(applyGates({ ...late, tdate: '2026-09-14' }, {}).ok, true);
+  });
 }
 
 rmSync(TMP, { recursive: true, force: true });

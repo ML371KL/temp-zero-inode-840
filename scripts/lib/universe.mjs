@@ -4,7 +4,11 @@ import { exchangeAt } from './symbols.mjs';
 import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const ALLOWED_EXCHANGES = new Set(['NYSE', 'Nasdaq', 'CBOE']);
+// TXSE (Техасская фондовая биржа) — с 25.08.2026 справочник SEC переводит туда эмитентов с двойным листингом
+// (ET, SUN, DDS, TCBI, IBOC, OBK, CECO, SUNC, USAC): до 11.2026 их покупки считались внебиржевыми.
+export const ALLOWED_EXCHANGES = new Set(['NYSE', 'Nasdaq', 'CBOE', 'TXSE']);
+// Площадки, которые однозначно внебиржевые. Всё прочее незнакомое решает реестр символов на дату сделки.
+export const OTC_EXCHANGES = new Set(['OTC']);
 
 function readShard(path) {
   const raw = readJsonGz(path, null);
@@ -39,17 +43,20 @@ export function loadAllTrades(dataDir) {
   // Поправки 4/A замещают оригинал по содержательному ключу. Количество акций в ключ НЕ
   // входит: поправки чаще всего правят именно его, и тогда оригинал с ошибочным числом
   // (встречались строки на сотни миллиардов долларов) остался бы в выборке вторым экземпляром.
-  const byContent = new Map();
-  let replaced = 0;
+  // Замещает ТОЛЬКО поправка (resolveAmendments): две исходные формы одного лица за одну дату сделки —
+  // это разные покупки (KOD 30.09.2026: три формы Baker Bros на $58,6 / $35,0 / $60,5 млн), их складываем.
+  const groups = new Map();
   for (const r of byKey.values()) {
     const k = `${r.cik}|${r.owners[0]?.cik ?? 0}|${r.tdate}|${r.code}|${r.sec ?? ''}`;
-    const prev = byContent.get(k);
-    if (!prev) { byContent.set(k, r); continue; }
-    replaced++;
-    const better = (r.form === '4/A') !== (prev.form === '4/A')
-      ? (r.form === '4/A' ? r : prev)
-      : (r.fdate > prev.fdate ? r : prev);
-    byContent.set(k, better);
+    (groups.get(k) ?? groups.set(k, []).get(k)).push(r);
+  }
+  const out = [];
+  let replaced = 0, exactDups = 0, keptOriginals = 0;
+  for (const g of groups.values()) {
+    if (g.length === 1) { out.push(g[0]); continue; }
+    const res = resolveAmendments(g);
+    replaced += res.replaced; exactDups += res.exactDups; keptOriginals += res.keptOriginals;
+    out.push(...res.rows);
   }
 
   // Аннулирующие поправки НЕ детектируются намеренно. Признак «4/A без строк P/S» выглядит
@@ -59,9 +66,51 @@ export function loadAllTrades(dataDir) {
   // «поправка касается другой строки» можно только сохраняя ВСЕ строки формы, а не только
   // P/S. Пока этого нет, безопаснее не гасить ничего: маркеры поправок лежат в shard.amend.
   return {
-    trades: [...byContent.values()],
-    stats: { raw: byKey.size, replacedByAmendment: replaced, amendments: amend.length },
+    trades: out,
+    stats: { raw: byKey.size, replacedByAmendment: replaced, exactDuplicates: exactDups, separateOriginals: keptOriginals, amendments: amend.length },
   };
+}
+
+// Строки одного эмитента, лица, даты сделки, кода и класса из РАЗНЫХ подач.
+//  · Исходные формы (4) с одинаковыми акциями и ценой — повторная подача одного и того же: одна строка.
+//  · Разные исходные формы — разные покупки: остаются все.
+//  · Поправка (4/A) замещает ту строку, которую правит: с датой подачи, равной её dateOfOriginalSubmission,
+//    иначе с тем же числом акций, иначе последнюю раньше неё. Замещённая строка передаёт поправке ДАТУ
+//    ПЕРВОЙ ПОДАЧИ (fdate) и время приёма (at): информация стала публичной тогда, а не в день поправки.
+//    Поправка без исходника в данных — первое раскрытие, остаётся со своей датой.
+// Ревизия данных 11.2026: поправки и поздние формы со своей датой не дают перевеса D+1
+// (события с 4/A 2016–2026, скор ≥2: −0,05%, t −0,1), а в утреннем списке выглядели свежими (CVNA 05.10 к сделке 31.07).
+export function resolveAmendments(group) {
+  const byDate = (a, b) => (a.fdate < b.fdate ? -1 : a.fdate > b.fdate ? 1 : (a.acc < b.acc ? -1 : 1));
+  const originals = group.filter(r => r.form !== '4/A').sort(byDate);
+  const amends = group.filter(r => r.form === '4/A').sort(byDate);
+  const rows = [];
+  let exactDups = 0, replaced = 0;
+  for (const o of originals) {
+    if (rows.some(x => x.sh === o.sh && x.px === o.px)) { exactDups++; continue; }
+    rows.push(o);
+  }
+  const keptOriginals = Math.max(0, rows.length - 1);
+  for (const a of amends) {
+    const prior = rows.filter(x => x.fdate <= a.fdate);
+    const target = prior.find(x => a.orig && (x.fdate === a.orig || x.fdate0 === a.orig))
+      ?? prior.find(x => x.sh === a.sh)
+      ?? (prior.length ? prior[prior.length - 1] : null);
+    if (!target) { rows.push(a); continue; }
+    replaced++;
+    const first = target.fdate0 ?? target.fdate;
+    const at = target.at ?? a.at;
+    const merged = { ...a, fdate: first, fdate0: first, famend: a.fdate, ...(at ? { at } : {}) };
+    rows.splice(rows.indexOf(target), 1, merged);
+  }
+  return { rows, replaced, exactDups, keptOriginals };
+}
+
+// Эмитенты справочника по биржам — для meta.json и журнала цен.
+export function exchangeCounts(ref) {
+  const out = {};
+  for (const v of ref.values()) { const k = v?.exchange ?? 'нет'; out[k] = (out[k] ?? 0) + 1; }
+  return out;
 }
 
 // Справочник тикеров: { cik: {ticker, exchange, name} }
@@ -87,7 +136,16 @@ export function resolveTicker(row, ref) {
 // НА ДАТУ СДЕЛКИ (lib/symbols.mjs). 'unknown' остаётся только там, где реестр не знает символа.
 export function issuerCategory(row, ref, ranges = null) {
   const cur = ref.get(row.cik);
-  if (cur && cur.exchange) return ALLOWED_EXCHANGES.has(cur.exchange) ? 'listed' : 'otc';
+  if (cur && cur.exchange) {
+    if (ALLOWED_EXCHANGES.has(cur.exchange)) return 'listed';
+    if (OTC_EXCHANGES.has(cur.exchange)) return 'otc';
+    // Незнакомая площадка (как TXSE до 11.2026): не считаем её внебиржевой по умолчанию, спрашиваем реестр
+    if (ranges && /^\d{4}-\d{2}-\d{2}$/.test(row.tdate ?? '')) {
+      const kind = exchangeAt(ranges, (cur.ticker || row.t || '').toUpperCase(), row.tdate);
+      if (kind) return kind === 'listed' ? 'listed' : 'otc';
+    }
+    return 'unknown';
+  }
   if (ranges && /^\d{4}-\d{2}-\d{2}$/.test(row.tdate ?? '')) {
     const t = (cur?.ticker || row.t || '').toUpperCase();
     const kind = exchangeAt(ranges, t, row.tdate);
