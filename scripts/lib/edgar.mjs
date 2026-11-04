@@ -236,6 +236,17 @@ function unescapeXml(s) {
     .replace(/&apos;/g, "'").replace(/&#\d+;/g, ' ').replace(/&amp;/g, '&');
 }
 
+// Время приёма формы из шапки полного .txt: «<ACCEPTANCE-DATETIME>20261103082635» — это время EDGAR
+// по Нью-Йорку (проверено на 40 формах за 03.11.2026: все на дату подачи, с 08:26 до 21:20 — форма 4
+// принимается до 22:00 ET, при UTC вечерние формы уходили бы за полночь). Возвращает
+// «ГГГГ-ММ-ДДTчч:мм» или null; битое значение не бросает — поле необязательное.
+export function acceptedAt(header) {
+  const m = /<ACCEPTANCE-DATETIME>(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})\d{2}/.exec(header ?? '');
+  if (!m) return null;
+  const date = `${m[1]}-${m[2]}-${m[3]}`;
+  return isIsoDate(date) && Number(m[4]) < 24 && Number(m[5]) < 60 ? `${date}T${m[4]}:${m[5]}` : null;
+}
+
 // Полный .txt сабмишен -> { trades, amend } (та же схема, что из датасета)
 export function parseForm4Txt(txt, acc, fdate) {
   const xm = /<XML>([\s\S]*?)<\/XML>/.exec(txt);
@@ -248,6 +259,7 @@ export function parseForm4Txt(txt, acc, fdate) {
   const cik = Number(tag(issuer, 'issuerCik'));
   const t = (tag(issuer, 'issuerTradingSymbol') || '').trim().toUpperCase();
   const b5 = boolVal(tagVal(xml, 'aff10b5One')) ? 1 : 0;
+  const at = acceptedAt(txt.slice(0, xm.index));
   const orig = tagVal(xml, 'dateOfOriginalSubmission');
   const remarks = unescapeXml(tag(xml, 'remarks') || '');
 
@@ -330,6 +342,8 @@ export function parseForm4Txt(txt, acc, fdate) {
       orig: orig ?? null,
       sec: String(a.sec).slice(0, 60),
       fn: rowFootnoteFlags(rowTexts, allTexts),
+      // Необязательное поле: у строк квартальных датасетов и у старых строк живого шарда его нет
+      ...(at ? { at } : {}),
     });
   }
   const amend = docType === '4/A' && orig

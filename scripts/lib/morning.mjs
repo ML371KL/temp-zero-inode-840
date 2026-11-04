@@ -17,6 +17,7 @@ export const MORNING = {
   daysShown: 10,        // сколько последних дней подачи отдаёт файл витрине
   bigVal: 1e6,
   deepDd: -0.3,
+  stake: 1e4,          // сумма в сделке, на которую витрина пересчитывает «сумму нетто» счётчика, $
 };
 
 // Лучшая роль: офицеры (C, F, O) сильнее директоров (+0,32% против +0,17% в ревизии).
@@ -31,6 +32,16 @@ export function tagsOf({ role, dd, val }, p = MORNING) {
   if (dd !== null && dd !== undefined && dd < p.deepDd) t.push('deep');
   if (val >= p.bigVal) t.push('big');
   return t;
+}
+
+// Когда принята форма (время по Нью-Йорку, «ГГГГ-ММ-ДДTчч:мм»): после закрытия (16:00 и позже), в торги
+// (9:30–16:00) или до открытия. Эффект у «ночных» форм сидит в разрыве до открытия D+1, у «дневных» часть
+// реакции уже в цене (ревизия: 61% форм принимаются после закрытия, их D+1 +0.34%; в торги — +0.21%).
+// Нет времени (строки квартальных датасетов, старые строки живого шарда) — null.
+export function sessionOf(at) {
+  if (!at) return null;
+  const hm = String(at).slice(11, 16);
+  return hm >= '16:00' ? 'post' : hm >= '09:30' ? 'rth' : 'pre';
 }
 
 const rnd = (v, k = 4) => Math.round(v * 10 ** k) / 10 ** k;
@@ -54,8 +65,10 @@ export function buildDay(rows, p = MORNING) {
     const val = list.reduce((s, x) => s + x.val, 0);
     const role = bestRole(list.map(x => x.role));
     const who = [...new Set(list.flatMap(x => x.who ?? []))];
+    // Бумага узнаётся рынком по ПЕРВОЙ форме дня: время приёма — самое раннее
+    const at = list.map(x => x.at).filter(Boolean).sort()[0] ?? null;
     out.push({
-      t, name: lead.name, who, role, val: Math.round(val), n: list.length,
+      t, name: lead.name, who, role, val: Math.round(val), n: list.length, at, ses: sessionOf(at),
       dd: lead.dd ?? null, dv: lead.dv, px: lead.px,
       lvl: lead.dv >= p.dvMain ? 30 : 10,
       tags: tagsOf({ role, dd: lead.dd ?? null, val }, p),
