@@ -96,6 +96,20 @@ jobs:
         continue-on-error: true
         run: node scripts/lows.mjs --time-budget-min 10
 
+      # Журнал вечерней схемы на бумаге: его пишет сборщик на VPS (ops/insider840-evening) и пушит в ветку paper.
+      # Нет ветки или сбой забора — блок на панели просто не обновится: ежедневное обновление важнее.
+      - name: Журнал вечерней схемы (ветка paper, необязательно)
+        continue-on-error: true
+        run: |
+          mkdir -p data/paper
+          if git ls-remote --exit-code origin paper >/dev/null 2>&1; then
+            git fetch --depth 1 origin paper
+            git archive --format=tar origin/paper | tar -x -C data/paper
+            echo "Журнал вечерней схемы: $(find data/paper -name '*.jsonl' | wc -l) файлов"
+          else
+            echo "Ветки paper ещё нет — вечерняя схема не собирается"
+          fi
+
       - name: Вычисления и payload
         run: node scripts/compute.mjs
 

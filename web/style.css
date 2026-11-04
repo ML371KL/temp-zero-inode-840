@@ -237,6 +237,13 @@ table.morning td { vertical-align: top; }
 table.morning td.marks { white-space: normal; min-width: 150px; }
 table.morning td.marks .pill { margin: 0 2px 2px 0; }
 table.morning .who-m, table.morning .marks-m { display: none; }
+.paper { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 16px; margin: 14px 0 6px; box-shadow: var(--shadow); }
+.paper-head { font-size: 12.5px; color: var(--ink-2); margin-bottom: 8px; }
+.paper-head b { color: var(--ink); }
+.paper-foot { font-size: 11.5px; color: var(--ink-3); margin-top: 6px; }
+.paper-t td { font-size: 14px; font-weight: 600; }
+.paper-t td.lab { font-size: 12.5px; font-weight: 500; }
+.paper-t tr.cur td { background: var(--bg); }
 details.rest { margin: 12px 0 4px; }
 details.rest > summary { cursor: pointer; color: var(--ink-2); font-size: 13px; padding: 4px 2px; }
 details.rest > summary:hover { color: var(--ink); }
@@ -269,6 +276,9 @@ table.mini.rev th:last-child, table.mini.rev td:last-child { text-align: left; }
   main { padding: 12px; }
   .strip { padding: 10px 12px; }
   .strip-t .c-t { display: none; }
+  .paper { padding: 10px 12px; }
+  .paper-t td { font-size: 12.5px; padding: 3px 3px; }
+  .paper-t td.lab { font-size: 11.5px; white-space: normal; }
   .strip-t td { font-size: 13.5px; padding: 3px 4px; }
   .strip-t th { font-size: 10.5px; padding: 0 4px 4px; white-space: normal; vertical-align: bottom; }
   .surge { padding: 6px 12px; }

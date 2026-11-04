@@ -175,6 +175,9 @@ async function fetchQuotes(cache, symbols, forceChart) {
   }
 }
 
+// Число строго больше нуля, иначе null: у Yahoo «нет данных» приходит нулём
+const pos = v => (typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null);
+
 export default {
   async fetch(request, env, ctx) {
     const origin = request.headers.get('Origin') ?? '';
@@ -223,6 +226,12 @@ export default {
           // Открытие дня: утренний список считает изменение от него. Клиент сверяет дату t и
           // состояние st: до начала сессии v7 отдаёт открытие прошлого дня.
           o: typeof q.regularMarketOpen === 'number' && q.regularMarketOpen > 0 ? q.regularMarketOpen : null,
+          // Вечерняя схема на бумаге (VPS, scripts/evening/collector.mjs): bid/ask с размерами и цена вечерней
+          // (post) и утренней (pre) сессии со временем сделки. Отдаются КАК ПРИШЛИ, без интерпретации: вне
+          // основной сессии bid/ask Yahoo бывают пустыми, нулевыми или в разы шире настоящего спреда (AAPL
+          // 323.80/337.35 при цене 337) — честность книги проверяет сборщик (evening.mjs, validBook).
+          b: pos(q.bid), a: pos(q.ask), bs: pos(q.bidSize), as: pos(q.askSize),
+          pp: pos(q.postMarketPrice), pt: pos(q.postMarketTime), pre: pos(q.preMarketPrice), prt: pos(q.preMarketTime),
         };
       }
       const missing = symbols.filter(s => !quotes[s]);

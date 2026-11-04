@@ -1,0 +1,36 @@
+[Unit]
+Description=Инсайдерский радар 840 · вечерний сборщик: формы 16:00–20:00 ET, котировки через 5/15/30 минут, журнал в ветку paper (без заявок)
+Wants=network-online.target
+After=network-online.target
+# Сбой посреди вечера перезапускается (состояние читается из журнала); шесть стартов в час гасят только петлю.
+StartLimitIntervalSec=3600
+StartLimitBurst=6
+
+[Service]
+Type=simple
+User=dash
+Group=dash
+WorkingDirectory=/srv/dash/repo-840
+EnvironmentFile=/usr/local/etc/insider840-evening/env
+Environment=NODE_ENV=production
+# Работает до 20:35 по Нью-Йорку, в конце коммитит и пушит журнал в ветку paper (ключ — PAPER_KEY из env).
+# Старт — таймером в 15:55 ET; рабочая копия ветки paper и код лежат вне юнита (install.sh).
+ExecStart=/usr/bin/node scripts/evening/collector.mjs --dir /var/lib/insider840-evening/paper --until 20:35
+Restart=on-failure
+RestartSec=30
+# 15:55 → 20:35 ET = 4 ч 40 мин; предел 5 ч 30 мин страхует только от зависшего процесса
+RuntimeMaxSec=19800
+SyslogIdentifier=insider840-evening
+
+StateDirectory=insider840-evening
+StateDirectoryMode=0750
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+MemoryHigh=256M
+MemoryMax=512M
+Nice=5
+
+# Тревога из systemd: ИМЕННО ExecStopPost, а не OnFailure (приходит и «упало», и «снова проходит»)
+ExecStopPost=-+/usr/local/sbin/dash-alert %n
