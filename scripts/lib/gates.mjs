@@ -20,6 +20,7 @@ export const DROP_LABELS = {
   drip: 'реинвестирование дивидендов',
   espp: 'программа сотрудников',
   forced: 'принудительная сделка',
+  late: 'поздняя подача: сделка старше 10 рабочих дней',
   outlier: 'цена вне разумного диапазона',
   discount: 'цена ниже рынка (похоже на размещение)',
   sync: 'синхронная подача многих филеров по одной цене',
@@ -102,6 +103,7 @@ export function belowDayRange(px, lows) {
 //   fundOnly    — среди подателей нет физлиц
 export function applyGates(row, ctx = {}) {
   const fn = row.fn ?? {};
+  const fnh = row.fnh ?? {};   // сноски к остатку и форме владения: только теги, не отсев
   const tags = [];
   const drop = reason => ({ ok: false, drop: reason, tags });
 
@@ -112,6 +114,11 @@ export function applyGates(row, ctx = {}) {
   if (ctx.reassigned) return drop('reassigned');
   if (isImplausible(row)) return drop('badvalue');
   if (isNonCommon(row.sec)) return drop('security');
+
+  // Поздняя подача: сделка совершена больше чем за 10 рабочих дней до подачи. Сигнал D+1 у таких форм
+  // отсутствует — 2016–2026, оборот ≥$10 млн, скор ≥2: −0,10% к IWM (130 событий, t −0,9) против +0,34%
+  // у поданных вовремя (ревизия данных 11.2026, audit-840-data-2026-11/FIXES-COLLECT.md).
+  if (isLateFiling(row)) return drop('late');
 
   // G4: природа сделки по сноскам — самый надёжный признак не-открыторыночной покупки
   if (fn.offering) return drop('offering');
@@ -161,13 +168,29 @@ export function applyGates(row, ctx = {}) {
   if (ctx.regular) return drop('regular');
 
   if (ctx.noPrice) tags.push('no-price'); // ценовые проверки провести было не на чем
-  if (fn.pledge) tags.push('pledge');   // залог акций — риск маржин-колла, но сделка валидна
-  if (fn.trust) tags.push('trust');     // покупка через траст/супруга — деньги те же
+  if (fn.pledge || fnh.pledge) tags.push('pledge');   // залог акций — риск маржин-колла, но сделка валидна
+  if (fn.trust || fnh.trust) tags.push('trust');      // покупка через траст/супруга — деньги те же
+  // В остатке есть акции из DRIP/ESPP/плана/размещения — описание пакета, сама покупка от этого не плановая
+  if (fnh.drip || fnh.espp || fnh.b5 || fnh.offering || fnh.forced) tags.push('hold-note');
   if (row.di === 'I') tags.push('indirect');
   if (ctx.routine === null) tags.push('no-history'); // истории мало: рутинность неизвестна
 
   return { ok: true, drop: null, tags };
 }
+
+// Рабочих дней между сделкой и подачей (сделка в понедельник, подача в среду — 2).
+export function filingLagDays(tdate, fdate) {
+  if (!tdate || !fdate || fdate <= tdate) return 0;
+  let n = 0;
+  for (let d = new Date(tdate + 'T00:00:00Z'); d.toISOString().slice(0, 10) < fdate; d.setUTCDate(d.getUTCDate() + 1)) {
+    const w = d.getUTCDay();
+    if (w !== 0 && w !== 6) n++;
+    if (n > 400) break;
+  }
+  return n;
+}
+export const LATE_LAG_DAYS = 10;
+export const isLateFiling = row => filingLagDays(row.tdate, row.fdate) > LATE_LAG_DAYS;
 
 // Плановость: чекбокс формы ИЛИ упоминание плана в сносках/Remarks.
 // До 04.2023 чекбокса в схеме не было вовсе — без сносок вся старая история выглядела бы
