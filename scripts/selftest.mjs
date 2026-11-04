@@ -13,7 +13,7 @@ import {
   mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo,
   trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough, fetchYahooDaily,
 } from './lib/prices.mjs';
-import { buildDay, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf } from './lib/morning.mjs';
+import { buildDay, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf } from './lib/morning.mjs';
 import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
 import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import { Panel, monthlyFromDaily, portfolioSeries, factorAlpha, factorSeries, vsBenchmark, neweyWestT, universeSeries, pairedDiff, turnover } from './lib/portfolio.mjs';
@@ -763,7 +763,7 @@ ok('легенда «у максимума» называет тот же пор
 });
 
 // ---------- утренний список: отбор, результат D+1, счётчик, всплеск ----------
-ok('утренний список: отбор строк, свёртка по бумаге, уровни и пометки', () => {
+ok('утренний список: отбор строк, свёртка по бумаге, скор, основной список и пометки', () => {
   const base = { name: 'X Corp', who: ['Doe'], role: 'D', val: 2e4, dd: -0.1, dv: 4e7, px: 20, drop: null };
   const day = buildDay([
     { ...base, t: 'AAA', val: 3e5 },
@@ -772,16 +772,26 @@ ok('утренний список: отбор строк, свёртка по б
     { ...base, t: 'CCC', px: 4.99 },                                    // дешевле $5
     { ...base, t: 'DDD', drop: 'offering' },                            // отсеяна гейтами
     { ...base, t: 'EEE', dv: 9.9e6 },                                   // оборот ниже $10 млн
-    { ...base, t: 'FFF', dv: 1.5e7, val: 1.2e6, dd: -0.4, role: 'O' },  // широкий уровень
-    { ...base, t: 'GGG', val: 1e4, px: 5, dv: 1e7, dd: -0.3 },          // ровно на границах: проходит
+    { ...base, t: 'FFF', dv: 1.5e7, val: 1.2e6, dd: -0.4, role: 'O' },  // все четыре балла, оборот $10–30 млн
+    { ...base, t: 'GGG', val: 1e4, px: 5, dv: 1e7, dd: -0.3 },          // ровно на границах: проходит, скор 0
+    { ...base, t: 'HHH', val: 9e4, dd: -0.35 },                         // скор 1 (только просадка)
+    { ...base, t: 'III', val: 1e5, role: 'F', dd: 0 },                  // ровно $100 тыс. и офицер: скор 2
   ]);
-  assert.deepEqual(day.map(x => x.t), ['FFF', 'AAA', 'GGG']);          // по убыванию суммы
-  const [fff, aaa, ggg] = day;
-  assert.equal(aaa.val, 5e5); assert.equal(aaa.n, 2); assert.equal(aaa.role, 'C'); assert.equal(aaa.lvl, 30);
+  // сначала скор, внутри скора — сумма
+  assert.deepEqual(day.map(x => x.t), ['FFF', 'AAA', 'III', 'HHH', 'GGG']);
+  const [fff, aaa, iii, hhh, ggg] = day;
+  assert.equal(aaa.val, 5e5); assert.equal(aaa.n, 2); assert.equal(aaa.role, 'C');
   assert.deepEqual(aaa.who, ['Doe', 'Roe']);
   assert.deepEqual(aaa.tags, ['off']);
-  assert.equal(fff.lvl, 10); assert.deepEqual(fff.tags, ['off', 'deep', 'big']);
-  assert.equal(ggg.lvl, 10); assert.deepEqual(ggg.tags, [], 'просадка ровно −30% — не «глубже»');
+  assert.equal(aaa.score, 2); assert.equal(aaa.main, true); assert.equal(aaa.cost, 0.001, 'оборот ≥$30 млн — 0,10% на круг');
+  assert.equal(fff.score, 4); assert.equal(fff.main, true); assert.equal(fff.cost, 0.0015, 'оборот $10–30 млн — 0,15% на круг');
+  assert.deepEqual(fff.tags, ['off', 'deep', 'big']);
+  assert.equal(iii.score, 2); assert.equal(iii.main, true, 'ровно $100 тыс. даёт балл');
+  assert.equal(hhh.score, 1); assert.equal(hhh.main, false);
+  assert.equal(ggg.score, 0); assert.equal(ggg.main, false); assert.deepEqual(ggg.tags, [], 'просадка ровно −30% — не «глубже»');
+  assert.equal(scoreOf({ val: 2e6, role: 'X', dd: null }), 2, 'сумма даёт два балла: от $100 тыс. и от $1 млн');
+  assert.equal(scoreOf({ val: 5e4, role: 'T', dd: -0.31 }), 1);
+  assert.equal(costOf(3e7), 0.001); assert.equal(costOf(2.99e7), 0.0015);
   assert.equal(bestRole(['D', 'O', 'T']), 'O'); assert.equal(bestRole([]), 'X');
   assert.deepEqual(tagsOf({ role: 'F', dd: null, val: 1e6 }), ['off', 'big']);
 });
@@ -801,24 +811,34 @@ ok('утренний список: приём формы — после закр
   assert.equal(aaa.at, '2026-11-03T11:00'); assert.equal(aaa.ses, 'rth', 'бумага узнана по первой форме дня');
   assert.equal(bbb.at, null); assert.equal(bbb.ses, null);
 });
-ok('утренний список: результат сделки — от открытия до закрытия, минус IWM, причины пропуска', () => {
-  const r = tradeResult([100, 102, 99], [200, 201, 199]);
-  assert.equal(r.r, 0.02); assert.equal(r.b, 0.005); assert.equal(r.ex, 0.015);
-  assert.equal(tradeResult([100, 102, null], [200, 201, 199]).ex, 0.015, 'вчерашнего закрытия нет — это не «застывшее»');
-  assert.equal(tradeResult([100, 102, 100], [200, 201, 199]).skip, 'frozen');   // открытие ровно равно вчерашнему закрытию
-  assert.equal(tradeResult(null, [200, 201, 199]).skip, 'noopen');
-  assert.equal(tradeResult([10, null, 9], [200, 201, 199]).skip, 'noclose');
-  assert.equal(tradeResult([4.9, 5.2, 4.8], [200, 201, 199]).skip, 'px');
-  assert.equal(tradeResult([5, 5.1, 4.8], [200, 201, 199]).skip, undefined, 'ровно $5 допустимо');
-  assert.equal(tradeResult([100, 102, 99], null).skip, 'nobench');
+ok('утренний список: результат сделки — от открытия до закрытия, минус IWM и SPY, причины пропуска', () => {
+  const I = [200, 201, 199], S = [400, 404, 399];                       // IWM +0,5%, SPY +1,0%
+  const r = tradeResult([100, 102, 99], I, S);
+  assert.equal(r.r, 0.02); assert.equal(r.b, 0.005); assert.equal(r.bs, 0.01); assert.equal(r.ex, 0.015); assert.equal(r.exS, 0.01);
+  assert.equal(tradeResult([100, 102, null], I, S).ex, 0.015, 'вчерашнего закрытия нет — это не «застывшее»');
+  assert.equal(tradeResult([100, 102, 100], I, S).skip, 'frozen');      // открытие ровно равно вчерашнему закрытию
+  assert.equal(tradeResult(null, I, S).skip, 'noopen');
+  assert.equal(tradeResult([10, null, 9], I, S).skip, 'noclose');
+  assert.equal(tradeResult([4.9, 5.2, 4.8], I, S).skip, 'px');
+  assert.equal(tradeResult([5, 5.1, 4.8], I, S).skip, undefined, 'ровно $5 допустимо');
+  assert.equal(tradeResult([100, 102, 99], null, S).skip, 'nobench');
+  assert.equal(tradeResult([100, 102, 99], I, null).skip, 'nobench', 'нет SPY — сделка пропускается, а не считается наполовину');
 });
-ok('утренний список: сводка счётчика — среднее, медиана, доля, t по дням, нетто', () => {
-  const s = summarize([{ day: 'a', ex: 0.01 }, { day: 'a', ex: 0.03 }, { day: 'b', ex: -0.01 }, { day: 'c', ex: 0.02 }]);
-  // средние по дням: 0.02, −0.01, 0.02 -> среднее 0.01, sd 0.01732, t = 0.01 / (0.01732 / √3) = 1
-  assert.deepEqual(s, { n: 4, days: 3, mean: 0.0125, median: 0.015, win: 0.75, tDays: 1, net: 0.0115, cumNet: 0.046 });
+ok('утренний список: сводка счётчика — к IWM и к SPY, свои издержки у каждой сделки', () => {
+  const tr = [{ day: 'a', ex: 0.01 }, { day: 'a', ex: 0.03 }, { day: 'b', ex: -0.01 }, { day: 'c', ex: 0.02 }].map(x => ({ ...x, exS: x.ex - 0.002 }));
+  const s = summarize(tr);
+  // к IWM: средние по дням 0.02, −0.01, 0.02 -> среднее 0.01, sd 0.01732, t = 0.01 / (0.01732 / √3) = 1; издержки 0,10% по умолчанию
+  assert.deepEqual(s, {
+    n: 4, days: 3, cost: 0.001,
+    iwm: { mean: 0.0125, median: 0.015, win: 0.75, tDays: 1, net: 0.0115, cumNet: 0.046 },
+    spy: { mean: 0.0105, median: 0.013, win: 0.75, tDays: 0.8, net: 0.0095, cumNet: 0.038 },
+  });
   assert.deepEqual(summarize([]), { n: 0, days: 0 });
-  assert.equal(summarize([{ day: 'a', ex: 0.01 }, { day: 'a', ex: 0.02 }]).tDays, null, 'один день — t не определён');
-  assert.equal(summarize([{ day: 'a', ex: 0.01 }, { day: 'b', ex: 0.01 }]).tDays, null, 'нулевой разброс — t не определён');
+  assert.equal(summarize([{ day: 'a', ex: 0.01, exS: 0.01 }, { day: 'a', ex: 0.02, exS: 0.02 }]).iwm.tDays, null, 'один день — t не определён');
+  assert.equal(summarize([{ day: 'a', ex: 0.01, exS: 0.01 }, { day: 'b', ex: 0.01, exS: 0.01 }]).iwm.tDays, null, 'нулевой разброс — t не определён');
+  // у каждой сделки свой уровень издержек: 0,10% и 0,15% -> в среднем 0,125%
+  const mixed = summarize([{ day: 'a', ex: 0.01, exS: 0.01, cost: 0.001 }, { day: 'a', ex: 0.01, exS: 0.01, cost: 0.0015 }]);
+  assert.equal(mixed.cost, 0.00125); assert.equal(mixed.iwm.net, 0.0088); assert.equal(mixed.iwm.cumNet, 0.0175);
 });
 ok('всплеск покупок: z к 36 прошлым месяцам, порог 2, нужен запас в 24 месяца', () => {
   // Малый пример руками: окно 3, запас 3. B3 = 36, 38, 37, 38, 38, 78; на последнем месяце
@@ -994,7 +1014,7 @@ ok('loadAllTrades: разные классы акций в одной подач
 // Открытия утреннего списка: день входа L1 — первый рабочий день после подачи. IWM: открытие 100,
 // закрытие 100.5 (+0.5%); LIVA: открытие 50, закрытие 51 (+2%), значит к IWM +1.5%.
 const d1L = bizDays(addDaysIso(recentF, 1), addDaysIso(recentF, 7))[0];
-writeOpens(TMP, { t: { IWM: { [d1L]: [100, 100.5, 99.8] }, LIVA: { [d1L]: [50, 51, 49.5] } } }, today);
+writeOpens(TMP, { t: { IWM: { [d1L]: [100, 100.5, 99.8] }, SPY: { [d1L]: [400, 404, 399] }, LIVA: { [d1L]: [50, 51, 49.5] } } }, today);
 execFileSync(process.execPath, [join(ROOT, 'scripts', 'compute.mjs'), '--data', TMP, '--site', join(TMP, 'site'), '--counter-from', addDaysIso(today, -30)], { stdio: 'pipe' });
 const R = p => readJson(join(TMP, 'site', 'data', p));
 
@@ -1042,14 +1062,18 @@ ok('compute: утренний список, счётчик D+1 и всплеск
   assert.equal(day.entry, d1L); assert.equal(day.done, true);
   assert.equal(day.rows.length, 1);
   const row = day.rows[0];
-  assert.equal(row.t, 'LIVA'); assert.equal(row.lvl, 30); assert.equal(row.val, 275000);
+  assert.equal(row.t, 'LIVA'); assert.equal(row.val, 275000);
+  assert.equal(row.score, 2, 'сумма от $100 тыс. + офицер'); assert.equal(row.main, true); assert.equal(row.cost, 0.001);
   assert.equal(row.role, 'C'); assert.ok(row.tags.includes('off'));
   assert.equal(row.at, `${recentF}T17:21`); assert.equal(row.ses, 'post', 'время приёма доходит до строки списка');
   assert.equal(m.params.stake, 10000, 'ставка для «суммы нетто» приходит из сборки');
   assert.equal(row.o, 50); assert.equal(row.c, 51);
   assert.equal(row.ex, 0.015, 'сделка +2% минус IWM +0.5%');
-  assert.equal(m.counter.l30.n, 1); assert.equal(m.counter.l30.mean, 0.015); assert.equal(m.counter.upTo, d1L);
-  assert.equal(m.counter.l10.n, 1);
+  assert.equal(row.exS, 0.01, 'сделка +2% минус SPY +1%');
+  assert.equal(m.counter.main.n, 1); assert.equal(m.counter.main.iwm.mean, 0.015); assert.equal(m.counter.main.spy.mean, 0.01);
+  assert.equal(m.counter.main.iwm.net, 0.014, 'нетто: 1,5% минус 0,10% на круг'); assert.equal(m.counter.upTo, d1L);
+  assert.equal(m.counter.all.n, 1); assert.deepEqual(m.counter.costs, { hi: 0.001, lo: 0.0015, split: 3e7 });
+  assert.equal(m.params.dvMin, 1e7); assert.equal(m.params.scoreMin, 2);
   const old = m.days.find(d => d.date === '2020-02-05');
   assert.ok(old && !old.done && old.entry === null, 'у старых подач дня входа в хранилище нет — результат не выдумывается');
   const b = R('stats.json').breadth;
@@ -1069,14 +1093,15 @@ mkdirSync(join(NTMP, 'data', 'state'), { recursive: true });
 
 const nDay = n => addDaysIso(isoToday(), n);
 const mRow = (t, val, extra = {}) => ({
-  t, name: t + ' HOLDINGS INC', who: ['Smith John'], nWho: 1, role: 'D', val, n: 1, dd: -0.05, dv: 6e7, px: 25, lvl: 30, tags: [], ...extra,
+  t, name: t + ' HOLDINGS INC', who: ['Smith John'], nWho: 1, role: 'D', val, n: 1, dd: -0.05, dv: 6e7, px: 25, score: 3, main: true, cost: 0.001, tags: [], ...extra,
 });
 const mDay = (date, rows) => ({ date, entry: null, done: false, rows });
 const nYear = isoToday().slice(0, 4);
-const mCounter = { from: `${nYear}-11-05`, cost: 0.001, upTo: null, l30: { n: 0 }, l10: { n: 0 } };
+const mCounter = { from: `${nYear}-11-05`, costs: { hi: 0.001, lo: 0.0015, split: 3e7 }, upTo: null, main: { n: 0 }, all: { n: 0 } };
+const REST = { main: false, score: 1 };                           // не в основном списке: скор 0–1
 const MORNING_JSON = join(NTMP, 'site', 'data', 'morning.json');
 function writeMorning(days, counter = mCounter) {
-  writeJson(MORNING_JSON, { built: isoToday(), params: { minVal: 1e4, minPx: 5, dvMain: 3e7, dvWide: 1e7 }, counter, days });
+  writeJson(MORNING_JSON, { built: isoToday(), params: { minVal: 1e4, minPx: 5, dvMin: 1e7, dvCost: 3e7, scoreMin: 2 }, counter, days });
 }
 const NOTIFY_ARGS = dir => [join(ROOT, 'scripts', 'notify.mjs'), '--site', join(NTMP, 'site'), '--data', dir];
 function notify(days, { dir = join(NTMP, 'data'), counter = mCounter, args = [] } = {}) {
@@ -1103,26 +1128,26 @@ ok('notify: переход со схемы 3 (позиции) — пересев
   assert.deepEqual(st.sentMorning, [`morning|${nDay(-1)}`], 'текущий список считается отправленным: историю не рассылаем');
 });
 ok('notify: новая дата подачи даёт одно письмо — топ по сумме, пометки, правило, счётчик', () => {
-  const counter = { ...mCounter, l30: { n: 23, days: 5, mean: 0.0031, median: 0.001, win: 0.58 } };
+  const counter = { ...mCounter, main: { n: 23, days: 5, iwm: { mean: 0.0031, win: 0.58 }, spy: { mean: 0.0018 } } };
   const day = mDay(nDay(-1), [
-    mRow('CCC', 2.5e6, { tags: ['off', 'deep', 'big'], role: 'C' }),
-    mRow('BBB', 4e5, { tags: ['off'], role: 'O' }),
-    mRow('DDD', 5e4),
-    mRow('EEE', 3e4, { lvl: 10 }),
+    mRow('CCC', 2.5e6, { tags: ['off', 'deep', 'big'], role: 'C', score: 4 }),
+    mRow('BBB', 4e5, { tags: ['off'], role: 'O', score: 2 }),
+    mRow('DDD', 5e4, { score: 2, tags: ['deep'] }),
+    mRow('EEE', 3e4, REST),
   ]);
   notify([mDay(nDay(-2), [mRow('AAA', 3e5)])]);                       // пересев
   const out = notify([mDay(nDay(-2), [mRow('AAA', 3e5)]), day], { counter });
   assert.match(out, /новых утренних списков: 1/);
   assert.equal((out.match(/Инсайдерский радар · утренний список/g) ?? []).length, 1);
-  assert.match(out, new RegExp(`Подачи за \\d\\d\\.\\d\\d · 3 бумаги, оборот от \\$30${NB}млн в день`));
-  assert.match(out, new RegExp(`CCC · .* · \\$2,5${NB}млн · офицер, просадка глубже 30%, ≥\\$1${NB}млн`));
-  assert.match(out, new RegExp(`BBB · .* · \\$400${NB}тыс\\. · офицер\\n`));
-  assert.match(out, new RegExp(`DDD · .* · \\$50${NB}тыс\\.\\n`));
-  assert.ok(!/EEE/.test(out), 'уровень $10–30 млн в письмо построчно не идёт');
-  assert.match(out, new RegExp(`Ещё 1 бумага с оборотом от \\$10${NB}млн — на панели`));
-  assert.match(out, /Покупка на открытии, продажа на закрытии того же дня\./);
-  assert.match(out, /Счётчик с 05\.11: 23 сделки, среднее \+0,31% к IWM, в плюсе 58%\./);
-  assert.ok(out.indexOf('CCC ·') < out.indexOf('BBB ·') && out.indexOf('BBB ·') < out.indexOf('DDD ·'), 'порядок — как в списке (по сумме)');
+  assert.match(out, new RegExp(`Подачи за \\d\\d\\.\\d\\d · 3 бумаги: оборот от \\$10${NB}млн, скор от 2`));
+  assert.match(out, new RegExp(`CCC · .* · скор 4 · \\$2,5${NB}млн · офицер, просадка глубже 30%, ≥\\$1${NB}млн`));
+  assert.match(out, new RegExp(`BBB · .* · скор 2 · \\$400${NB}тыс\\. · офицер\\n`));
+  assert.match(out, new RegExp(`DDD · .* · скор 2 · \\$50${NB}тыс\\. · просадка глубже 30%\\n`));
+  assert.ok(!/EEE/.test(out), 'бумаги со скором 0–1 в письмо построчно не идут');
+  assert.match(out, /Ещё 1 бумага со скором 0–1 — на панели\./);
+  assert.match(out, /Только заявки на аукционы: MOO до 9:28 и MOC до 15:50 по Нью-Йорку\. Около 60% перевеса дня — первые 5 минут: покупка по рынку после открытия его съедает\./);
+  assert.match(out, /Счётчик с 05\.11: 23 сделки, среднее \+0,31% к IWM, \+0,18% к S&P, в плюсе 58%\./);
+  assert.ok(out.indexOf('CCC ·') < out.indexOf('BBB ·') && out.indexOf('BBB ·') < out.indexOf('DDD ·'), 'порядок — как в списке (скор, затем сумма)');
 });
 ok('notify: пустой счётчик и повторный прогон', () => {
   const dir = freshDir('data-twice');
@@ -1137,7 +1162,7 @@ ok('notify: пустой главный список писем не даёт, �
   const dir = freshDir('data-rules');
   notify([mDay(nDay(-3), [mRow('OLD', 3e5)])], { dir });             // пересев
   // только уровень $10–30 млн: список для письма пуст
-  assert.match(notify([mDay(nDay(-1), [mRow('LOW', 1e5, { lvl: 10 })])], { dir }), /новых утренних списков нет/);
+  assert.match(notify([mDay(nDay(-1), [mRow('LOW', 1e5, REST)])], { dir }), /новых утренних списков нет/);
   // подача шестидневной давности: её торги D+1 давно прошли
   const stale = [mDay(nDay(-6), [mRow('OLDD', 3e5)])];
   assert.match(notify(stale, { dir }), /новых утренних списков нет/);
@@ -1317,11 +1342,11 @@ function styleFaults(html) {
 await okAsync('стиль: утреннее письмо — пометка панели, МСК, русские числа, подвал, зеркало NEXUS', async () => {
   const dir = seededDir('data-style');
   const d = nDay(-1);
-  const counter = { ...mCounter, l30: { n: 1234, days: 40, mean: -0.0012, median: -0.0005, win: 0.481 } };
+  const counter = { ...mCounter, main: { n: 1234, days: 40, iwm: { mean: -0.0012, win: 0.481 }, spy: { mean: 0.0003 } } };
   writeMorning([mDay(d, [
     mRow('BRK', 12.34e6, { role: 'C', tags: ['off', 'big'], name: 'BERKSHIRE HATHAWAY INC' }),
     mRow('PNY', 4.5e4, { name: 'PENNY CORP', dv: 3.1e7 }),
-    mRow('LOW', 2e5, { lvl: 10, dv: 1.2e7 }),
+    mRow('LOW', 2e5, { ...REST, dv: 1.2e7 }),
   ])], counter);
   const api = await fakeApis([]);
   try {
@@ -1330,9 +1355,9 @@ await okAsync('стиль: утреннее письмо — пометка па
     assert.equal(api.calls.tg.length, 1);
     const t = api.calls.tg[0].body.text;
     assert.deepEqual(styleFaults(t), [], styleFaults(t).join('; ') + ' :: ' + t);
-    assert.match(t, new RegExp(`<b>BRK</b> · Berkshire Hathaway Inc · \\$12${NB}млн · офицер, ≥\\$1${NB}млн`), t);
-    assert.match(t, new RegExp(`<b>PNY</b> · Penny Corp · \\$45${NB}тыс\\.\\n`), t);
-    assert.match(t, /Счётчик с 05\.11: 1234 сделки?|Счётчик с 05\.11: 1234 сделок, среднее −0,12% к IWM, в плюсе 48%\./, t);
+    assert.match(t, new RegExp(`<b>BRK</b> · Berkshire Hathaway Inc · скор 3 · \\$12${NB}млн · офицер, ≥\\$1${NB}млн`), t);
+    assert.match(t, new RegExp(`<b>PNY</b> · Penny Corp · скор 3 · \\$45${NB}тыс\\.\\n`), t);
+    assert.match(t, /Счётчик с 05\.11: 1234 сделки, среднее −0,12% к IWM, \+0,03% к S&P, в плюсе 48%\./, t);
     // зеркало NEXUS — тот же текст без разметки, с ключом даты подачи
     assert.equal(api.calls.nexus.length, 1);
     assert.equal(api.calls.nexus[0].eventId, `840|morning|${d}`);

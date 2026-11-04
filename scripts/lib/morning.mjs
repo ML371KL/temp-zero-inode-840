@@ -3,20 +3,30 @@
 // ввода-вывода: сборка (compute.mjs) подаёт им строки и открытия, самотесты — синтетику.
 //
 // Почему так, а не набор «у максимума, 3 мес.»: сигнал покупки инсайдера отыгрывается за
-// полтора дня вокруг подачи, и торгуема только часть после неё (ревизия 04.11.2026,
-// docs/ЧТО-РАБОТАЕТ.md). Результат меряется от ОТКРЫТИЯ D+1 до ЗАКРЫТИЯ того же дня, фиксированной
-// суммой на сделку, одна сделка на бумагу в день, за вычетом внутридневной доходности IWM.
+// полтора дня вокруг подачи, и торгуема только часть после неё (ревизия 04.11.2026 и независимая
+// проверка docs/ЧТО-РАБОТАЕТ.md). Результат меряется от ОТКРЫТИЯ D+1 до ЗАКРЫТИЯ того же дня,
+// фиксированной суммой на сделку, одна сделка на бумагу в день, за вычетом внутридневной
+// доходности IWM (и, рядом, SPY).
+//
+// ОСНОВНОЙ СПИСОК — оборот ≥$10 млн и скор ≥2 (лучший вариант проверки: 2016–26 +0,344% брутто,
+// +0,225% после издержек, Шарп 1,21, вживую +0,46% к IWM). Скор бумаги за день подачи — сумма
+// четырёх баллов: покупки дня ≥$100 тыс.; ≥$1 млн; среди покупателей есть офицер (C/F/O);
+// просадка от 52-недельного максимума глубже −30%. Остальные бумаги от $10 млн (скор 0–1)
+// остаются свёрнутыми ниже: покупки на $10–100 тыс. без других признаков в 2016–26 дают −0,04%.
 
 export const MORNING = {
   minVal: 1e4,          // сумма покупки (строки), $
   minPx: 5,             // последнее закрытие на дату подачи / открытие D+1, $
-  dvMain: 3e7,          // главный уровень: медианный дневной оборот, $
-  dvWide: 1e7,          // широкий уровень (в файле с пометкой lvl:10)
-  cost: 0.001,          // издержки на круг, доля
+  dvMin: 1e7,           // нижняя граница оборота списка (медианный дневной оборот), $
+  dvCost: 3e7,          // оборот, с которого издержки ниже
+  costHi: 0.001,        // издержки на круг при обороте ≥$30 млн, доля
+  costLo: 0.0015,       // издержки на круг при обороте $10–30 млн, доля
+  scoreMin: 2,          // порог скора основного списка
+  scoreVal: 1e5,        // балл за сумму покупок дня, $
+  bigVal: 1e6,          // второй балл за сумму, $
+  deepDd: -0.3,         // балл за просадку глубже
   liveFrom: '2026-11-05',   // списки с этой даты подачи идут в живой счётчик
   daysShown: 10,        // сколько последних дней подачи отдаёт файл витрине
-  bigVal: 1e6,
-  deepDd: -0.3,
   stake: 1e4,          // сумма в сделке, на которую витрина пересчитывает «сумму нетто» счётчика, $
 };
 
@@ -24,6 +34,14 @@ export const MORNING = {
 const ROLE_RANK = { C: 0, F: 1, O: 2, D: 3, T: 4, X: 5 };
 export const bestRole = roles => [...roles].filter(Boolean).sort((a, b) => (ROLE_RANK[a] ?? 9) - (ROLE_RANK[b] ?? 9))[0] ?? 'X';
 export const isOfficer = role => role === 'C' || role === 'F' || role === 'O';
+
+// Скор: число выполненных условий из четырёх. role — лучшая роль среди покупателей дня.
+export function scoreOf({ val, role, dd }, p = MORNING) {
+  return (val >= p.scoreVal ? 1 : 0) + (val >= p.bigVal ? 1 : 0) + (isOfficer(role) ? 1 : 0)
+    + (dd !== null && dd !== undefined && dd < p.deepDd ? 1 : 0);
+}
+// Издержки на круг по обороту бумаги
+export const costOf = (dv, p = MORNING) => (dv >= p.dvCost ? p.costHi : p.costLo);
 
 // Пометки — коды; подписи живут на витрине и в сообщении.
 export function tagsOf({ role, dd, val }, p = MORNING) {
@@ -47,15 +65,16 @@ export function sessionOf(at) {
 const rnd = (v, k = 4) => Math.round(v * 10 ** k) / 10 ** k;
 
 // rows — покупки ОДНОГО дня подачи: { t, name, who, role, val, dd, dv, px, drop }.
-// Отбор по строкам (прошла гейты, сумма, цена, оборот), затем одна строка на бумагу:
-// сумма покупок дня, лучшая роль, показатели — по самой крупной покупке. Сортировка по сумме.
+// Отбор по строкам (прошла гейты, сумма, цена, оборот ≥$10 млн), затем одна строка на бумагу:
+// сумма покупок дня, лучшая роль, показатели — по самой крупной покупке. Скор считается по
+// сумме дня; main — скор ≥ порога. Сортировка: скор, затем сумма (основной список — сверху).
 export function buildDay(rows, p = MORNING) {
   const byT = new Map();
   for (const r of rows) {
     if (r.drop) continue;
     if (!(r.val >= p.minVal)) continue;
     if (!(r.px >= p.minPx)) continue;
-    if (!(r.dv >= p.dvWide)) continue;
+    if (!(r.dv >= p.dvMin)) continue;
     (byT.get(r.t) ?? byT.set(r.t, []).get(r.t)).push(r);
   }
   const out = [];
@@ -67,28 +86,32 @@ export function buildDay(rows, p = MORNING) {
     const who = [...new Set(list.flatMap(x => x.who ?? []))];
     // Бумага узнаётся рынком по ПЕРВОЙ форме дня: время приёма — самое раннее
     const at = list.map(x => x.at).filter(Boolean).sort()[0] ?? null;
+    const dd = lead.dd ?? null;
+    const score = scoreOf({ val, role, dd }, p);
     out.push({
       t, name: lead.name, who, role, val: Math.round(val), n: list.length, at, ses: sessionOf(at),
-      dd: lead.dd ?? null, dv: lead.dv, px: lead.px,
-      lvl: lead.dv >= p.dvMain ? 30 : 10,
-      tags: tagsOf({ role, dd: lead.dd ?? null, val }, p),
+      dd, dv: lead.dv, px: lead.px,
+      score, main: score >= p.scoreMin, cost: costOf(lead.dv, p),
+      tags: tagsOf({ role, dd, val }, p),
     });
   }
-  return out.sort((a, b) => b.val - a.val || (a.t < b.t ? -1 : 1));
+  return out.sort((a, b) => b.score - a.score || b.val - a.val || (a.t < b.t ? -1 : 1));
 }
 
-// Результат одной сделки. entry/bench — [открытие, закрытие, вчерашнее закрытие] из одного
+// Результат одной сделки. entry/iwm/spy — [открытие, закрытие, вчерашнее закрытие] из одного
 // ответа источника (lib/opens.mjs). Пропуск — это причина, а не ноль: пропущенная сделка не
-// должна ни улучшать, ни портить счётчик.
-export function tradeResult(entry, bench, p = MORNING) {
+// должна ни улучшать, ни портить счётчик. Результат считается сразу к IWM (ex) и к SPY (exS):
+// в живом периоде разница между ними доходит до половины перевеса (IWM внутри дня отстаёт от S&P).
+export function tradeResult(entry, iwm, spy, p = MORNING) {
   if (!entry || !(entry[0] > 0)) return { skip: 'noopen' };
   if (!(entry[1] > 0)) return { skip: 'noclose' };
   if (entry[2] !== null && entry[2] !== undefined && entry[0] === entry[2]) return { skip: 'frozen' };
   if (entry[0] < p.minPx) return { skip: 'px' };
-  if (!bench || !(bench[0] > 0) || !(bench[1] > 0)) return { skip: 'nobench' };
+  const ok = b => b && b[0] > 0 && b[1] > 0;
+  if (!ok(iwm) || !ok(spy)) return { skip: 'nobench' };
   const r = entry[1] / entry[0] - 1;
-  const b = bench[1] / bench[0] - 1;
-  return { o: entry[0], c: entry[1], r: rnd(r), b: rnd(b), ex: rnd(r - b) };
+  const b = iwm[1] / iwm[0] - 1, bs = spy[1] / spy[0] - 1;
+  return { o: entry[0], c: entry[1], r: rnd(r), b: rnd(b), bs: rnd(bs), ex: rnd(r - b), exS: rnd(r - bs) };
 }
 
 const mean = a => a.reduce((s, x) => s + x, 0) / a.length;
@@ -97,14 +120,14 @@ const median = a => {
   return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
 };
 
-// trades — [{ day, ex }] (day — день D+1). t по дням: сначала среднее за каждый день, затем
-// t-статистика среднего этих средних — сделки одного дня не независимы (общий рынок).
-export function summarize(trades, p = MORNING) {
-  const n = trades.length;
-  if (!n) return { n: 0, days: 0 };
-  const ex = trades.map(x => x.ex);
+// Показатели по одному эталону. t по дням: сначала среднее за каждый день, затем t-статистика
+// среднего этих средних — сделки одного дня не независимы (общий рынок). Нетто — за вычетом
+// издержек КАЖДОЙ сделки (у неё свой уровень: 0,10% или 0,15% на круг).
+function metrics(trades, key, p) {
+  const ex = trades.map(x => x[key]);
+  const cost = trades.map(x => x.cost ?? p.costHi);
   const byDay = new Map();
-  for (const x of trades) (byDay.get(x.day) ?? byDay.set(x.day, []).get(x.day)).push(x.ex);
+  for (const x of trades) (byDay.get(x.day) ?? byDay.set(x.day, []).get(x.day)).push(x[key]);
   const dm = [...byDay.values()].map(mean);
   let tDays = null;
   if (dm.length >= 2) {
@@ -114,12 +137,23 @@ export function summarize(trades, p = MORNING) {
   }
   const avg = mean(ex);
   return {
-    n, days: byDay.size,
     mean: rnd(avg), median: rnd(median(ex)),
-    win: rnd(ex.filter(x => x > 0).length / n, 3),
+    win: rnd(ex.filter(x => x > 0).length / ex.length, 3),
     tDays,
-    net: rnd(avg - p.cost),
-    cumNet: rnd(ex.reduce((s, x) => s + x - p.cost, 0)),
+    net: rnd(avg - mean(cost)),
+    cumNet: rnd(ex.reduce((s, x, i) => s + x - cost[i], 0)),
+  };
+}
+
+// trades — [{ day, ex, exS, cost }] (day — день D+1).
+export function summarize(trades, p = MORNING) {
+  const n = trades.length;
+  if (!n) return { n: 0, days: 0 };
+  return {
+    n, days: new Set(trades.map(x => x.day)).size,
+    cost: rnd(mean(trades.map(x => x.cost ?? p.costHi)), 5),
+    iwm: metrics(trades, 'ex', p),
+    spy: metrics(trades, 'exS', p),
   };
 }
 
