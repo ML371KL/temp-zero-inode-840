@@ -283,7 +283,11 @@ async function run() {
     state.reread = { rev: PARSER_REV, to: lastCompleted ?? from, cursor: lastCompleted ?? from };
     console.log(`[live] парсер ${state.parserRev ?? 1} → ${PARSER_REV}: перечитываю ${from}…${state.reread.to} в фоне`);
   }
-  if (state.reread) {
+  // Прогон, собравший новый день, окно не перечитывает: его ждут список, письмо и сборка (03:25 UTC на GitHub,
+  // 22:03 ET на VPS), а перечитывание — до 25 минут. Окно перечитывают прогоны без нового дня (расписание
+  // GitHub после утреннего, повторные запуски); ночная сборка на VPS к тому же передаёт --reread-budget-min 0.
+  if (state.reread && daysDone > 0) console.log('[live] перечитывание окна отложено: в этом прогоне собран новый день');
+  else if (state.reread) {
     const rr = state.reread;
     const rStart = Date.now();
     let d = rr.cursor, n = 0;

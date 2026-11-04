@@ -2102,6 +2102,26 @@ rmSync(NTMP, { recursive: true, force: true });
       assert.ok(hits.length - hitsBefore >= 5, 'подачи окна скачаны заново');
       assert.equal(s.lastDay, st.lastDay, 'сегодняшний день не задержан и не сдвинут');
     });
+
+    await okAsync('сбор: прогон, собравший новый день, окно не перечитывает — список и письмо его не ждут', async () => {
+      const st = liveState();
+      writeJson(join(CTMP, 'state', 'live.json'), { ...st, parserRev: 1 });
+      index['2026-09-11'] = ['x'].join('\n');   // новый день: индекс вышел, подач в нём нет
+      const hitsBefore = hits.length;
+      const r1 = await runLive('2026-09-12');
+      assert.equal(r1.code, 0, r1.out);
+      const s1 = liveState();
+      assert.equal(s1.coverage['2026-09-11'].status, 'complete', 'новый день (пятница) собран');
+      assert.equal(s1.parserRev, 1, 'окно в этом прогоне не перечитывалось');
+      assert.ok(s1.reread, 'перечитывание стоит в очереди');
+      assert.match(r1.out, /перечитывание окна отложено/);
+      const r2 = await runLive('2026-09-12');   // следующий прогон без нового дня
+      assert.equal(r2.code, 0, r2.out);
+      const s2 = liveState();
+      assert.equal(s2.parserRev, PARSER_REV, r2.out);
+      assert.equal(s2.reread, undefined, 'окно пройдено');
+      assert.ok(hits.length - hitsBefore >= 5, 'окно перечитано вторым прогоном');
+    });
   } finally {
     await new Promise(r => server.close(r));
     rmSync(CTMP, { recursive: true, force: true });
