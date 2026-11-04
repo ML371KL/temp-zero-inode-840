@@ -15,12 +15,16 @@
 //   7. compute --only-morning --builder vps                             — morning.json (листинг, счётчик, вечерняя схема)
 //   8. PUT воркеру /morning                                             — панель берёт файл оттуда, если он свежее страницы
 //   9. письмо (если в env есть TELEGRAM_*)                              — scripts/notify.mjs --sender vps; дубль исключает отметка в воркере
+//  Лента на весь день (feed-collector.mjs, отдельный юнит): после шага 3 индекс сверяется с лентой — подачи, которые лента видела, а индекс нет,
+//  добавляются в список (coverage.feed); нет индекса до последней попытки — список по ленте с пометкой source: "feed" и ошибкой выхода (тревога).
 // В ветку data VPS ничего не пишет. Код берётся из клона репозитория (обновляет только install.sh).
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { readJson, writeJson, addDaysIso, SEC_UA } from '../lib/util.mjs';
+import { readJson, writeJson, readJsonGz, writeJsonGz, addDaysIso, SEC_UA } from '../lib/util.mjs';
+import { fetchDayIndex, uniqueFilings, edgarBase, SHARD_VERSION } from '../lib/edgar.mjs';
+import { FEED, loadFeed, reconcile, mergeFeedRows } from '../lib/feed.mjs';
 import { nyWall, nyToMs } from '../lib/evening.mjs';
 import { isSecClosed } from '../lib/calendar.mjs';
 import { fetchBars, applyBars, barsFrom } from '../lib/bars.mjs';
@@ -40,7 +44,8 @@ export function parseArgs(argv, env = process.env) {
     state, data: resolve(val('--data', join(state, 'repo'))), site: resolve(val('--site', join(state, 'site'))),
     date: val('--date', null), until: val('--until', '23:30'), interval: Number(val('--interval', '120')),
     once: flag('--once'), dry: flag('--dry-run'), noLetter: flag('--no-letter'), noSync: flag('--no-sync'), noLive: flag('--no-live'),
-    noIndexCheck: flag('--no-index-check'),
+    noIndexCheck: flag('--no-index-check'), noFeed: flag('--no-feed'),
+    feedDir: resolve(val('--feed-dir', env.FEED_DIR || '/var/lib/insider840-feed')),
     repoUrl: env.DATA_REPO_URL || 'https://github.com/ML371KL/temp-zero-inode-840.git',
     workerUrl: (env.PAPER_URL || 'https://radar840-quotes.financehub.workers.dev').replace(/\/$/, ''),
     token: env.PAPER_TOKEN || '',
@@ -63,7 +68,7 @@ const node = (script, args, o) => run(process.execPath, ['--max-old-space-size=3
 export async function indexAvailable(day) {
   const ymd = day.replace(/-/g, ''), q = Math.floor((Number(day.slice(5, 7)) - 1) / 3) + 1;
   try {
-    const r = await fetch(`https://www.sec.gov/Archives/edgar/daily-index/${day.slice(0, 4)}/QTR${q}/form.${ymd}.idx`,
+    const r = await fetch(`${edgarBase()}/Archives/edgar/daily-index/${day.slice(0, 4)}/QTR${q}/form.${ymd}.idx`,
       { method: 'HEAD', headers: { 'User-Agent': SEC_UA }, signal: AbortSignal.timeout(20000) });
     if (r.status === 200) return true;
     if (r.status === 404 || r.status === 403) return false;       // SEC отвечает 403 на то, чего нет
@@ -112,6 +117,48 @@ export function liveVerdict(live, day, code, lastChance = false) {
   return { ok: true, partial: cov?.status === 'partial' };
 }
 
+// ---------- лента на весь день ----------
+const dataShard = opts => join(opts.data, 'trades', 'live.json.gz');
+const readShard = opts => { const r = readJsonGz(dataShard(opts), null); return r && !Array.isArray(r) ? r : { v: SHARD_VERSION, trades: [], amend: [] }; };
+const writeFeedState = (opts, day, info) => {
+  const p = join(opts.data, 'state', 'feed.json');
+  writeJson(p, { ...readJson(p, {}), [day]: info }, true);
+};
+// Индекс есть: подачи, которые лента видела в этот день, а в индексе их нет, — признак неполного индекса; их строки добавляются в шард.
+// Подачи индекса, которых не видела лента, считаются (missing): слепые зоны ленты — до начала её работы, глубже трёх страниц, не дождались скачивания.
+export async function reconcileStage(opts, day, { fetchIndex = fetchDayIndex } = {}) {
+  const feed = loadFeed(opts.feedDir, day);
+  if (!feed.seen.size && !feed.forms.size) { log('лента за день пуста (сборщик не работал?) — сверки нет'); return null; }
+  const { entries } = await fetchIndex(day);
+  const r = reconcile(feed, new Set(uniqueFilings(entries ?? []).map(e => e.acc)), day);
+  let merged = 0;
+  if (r.extra.length) {
+    const shard = readShard(opts);
+    merged = mergeFeedRows(shard, feed.forms, r.extra);
+    writeJsonGz(dataShard(opts), shard);
+    log(`ВНИМАНИЕ: лента видела ${r.extra.length} подач дня ${day}, которых нет в индексе, — строк добавлено ${merged}`);
+  }
+  const info = { seen: r.seen, parsed: r.parsed, indexed: r.indexed, extra: r.extra.length, extraAcc: r.extra.slice(0, 10), missing: r.missing, unparsed: r.unparsed.length, merged, from: FEED.from, at: new Date().toISOString() };
+  writeFeedState(opts, day, info);
+  log(`лента: видела ${r.seen} подач, разобрала ${r.parsed}; индекс ${r.indexed}; нет в индексе ${r.extra.length}; индексных, которых лента не видела, ${r.missing}`);
+  return info;
+}
+// Индекса нет: весь список из ленты. Покрытие дня — «индекс не вышел» с числом разобранных подач; пометка source: feed идёт в morning.json.
+export function feedFallback(opts, day) {
+  const feed = loadFeed(opts.feedDir, day);
+  const accs = [...feed.forms.values()].filter(f => f.filed === day).map(f => f.acc);
+  const shard = readShard(opts);
+  const merged = mergeFeedRows(shard, feed.forms, accs);
+  writeJsonGz(dataShard(opts), shard);
+  const r = reconcile(feed, new Set(), day);
+  const info = { seen: r.seen, parsed: r.parsed, indexed: 0, extra: r.parsed, extraAcc: [], missing: 0, unparsed: r.unparsed.length, merged, from: FEED.from, source: 'feed', at: new Date().toISOString() };
+  writeFeedState(opts, day, info);
+  const lp = join(opts.data, 'state', 'live.json'), live = readJson(lp, {});
+  writeJson(lp, { ...live, coverage: { ...(live.coverage ?? {}), [day]: { status: 'not-published', indexed: 0, collected: r.parsed, pending: r.unparsed.length, at: info.at, source: 'feed' } } }, true);
+  log(`список по ленте: подач ${r.parsed}, строк добавлено ${merged}, не скачано ${r.unparsed.length}`);
+  return info;
+}
+
 const lastBar = (data, t) => { const s = readPriceCache(data, t); return s?.length ? s[s.length - 1][0] : null; };
 
 // Одна попытка. Возвращает { ok, why?, retry? }. ctx.stage хранит завершённые шаги между попытками.
@@ -122,7 +169,14 @@ export async function attempt(opts, day, ctx) {
 
   if (!opts.noIndexCheck && !st.index) {
     const av = await indexAvailable(day);
-    if (av === false) return fail(`индекс EDGAR за ${day} ещё не опубликован`);
+    if (av === false) {
+      // До последней попытки ждём индекс. На последней, если лента накопила подачи дня, — список по ленте: хуже индекса, но лучше тишины.
+      if (!ctx.lastChance) return fail(`индекс EDGAR за ${day} ещё не опубликован`);
+      const have = opts.noFeed ? 0 : [...loadFeed(opts.feedDir, day).forms.values()].filter(f => f.filed === day).length;
+      if (!have) return fail(`индекса EDGAR за ${day} нет, а лента не накопила подач дня — собрать нечем`);
+      ctx.source = 'feed';
+      log(`индекса за ${day} нет — список по ленте (${have} подач)`);
+    }
     st.index = true;
   }
   if (!opts.noSync && !st.sync) {
@@ -130,7 +184,7 @@ export async function attempt(opts, day, ctx) {
     if (!(await syncData(opts))) return fail('не удалось получить ветку data');
     st.sync = true;
   }
-  if (!opts.noLive && !st.live) {
+  if (!opts.noLive && !st.live && ctx.source !== 'feed') {
     log(`формы дня ${day} (live.mjs)…`);
     // Фоновое перечитывание окна (рост PARSER_REV) здесь не нужно: копия data каждый прогон свежая, прогресс всё равно пропадёт,
     // а список ждёт. Окно перечитывают прогоны на GitHub без нового дня.
@@ -139,6 +193,14 @@ export async function attempt(opts, day, ctx) {
     if (!v.ok) return fail(v.why);
     if (v.partial) log('индекс разобран не полностью — последняя попытка, идём как есть (недобор виден в coverage)');
     st.live = true;
+  }
+  // Лента на весь день: сверка с индексом (подачи, которых нет в индексе, добавляются) или, без индекса, весь список из ленты
+  if (!st.feed && !opts.noFeed) {
+    try {
+      const info = ctx.source === 'feed' ? feedFallback(opts, day) : await reconcileStage(opts, day);
+      if (info) ctx.feedInfo = info;
+    } catch (e) { log('лента на весь день: сверка не удалась (не критично):', e.message); }
+    st.feed = true;
   }
   if (!st.paper) { await fetchPaper(opts); st.paper = true; }
 
@@ -159,7 +221,7 @@ export async function attempt(opts, day, ctx) {
   // Что докачать: бары D0 у бумаг дня и открытия дня входа у строк прошедших дней
   const planFile = join(opts.state, 'plan.json');
   mkdirSync(opts.site, { recursive: true });
-  const common = ['--data', opts.data, '--site', opts.site, '--only-morning', '--builder', 'vps'];
+  const common = ['--data', opts.data, '--site', opts.site, '--only-morning', '--builder', 'vps', ...(ctx.source === 'feed' ? ['--source', 'feed'] : [])];
   if (!st.bars) {
     // Проход 1 — бары D0 у бумаг дня. Если у прошедшего дня были бумаги без баров, их открытия видны только теперь: проход 2.
     for (let pass = 1; pass <= 2; pass++) {
@@ -229,7 +291,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     log(`попытка ${n}${ctx.lastChance ? ' (последняя)' : ''}`);
     const r = await attempt(opts, day, ctx);
     if (r.ok) {
-      if (!opts.dry) writeJson(doneFile, { day, at: new Date().toISOString(), ...ctx.summary });
+      if (!opts.dry) writeJson(doneFile, { day, at: new Date().toISOString(), ...ctx.summary, ...(ctx.source === 'feed' ? { source: 'feed' } : {}) });
+      // Список по ленте доставлен, но индекс не вышел — это тоже тревога (dash-alert): сторожу и владельцу нужно знать, что не так с EDGAR
+      if (ctx.source === 'feed') { log('СОБРАНО ПО ЛЕНТЕ: индекс EDGAR за день не вышел — список мог выйти неполным'); return 1; }
       log('готово');
       return 0;
     }

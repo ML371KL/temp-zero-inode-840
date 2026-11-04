@@ -39,6 +39,8 @@ const COUNTER_FROM = argVal('--counter-from', MORNING.liveFrom);
 const COUNTER_DUMP = argVal('--counter-dump', null);
 // Кто собрал файл: 'github' (ежедневная сборка) или 'vps' (сборка после индекса EDGAR). Пишется в morning.json.
 const BUILDER = argVal('--builder', process.env.MORNING_BUILDER || 'github');
+// Откуда формы дня listFor: 'index' (дневной индекс EDGAR) или 'feed' (индекса нет, список по ленте getcurrent — резерв сборки на VPS). Пишется в morning.json.
+const SOURCE = argVal('--source', 'index');
 // Сборка утреннего списка на VPS: считаются только цены тикеров последних дней подачи, записывается один morning.json и
 // процесс завершается (без ленты, бэктеста и портфелей). --plan файл.json — что докачать до сборки (бары D0, открытия D+1).
 const ONLY_MORNING = args.includes('--only-morning');
@@ -477,7 +479,11 @@ const allFdates = [...new Set(buys.map(r => r.fdate))].sort();
 // кладёт в live.json сборщик подач; нет записи — null.
 const liveSt = readJson(join(DATA, 'state', 'live.json'), null);
 const listFor = [listDayOf(liveSt), allFdates.at(-1)].filter(isIsoDate).sort().at(-1) ?? null;
-const coverage = (listFor && liveSt?.coverage?.[listFor]) || null;
+// Покрытие дня: запись сборщика подач (state/live.json) плюс сверка с лентой на весь день (state/feed.json, пишет сборка на VPS): feed — сколько подач
+// видела лента, сколько разобрала, сколько из них не нашлось в индексе (extra) и сколько индексных лента не видела (missing). Нет записей — null.
+const feedSt = readJson(join(DATA, 'state', 'feed.json'), null);
+let coverage = (listFor && liveSt?.coverage?.[listFor]) || null;
+if (listFor && feedSt?.[listFor]) coverage = { ...(coverage ?? {}), feed: feedSt[listFor] };
 const dayDates = [...new Set([...allFdates, ...(listFor ? [listFor] : [])])].sort();
 // День D+1 состоялся и закрыт, только если он раньше сегодняшнего: сборка в середине сессии
 // увидела бы незавершённый бар, а результат дня не должен меняться задним числом.
@@ -534,7 +540,7 @@ const paperOut = buildPaper(paperJournal, {
 W('morning.json', {
   built: today, pricesAsOf: spy?.length ? spy[spy.length - 1][0] : null,
   // Для сторожа: за какую дату подачи список, когда и кем собран, как покрыт индекс (null — поля покрытия в live.json ещё нет)
-  listFor, builtAt: new Date().toISOString(), builder: BUILDER, coverage,
+  listFor, builtAt: new Date().toISOString(), builder: BUILDER, source: SOURCE, coverage,
   params: { minVal: MORNING.minVal, minPx: MORNING.minPx, dvMin: MORNING.dvMin, dvCost: MORNING.dvCost, scoreMin: MORNING.scoreMin, costHi: MORNING.costHi, costLo: MORNING.costLo, stake: MORNING.stake },
   counter: counterOut, days: morningDays,
   ...(paperOut ? { paper: paperOut } : {}),

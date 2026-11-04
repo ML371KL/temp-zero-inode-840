@@ -49,7 +49,7 @@ export function inEveningWindow(at, p = EVENING) {
 export const dueMs = (at, minutes) => { const ms = nyToMs(at); return ms === null ? null : ms + minutes * 60e3; };
 
 // ---------- лента EDGAR getcurrent (atom) ----------
-// -> [{ acc, cik, form, updated }] по одному на форму: одна форма встречается в ленте несколько раз
+// -> [{ acc, cik, form, updated, filed }] по одному на форму: одна форма встречается в ленте несколько раз
 // (эмитент и каждый инсайдер). updated — время из ленты, но ИСТИНА — <ACCEPTANCE-DATETIME> в самой форме.
 export function parseAtom(xml) {
   const out = [], seen = new Set();
@@ -61,7 +61,9 @@ export function parseAtom(xml) {
     const form = /<category[^>]*term="([^"]+)"/.exec(e)?.[1] ?? /<title>\s*([^\s<]+)/.exec(e)?.[1] ?? null;
     if (!acc || !cik || seen.has(acc)) continue;
     seen.add(acc);
-    out.push({ acc, cik: Number(cik), form, updated: /<updated>([^<]+)<\/updated>/.exec(e)?.[1] ?? null });
+    // «Filed:» — дата подачи по правилам SEC (та же, что в дневном индексе); в ленте она лежит в экранированном описании записи
+    const filed = /Filed:(?:&lt;\/b&gt;|<\/b>)?\s*(\d{4}-\d{2}-\d{2})/.exec(e)?.[1] ?? null;
+    out.push({ acc, cik: Number(cik), form, updated: /<updated>([^<]+)<\/updated>/.exec(e)?.[1] ?? null, filed });
   }
   return out;
 }
