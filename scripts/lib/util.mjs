@@ -8,9 +8,12 @@ export const SEC_UA = 'InsiderRadar/1.0 (rodionkalmykov@gmail.com)';
 export const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 const hostState = new Map(); // host -> { nextAt }
+// SEC разрешает 10 запросов в секунду с адреса. Процесс держит ~7; на VPS вечерний сборщик и лента работают одновременно и
+// делят адрес, поэтому их юниты задают SEC_INTERVAL_MS (вечерний — 250 мс = 4 в секунду, вместе с лентой ≤ 6,5).
+const SEC_INTERVAL = Number(process.env.SEC_INTERVAL_MS) > 0 ? Number(process.env.SEC_INTERVAL_MS) : 140;
 const HOST_INTERVAL_MS = {
-  'www.sec.gov': 140,          // ~7 req/s
-  'data.sec.gov': 140,
+  'www.sec.gov': SEC_INTERVAL,          // по умолчанию ~7 req/s
+  'data.sec.gov': SEC_INTERVAL,
   'query1.finance.yahoo.com': 350,
   'query2.finance.yahoo.com': 350,
   'stooq.com': 600,
