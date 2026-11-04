@@ -44,3 +44,20 @@ export function pruneCoverage(coverage, today, days = COVERAGE_DAYS) {
   for (const k of Object.keys(coverage ?? {}).sort()) if (k >= cut) out[k] = coverage[k];
   return out;
 }
+
+// День подачи, за который собран утренний список: последний рабочий день не позже state.lastDay, чей индекс
+// разобран. lastDay встаёт и на выходной (субботний прогон проходит субботу, до вторника lastDay — суббота), и на
+// праздник — такие дни списком не считаются: иначе письмо «список пуст» ушло бы за субботу, а панель показала
+// бы пустой день. Старое состояние без coverage — просто последний будний день.
+export function listDayOf(state, lookback = 14) {
+  const last = state?.lastDay;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(last ?? '')) return null;
+  let d = last;
+  for (let k = 0; k < lookback; k++, d = addDaysIso(d, -1)) {
+    if (isWeekend(d)) continue;
+    const s = state.coverage?.[d]?.status;
+    if (s === 'holiday' || s === 'not-published') continue;
+    return d;
+  }
+  return null;
+}

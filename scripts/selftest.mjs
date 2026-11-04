@@ -1819,7 +1819,10 @@ ok('compute (П14): listFor, builtAt, builder, coverage; день без пок�
   const m = R('morning.json');
   assert.equal(m.listFor, recentF, 'нет state/live.json с lastDay — список за день последней покупки');
   assert.match(m.builtAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/); assert.equal(m.builder, 'github'); assert.equal(m.coverage, null);
-  const lastDay = addDaysIso(recentF, 2);
+  // День после последней покупки, чей индекс разобран, — будний: выходной списком не считается (livecal.listDayOf),
+  // а recentF + 2 по дате запуска бывает и субботой
+  let lastDay = addDaysIso(recentF, 2);
+  while ([0, 6].includes(new Date(lastDay + 'T00:00:00Z').getUTCDay())) lastDay = addDaysIso(lastDay, 1);
   const cov = { status: 'complete', indexed: 40, collected: 40, pending: 0, at: lastDay + 'T22:10:00Z' };
   mkdirSync(join(TMP, 'state'), { recursive: true });
   const livePath = join(TMP, 'state', 'live.json');
@@ -1883,7 +1886,7 @@ rmSync(NTMP, { recursive: true, force: true });
 // ==================== СБОР: календарь, сбои сети, добор, дедуп, разбор индекса (PR fix-collect-1) ====================
 // Ревизия данных 04.11.2026 (audit-840-data-2026-11/REVIEW-DATA.md, дефекты П1, П4, П5, П6, П7, П12).
 {
-  const { missingIndexVerdict, shouldProbeNext, nextWeekday, coverageEntry, pruneCoverage } = await import('./lib/livecal.mjs');
+  const { missingIndexVerdict, shouldProbeNext, nextWeekday, coverageEntry, pruneCoverage, listDayOf } = await import('./lib/livecal.mjs');
   const { uniqueFilings, normalizeXmlDate } = await import('./lib/edgar.mjs');
   const { readJsonGz } = await import('./lib/util.mjs');
 
@@ -1907,6 +1910,20 @@ rmSync(NTMP, { recursive: true, force: true });
     assert.equal(nextWeekday('2026-11-06'), '2026-11-09');
     // если индекс следующего рабочего дня уже есть, отсутствующий — праздник при любом времени запуска
     assert.equal(missingIndexVerdict('2026-11-04', '2026-11-05', true), 'holiday');
+  });
+
+  ok('список: listFor — последний рабочий день с разобранным индексом, не выходной и не праздник', () => {
+    // субботний прогон проходит субботу: lastDay = суббота, а список — за пятницу
+    assert.equal(listDayOf({ lastDay: '2026-11-07' }), '2026-11-06');
+    assert.equal(listDayOf({ lastDay: '2026-11-08' }), '2026-11-06');
+    // праздник (День ветеранов) и «ещё не вышел» пропускаются, разобранный день — нет
+    const coverage = { '2026-11-10': { status: 'complete' }, '2026-11-11': { status: 'holiday' }, '2026-11-12': { status: 'not-published' } };
+    assert.equal(listDayOf({ lastDay: '2026-11-12', coverage }), '2026-11-10');
+    assert.equal(listDayOf({ lastDay: '2026-11-10', coverage }), '2026-11-10');
+    // частично разобранный день — тоже день списка (письмо скажет, что разобран не полностью)
+    assert.equal(listDayOf({ lastDay: '2026-11-10', coverage: { '2026-11-10': { status: 'partial' } } }), '2026-11-10');
+    assert.equal(listDayOf(null), null);
+    assert.equal(listDayOf({ lastDay: 'x' }), null);
   });
 
   ok('сбор/П5, П12: строка индекса с двойным пробелом в имени, дедуп по номеру подачи', () => {
