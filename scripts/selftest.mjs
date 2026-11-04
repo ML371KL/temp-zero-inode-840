@@ -11,9 +11,9 @@ import { zipCreate, zipExtract } from './lib/zip.mjs';
 import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, acceptedAt, acceptedAtSec, SHARD_VERSION } from './lib/edgar.mjs';
 import {
   mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo,
-  trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough, fetchYahooDaily,
+  trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough, fetchYahooDaily, turnover20,
 } from './lib/prices.mjs';
-import { buildDay, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf } from './lib/morning.mjs';
+import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf } from './lib/morning.mjs';
 import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
 import { EVENING, nyWall, nyToMs, inEveningWindow, parseAtom, filingPath, buildEvent, fromWorker, validBook, entryPx, benchPx, paperTrade, summarizePaper, planQuotes, parseJournal, pickQuote } from './lib/evening.mjs';
 import { buildPaper } from './lib/paper.mjs';
@@ -1233,12 +1233,12 @@ const nYear = isoToday().slice(0, 4);
 const mCounter = { from: `${nYear}-11-05`, costs: { hi: 0.001, lo: 0.0015, split: 3e7 }, upTo: null, main: { n: 0 }, all: { n: 0 } };
 const REST = { main: false, score: 1 };                           // не в основном списке: скор 0–1
 const MORNING_JSON = join(NTMP, 'site', 'data', 'morning.json');
-function writeMorning(days, counter = mCounter) {
-  writeJson(MORNING_JSON, { built: isoToday(), params: { minVal: 1e4, minPx: 5, dvMin: 1e7, dvCost: 3e7, scoreMin: 2 }, counter, days });
+function writeMorning(days, counter = mCounter, extra = {}) {
+  writeJson(MORNING_JSON, { built: isoToday(), params: { minVal: 1e4, minPx: 5, dvMin: 1e7, dvCost: 3e7, scoreMin: 2 }, counter, days, ...extra });
 }
 const NOTIFY_ARGS = dir => [join(ROOT, 'scripts', 'notify.mjs'), '--site', join(NTMP, 'site'), '--data', dir];
-function notify(days, { dir = join(NTMP, 'data'), counter = mCounter, args = [] } = {}) {
-  writeMorning(days, counter);
+function notify(days, { dir = join(NTMP, 'data'), counter = mCounter, args = [], extra = {} } = {}) {
+  writeMorning(days, counter, extra);
   mkdirSync(join(dir, 'state'), { recursive: true });
   return execFileSync(process.execPath, [...NOTIFY_ARGS(dir), '--dry-run', ...args], { encoding: 'utf8' });
 }
@@ -1291,11 +1291,9 @@ ok('notify: пустой счётчик и повторный прогон', () 
   assert.deepEqual(sentOf(dir).filter(k => k === `morning|${nDay(-1)}`).length, 1);
   assert.match(notify(days, { dir }), /новых утренних списков нет/, 'вторая отправка той же даты невозможна');
 });
-ok('notify: пустой главный список писем не даёт, устаревший — тоже, --any-date снимает проверку свежести', () => {
+ok('notify: устаревший день письма не даёт, --any-date снимает проверку свежести', () => {
   const dir = freshDir('data-rules');
   notify([mDay(nDay(-3), [mRow('OLD', 3e5)])], { dir });             // пересев
-  // только уровень $10–30 млн: список для письма пуст
-  assert.match(notify([mDay(nDay(-1), [mRow('LOW', 1e5, REST)])], { dir }), /новых утренних списков нет/);
   // подача шестидневной давности: её торги D+1 давно прошли
   const stale = [mDay(nDay(-6), [mRow('OLDD', 3e5)])];
   assert.match(notify(stale, { dir }), /новых утренних списков нет/);
@@ -1726,6 +1724,158 @@ await okAsync('сборщик: форма в вечернем окне -> соб
     const r4 = await run();
     assert.equal(r4.code, 0, r4.out); assert.equal(hits.puts.length, n3 + 1, 'недоставленное ушло при следующем запуске');
   } finally { await new Promise(r => server.close(r)); }
+});
+
+// ---------- П11/П14 (ревизия данных 04.11.2026): определения отбора как в проверенной стратегии, поля для сторожа ----------
+ok('turnover20: медиана close×volume за 20 баров, заканчивающихся днём подачи; меньше 10 баров — оборота нет', () => {
+  const bar = (k, c, v) => ['2026-10-' + String(k).padStart(2, '0'), c, c, v];
+  const s25 = Array.from({ length: 25 }, (_, k) => bar(k + 1, 1, k + 1));      // оборот k-го бара равен k
+  assert.equal(turnover20(s25, 24), 16, 'окно 6..25, чётное число баров: среднее двух средних (15,5), а не нижнее');
+  assert.equal(turnover20(s25, 14), 8, 'окно кончается на D0 (индекс 14): бары 1..15; бары после D0 не входят');
+  assert.equal(turnover20(s25, 9), 6, 'ровно 10 баров — оборот есть (5,5 -> 6)');
+  assert.equal(turnover20(s25, 8), null, 'девять баров — оборота нет');
+  const zeros = Array.from({ length: 10 }, (_, k) => bar(k + 1, 1, k < 5 ? 0 : 100));
+  assert.equal(turnover20(zeros, 9), 50, 'бар с нулевым объёмом входит в окно, как в проверке');
+  const holes = Array.from({ length: 11 }, (_, k) => bar(k + 1, 2, k < 2 ? null : 10));
+  assert.equal(turnover20(holes, 10), null, 'бары без объёма не входят: девять баров — оборота нет');
+  assert.equal(turnover20([...holes, bar(12, 2, 10)], 11), 20, 'десять баров с объёмом: 2 × 10');
+  assert.equal(turnover20(null, 0), null); assert.equal(turnover20(s25, -1), null); assert.equal(turnover20(s25, 99), null);
+});
+ok('утренний список (П11): событие — эмитент × день; суммы по самой крупной строке, офицер из любого rel, просадка — минимум', () => {
+  const base = { cik: 1, t: 'AAA', name: 'X Corp', who: ['Doe'], role: 'D', officer: false, common: true, val: 5e4, dd: -0.1, adv: 4e7, px: 20, drop: null };
+  const by = (rows, t) => buildDay(rows).find(x => x.t === t);
+  // три покупки по $60 тыс.: сумма дня $180 тыс., но самая крупная строка — $60 тыс. -> балла за сумму нет
+  const a = by([60, 61, 62].map(v => ({ ...base, cik: 10, t: 'SUMX', val: v * 1e3 })), 'SUMX');
+  assert.equal(a.val, 183000); assert.equal(a.mx, 62000); assert.equal(a.score, 0); assert.equal(a.main, false); assert.deepEqual(a.tags, []);
+  // $150 тыс. + $50 тыс.: самая крупная $150 тыс. -> один балл
+  const b = by([{ ...base, cik: 11, t: 'MAXR', val: 1.5e5 }, { ...base, cik: 11, t: 'MAXR', val: 5e4 }], 'MAXR');
+  assert.equal(b.val, 2e5); assert.equal(b.mx, 1.5e5); assert.equal(b.score, 1);
+  // $1,2 млн + мелкая: оба балла за сумму, пометка «≥$1 млн»
+  const c = by([{ ...base, cik: 12, t: 'BIGR', val: 1.2e6 }, { ...base, cik: 12, t: 'BIGR', val: 1e4 }], 'BIGR');
+  assert.equal(c.score, 2); assert.equal(c.main, true); assert.ok(c.tags.includes('big'));
+  // директор-офицер (rel «DO», role по topRole = D): офицер -> балл и пометка, на витрине роль «офицер»
+  const d = by([{ ...base, cik: 13, t: 'DOFF', officer: true, dd: -0.35 }], 'DOFF');
+  assert.equal(d.score, 2); assert.equal(d.role, 'O'); assert.deepEqual(d.tags, ['off', 'deep']);
+  // как в проверке: офицер и просадка берутся по ВСЕМ обыкновенным строкам события, в том числе отсеянным гейтами
+  const e = by([{ ...base, cik: 14, t: 'DROPS', val: 2e5 }, { ...base, cik: 14, t: 'DROPS', val: 9e5, officer: true, dd: -0.6, drop: 'planned' }], 'DROPS');
+  assert.equal(e.val, 2e5, 'отсеянная строка в сумму и в самую крупную покупку не входит'); assert.equal(e.mx, 2e5);
+  assert.equal(e.score, 3); assert.equal(e.dd, -0.6, 'просадка — минимум по строкам события'); assert.deepEqual(e.tags, ['off', 'deep']);
+  // не-обыкновенные бумаги (преф, варрант) в событие не входят совсем
+  const f = by([{ ...base, cik: 15, t: 'PREF', val: 3e4 }, { ...base, cik: 15, t: 'PREF', val: 9e6, officer: true, dd: -0.9, common: false }], 'PREF');
+  assert.equal(f.val, 3e4); assert.equal(f.score, 0); assert.equal(f.dd, -0.1); assert.equal(f.role, 'D');
+  // цена и оборот — у ведущей (самой крупной) строки; тикер события — её тикер
+  const g = buildDay([{ ...base, cik: 16, t: 'GOOGL', val: 3e5 }, { ...base, cik: 16, t: 'GOOG', val: 1e5, px: 4, adv: 1e6 }]);
+  assert.deepEqual(g.map(x => x.t), ['GOOGL']); assert.equal(g[0].n, 2); assert.equal(g[0].px, 20); assert.equal(g[0].dv, 4e7);
+  // старый формат строки (dv, role без officer) читается: офицер выводится из роли
+  const h = buildDay([{ t: 'OLDF', name: 'Old', who: ['A'], role: 'C', val: 2e5, dd: null, dv: 2e7, px: 9, drop: null }]);
+  assert.equal(h[0].score, 2); assert.equal(h[0].dv, 2e7);
+});
+ok('утренний список (П11): границы цены и оборота по D0, события без цены или оборота считаются отдельно', () => {
+  const base = { name: 'X', who: ['A'], role: 'D', officer: false, common: true, val: 1e5, dd: null, adv: 1e7, px: 5, drop: null };
+  const rows = [
+    { ...base, cik: 1, t: 'EDGE' },                         // ровно $5 и $10 млн — проходит
+    { ...base, cik: 2, t: 'CHEAP', px: 4.99 },
+    { ...base, cik: 3, t: 'THIN', adv: 9999999 },
+    { ...base, cik: 4, t: 'NOPX', px: null },               // ряд не дотянул до D0
+    { ...base, cik: 5, t: 'NOADV', adv: null },             // меньше десяти баров
+    { ...base, cik: 6, t: 'TINY', val: 9999 },              // меньше $10 тыс. — события нет ни в списке, ни в «без цены»
+    { ...base, cik: 7, t: 'GATED', drop: 'offering' },      // не прошла гейты — события нет
+    { ...base, cik: 8, t: 'NOPREF', px: null, common: false },
+  ];
+  const r = buildDayFull(rows);
+  assert.deepEqual(r.rows.map(x => x.t), ['EDGE']);
+  assert.deepEqual(r.unpriced.sort(), ['NOADV', 'NOPX']);
+  assert.deepEqual(buildDayFull([]), { rows: [], unpriced: [] });
+});
+ok('утренний список (П11): скор совпадает с эталоном проверки (r14_rank.py) на 400 случайных событиях', () => {
+  let seed = 20261104;
+  const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+  const ref = ev => {
+    const c = ev.filter(r => r.common);
+    const mo = Math.max(0, ...c.filter(r => !r.drop).map(r => r.val));
+    const dds = c.map(r => r.dd).filter(x => x !== null);
+    const dd = dds.length ? Math.min(...dds) : null;
+    return { mo, score: (mo >= 1e5 ? 1 : 0) + (mo >= 1e6 ? 1 : 0) + (c.some(r => r.officer) ? 1 : 0) + (dd !== null && dd < -0.3 ? 1 : 0) };
+  };
+  let included = 0, mains = 0;
+  for (let i = 0; i < 400; i++) {
+    const n = 1 + Math.floor(rnd() * 4);
+    const ev = Array.from({ length: n }, () => ({
+      cik: 1, t: 'EVT', name: 'E', who: ['A'], role: 'D', officer: rnd() < 0.3, common: rnd() < 0.9,
+      val: Math.round(10 ** (3 + rnd() * 3.7)), dd: rnd() < 0.2 ? null : -0.7 + rnd() * 0.75, adv: 5e7, px: 30, drop: rnd() < 0.25 ? 'x' : null,
+    }));
+    const { mo, score } = ref(ev);
+    const got = buildDay(ev);
+    if (!(mo >= 1e4)) { assert.equal(got.length, 0, 'без строки от $10 тыс., прошедшей гейты, события нет'); continue; }
+    included++;
+    assert.equal(got.length, 1);
+    assert.equal(got[0].score, score, JSON.stringify(ev));
+    assert.equal(got[0].main, score >= 2);
+    if (got[0].main) mains++;
+  }
+  assert.ok(included > 150 && mains > 20 && mains < included, `выборка вырождена: событий ${included}, в основном списке ${mains}`);
+});
+ok('compute (П14): listFor, builtAt, builder, coverage; день без покупок попадает в файл пустым', () => {
+  const m = R('morning.json');
+  assert.equal(m.listFor, recentF, 'нет state/live.json с lastDay — список за день последней покупки');
+  assert.match(m.builtAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/); assert.equal(m.builder, 'github'); assert.equal(m.coverage, null);
+  const lastDay = addDaysIso(recentF, 2);
+  const cov = { status: 'complete', indexed: 40, collected: 40, pending: 0, at: lastDay + 'T22:10:00Z' };
+  mkdirSync(join(TMP, 'state'), { recursive: true });
+  const livePath = join(TMP, 'state', 'live.json');
+  const had = readJson(livePath, null);
+  writeJson(livePath, { schema: 3, lastDay, coverage: { [lastDay]: cov, [recentF]: { status: 'partial', indexed: 9, collected: 5, pending: 4, at: 'x' } } });
+  try {
+    execFileSync(process.execPath, [join(ROOT, 'scripts', 'compute.mjs'), '--data', TMP, '--site', join(TMP, 'site-vps'), '--builder', 'vps', '--counter-from', addDaysIso(today, -30)], { stdio: 'pipe' });
+  } finally { if (had) writeJson(livePath, had); else rmSync(livePath, { force: true }); }
+  const v = readJson(join(TMP, 'site-vps', 'data', 'morning.json'));
+  assert.equal(v.builder, 'vps'); assert.equal(v.listFor, lastDay, 'день, чей индекс разобран, — даже если покупок в нём не было');
+  assert.deepEqual(v.coverage, cov, 'покрытие берётся ровно за listFor');
+  assert.equal(v.days[0].date, lastDay); assert.deepEqual(v.days[0].rows, [], 'пустой день присутствует в списке дней');
+  assert.ok(v.days.some(d => d.date === recentF), 'прежние дни остались');
+});
+ok('compute (П11): строка списка несёт самую крупную покупку и цену D0; оборот — 20 баров до подачи включительно', () => {
+  const row = R('morning.json').days.find(d => d.date === recentF).rows[0];
+  assert.equal(row.mx, 275000); assert.ok(row.px > 0);
+  assert.ok(row.dv >= 1e7, 'оборот LIVA — не меньше порога списка');
+});
+ok('notify (П14): пустой день за listFor даёт короткое письмо «сигналов нет», повторно не шлётся', () => {
+  const dir = freshDir('data-empty');
+  notify([mDay(nDay(-3), [mRow('OLD', 3e5)])], { dir });                       // пересев
+  const days = [mDay(nDay(-1), [mRow('LOW', 1e5, REST)])];                      // только скор 0–1: основной список пуст
+  const out = notify(days, { dir });
+  assert.match(out, /новых утренних списков: 1 \(в том числе пустой день\)/);
+  assert.match(out, /🔕 Инсайдерский радар · утренний список пуст/);
+  assert.match(out, new RegExp(`Подачи за \\d\\d\\.\\d\\d · основной список без бумаг: оборот от \\$10${NB}млн, скор от 2`));
+  assert.match(out, /Ещё 1 бумага со скором 0–1 — на панели\./);
+  assert.match(out, /Счётчик с 05\.11: сделок пока нет\./);
+  assert.ok(!/Только заявки на аукционы/.test(out), 'правило исполнения в письме «сигналов нет» не нужно');
+  assert.ok(!/Индекс разобран/.test(out), 'покрытие неизвестно — о нём не говорим');
+  assert.equal(sentOf(dir).filter(k => k === `morning|${nDay(-1)}`).length, 1);
+  assert.match(notify(days, { dir }), /новых утренних списков нет/, 'второе письмо за ту же дату невозможно');
+  // день совсем без бумаг: строки про «ещё N» нет (пустые разделы не печатаются)
+  const d2 = freshDir('data-empty-zero');
+  notify([mDay(nDay(-3), [mRow('OLD', 3e5)])], { dir: d2 });
+  assert.ok(!/Ещё \d/.test(notify([mDay(nDay(-1), [])], { dir: d2 })));
+});
+ok('notify (П14): пустое письмо — только за listFor; выходной и «индекс не вышел» не выдаются за «сигналов нет»', () => {
+  const days = [mDay(nDay(-1), []), mDay(nDay(-2), [])];
+  const dir = freshDir('data-empty-for');
+  notify([mDay(nDay(-4), [mRow('OLD', 3e5)])], { dir });
+  assert.match(notify(days, { dir, extra: { listFor: nDay(-1) } }), /новых утренних списков: 1 /, 'прежний пустой день задним числом не шлётся');
+  assert.deepEqual(sentOf(dir).filter(k => k.endsWith(nDay(-2))), []);
+  for (const status of ['not-published', 'holiday']) {
+    const d = freshDir('data-empty-' + status);
+    notify([mDay(nDay(-4), [mRow('OLD', 3e5)])], { dir: d });
+    assert.match(notify(days, { dir: d, extra: { listFor: nDay(-1), coverage: { status, indexed: 0, collected: 0 } } }), /новых утренних списков нет/, status);
+  }
+  const d3 = freshDir('data-empty-partial');
+  notify([mDay(nDay(-4), [mRow('OLD', 3e5)])], { dir: d3 });
+  const out = notify(days, { dir: d3, extra: { listFor: nDay(-1), coverage: { status: 'partial', indexed: 9, collected: 7 } } });
+  assert.match(out, /Индекс разобран не полностью: 7 из 9 форм\./);
+  const d4 = freshDir('data-empty-complete');
+  notify([mDay(nDay(-4), [mRow('OLD', 3e5)])], { dir: d4 });
+  assert.match(notify(days, { dir: d4, extra: { listFor: nDay(-1), coverage: { status: 'complete', indexed: 9, collected: 9 } } }), /утренний список пуст/);
 });
 
 rmSync(NTMP, { recursive: true, force: true });

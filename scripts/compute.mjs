@@ -12,18 +12,18 @@
 // кэша, а фазы без цен (гейты, признаки) идут отдельными проходами.
 // Использование: node scripts/compute.mjs [--data data] [--site site]
 import { readJson, writeJson, readJsonGz, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
-import { readPriceCache, nominalFactor, readStats, listedThrough, readLows } from './lib/prices.mjs';
+import { readPriceCache, nominalFactor, readStats, listedThrough, readLows, turnover20 } from './lib/prices.mjs';
 import { loadSymbolRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import {
   Panel, monthlyFromDaily, portfolioSeries, universeSeries, pairedDiff, turnover,
   factorAlpha, factorSeries, vsBenchmark, pathStats, neweyWestT, annualize, rfOf,
 } from './lib/portfolio.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
-import { applyGates, isPlanned, DROP_LABELS } from './lib/gates.mjs';
+import { applyGates, isPlanned, isNonCommon, DROP_LABELS } from './lib/gates.mjs';
 import { buildOwnerGroups, isPersonOwner, isFundOnly, topRole, dOwnOf } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './lib/routine.mjs';
 import { readOpens, opensOf, nextTradingDay } from './lib/opens.mjs';
-import { MORNING, BREADTH, buildDay, tradeResult, summarize, breadth } from './lib/morning.mjs';
+import { MORNING, BREADTH, buildDayFull, tradeResult, summarize, breadth } from './lib/morning.mjs';
 import { readPaperJournal, buildPaper } from './lib/paper.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -36,6 +36,8 @@ const SITE = argVal('--site', 'site');
 // --counter-from 2026-08-15 [--counter-dump файл.json] (все сделки счётчика построчно).
 const COUNTER_FROM = argVal('--counter-from', MORNING.liveFrom);
 const COUNTER_DUMP = argVal('--counter-dump', null);
+// Кто собрал файл: 'github' (ежедневная сборка) или 'vps' (сборка после индекса EDGAR). Пишется в morning.json.
+const BUILDER = argVal('--builder', process.env.MORNING_BUILDER || 'github');
 
 const today = isoToday();
 const HORIZONS = { 3: 63, 6: 126, 12: 252, 24: 504 };  // месяцы -> торговые дни
@@ -115,6 +117,16 @@ function series(t) {
 function datesOf(s) {
   if (!s._dates) Object.defineProperty(s, '_dates', { value: s.map(r => r[0]), enumerable: false });
   return s._dates;
+}
+// D0 — последний торговый день не позже даты подачи (календарь SPY, как в проверке). Если SPY отстаёт от даты
+// подачи больше чем на длинные выходные, D0 неизвестен: список не строится, а не строится на старом дне.
+const d0Memo = new Map();
+function d0Of(fdate) {
+  if (!d0Memo.has(fdate)) {
+    const i = idxAtOrBefore(spy, fdate);
+    d0Memo.set(fdate, i >= 0 && spy[i][0] >= addDaysIso(fdate, -4) ? spy[i][0] : null);
+  }
+  return d0Memo.get(fdate);
 }
 function idxAtOrBefore(s, iso) {
   const d = datesOf(s);
@@ -289,10 +301,13 @@ for (const [t, rows] of byTicker) {
     if (r.code !== 'P') continue;
     r._dv = dollarVolumeAt(s, r.tdate);
     r._bucket = sizeBucket(r._dv);
-    // Закрытие на дату подачи в номинальных ценах (как его видел читатель): условие «цена ≥ $5»
-    // утреннего списка. Ряд, оборванный раньше подачи больше чем на неделю, цены не даёт.
-    const iF = idxAtOrBefore(s, r.fdate);
-    r._pxL = iF >= 0 && s[iF][0] >= addDaysIso(r.fdate, -7) ? rnd(s[iF][1] * nominalFactor(sp, r.fdate), 4) : null;
+    // Закрытие и оборот на день подачи D0 — условия «цена ≥ $5» и «оборот ≥ $10 млн» утреннего списка
+    // (ревизия 04.11.2026, П11). Нужен бар именно D0: ряд, не дотянувший до него, цены и оборота не даёт.
+    const d0 = d0Of(r.fdate);
+    const iF = d0 ? idxAtOrBefore(s, d0) : -1;
+    const onD0 = iF >= 0 && s[iF][0] === d0;
+    r._px0 = onD0 ? rnd(s[iF][1] * nominalFactor(sp, d0), 4) : null;
+    r._adv20 = onD0 ? turnover20(s, iF) : null;
     r._fw = forward(r, s);
     const e = idxFirstAfter(s, r.fdate);
     // Цена, по которой подписчик реально входит: закрытие первого торгового дня после подачи.
@@ -370,6 +385,9 @@ for (const r of buys) {
   const po = primaryOwner(r);
   const hist = po ? (history.get(po.cik) ?? []) : [];
   r._role = topRole((r.owners ?? []).filter(isPersonOwner).map(o => o.rel));
+  // Для скора списка: офицер — любой владелец строки с C, F или O в rel (директор-офицер «DO» — офицер); topRole
+  // отдаёт такому D, поэтому role для скора не годится
+  r._officer = (r.owners ?? []).some(o => /[CFO]/.test(o.rel ?? ''));
   r._dOwn = dOwnOf(r);
   r._inflect = r._gate.ok ? inflection(hist, r.tdate) : null;
   // Принадлежность к рабочему набору. Все три условия известны на дату сделки, поэтому
@@ -435,20 +453,29 @@ const paperJournal = readPaperJournal(join(DATA, 'paper'));
 const paperFrom = [...paperJournal.events.values()].reduce((m, e) => (m === null || e.fdate < m ? e.fdate : m), null);
 const DAY_CUT = [COUNTER_FROM, addDaysIso(today, -30), paperFrom ?? '9999'].reduce((a, b) => (a < b ? a : b));
 for (const r of buys) {
-  if (r._dv === null || r._dv === undefined || r.fdate < DAY_CUT) continue;
+  if (r.fdate < DAY_CUT) continue;
   (dayCand.get(r.fdate) ?? dayCand.set(r.fdate, []).get(r.fdate)).push({
-    t: r.T, name: ref.get(r.cik)?.name ?? r.t, who: (r.owners ?? []).map(o => o.name),
-    role: r._role, val: r.val, dd: r._dd, dv: r._dv, px: r._pxL ?? null, at: r.at ?? null,
+    cik: r.cik, t: r.T, name: ref.get(r.cik)?.name ?? r.t, who: (r.owners ?? []).map(o => o.name),
+    role: r._role, officer: r._officer, common: !isNonCommon(r.sec),
+    val: r.val, dd: r._dd, adv: r._adv20 ?? null, px: r._px0 ?? null, at: r.at ?? null,
     drop: r._gate.ok ? null : (r._gate.drop ?? 'x'),
   });
 }
 const allFdates = [...new Set(buys.map(r => r.fdate))].sort();
+// Для какой даты подачи собран список: последний день, чей индекс EDGAR разобран (state/live.json), а не последний день
+// с покупками — иначе день без покупок выглядел бы для сторожа «списком, который не вышел». Покрытие дня
+// (indexed/collected/status) кладёт в live.json сборщик подач; пока поля нет — null.
+const liveSt = readJson(join(DATA, 'state', 'live.json'), null);
+const listFor = [liveSt?.lastDay, allFdates.at(-1)].filter(isIsoDate).sort().at(-1) ?? null;
+const coverage = (listFor && liveSt?.coverage?.[listFor]) || null;
+const dayDates = [...new Set([...allFdates, ...(listFor ? [listFor] : [])])].sort();
 // День D+1 состоялся и закрыт, только если он раньше сегодняшнего: сборка в середине сессии
 // увидела бы незавершённый бар, а результат дня не должен меняться задним числом.
 function dayWithResults(fd) {
   const entry = nextTradingDay(opensStore, fd);
   const done = entry !== null && entry < today;
-  const rows = buildDay(dayCand.get(fd) ?? []).map(x => {
+  const built = buildDayFull(dayCand.get(fd) ?? []);
+  const rows = built.rows.map(x => {
     const out = { ...x, who: x.who.slice(0, 2), nWho: x.who.length };
     if (done) {
       const res = tradeResult(opensOf(opensStore, x.t, entry), opensOf(opensStore, 'IWM', entry), opensOf(opensStore, 'SPY', entry));
@@ -456,7 +483,7 @@ function dayWithResults(fd) {
     }
     return out;
   });
-  return { date: fd, entry: done ? entry : null, done, rows };
+  return { date: fd, entry: done ? entry : null, done, rows, ...(built.unpriced.length ? { unpriced: built.unpriced } : {}) };
 }
 // Счётчик: основной список (скор ≥2) и все от $10 млн; каждая сделка — сразу к IWM и к SPY,
 // издержки у каждой свои (оборот ≥$30 млн — 0,10% на круг, $10–30 млн — 0,15%).
@@ -479,7 +506,7 @@ const counterOut = {
   main: { ...summarize(counterTrades.main), skips: counterSkips.main },
   all: { ...summarize(counterTrades.all), skips: counterSkips.all },
 };
-const morningDays = allFdates.slice(-MORNING.daysShown).reverse().map(dayWithResults);
+const morningDays = dayDates.slice(-MORNING.daysShown).reverse().map(dayWithResults);
 // Вечерняя схема на бумаге: события из журнала сборщика на VPS, результаты — по событиям, чей D+1 закрыт
 // (scripts/lib/paper.mjs, scripts/lib/evening.mjs). Нет журнала — нет блока.
 const dayMemo = new Map();
@@ -496,6 +523,8 @@ const paperOut = buildPaper(paperJournal, {
 });
 W('morning.json', {
   built: today, pricesAsOf: spy?.length ? spy[spy.length - 1][0] : null,
+  // Для сторожа: за какую дату подачи список, когда и кем собран, как покрыт индекс (null — поля покрытия в live.json ещё нет)
+  listFor, builtAt: new Date().toISOString(), builder: BUILDER, coverage,
   params: { minVal: MORNING.minVal, minPx: MORNING.minPx, dvMin: MORNING.dvMin, dvCost: MORNING.dvCost, scoreMin: MORNING.scoreMin, costHi: MORNING.costHi, costLo: MORNING.costLo, stake: MORNING.stake },
   counter: counterOut, days: morningDays,
   ...(paperOut ? { paper: paperOut } : {}),
