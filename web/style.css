@@ -281,5 +281,8 @@ table.mini.rev th:last-child, table.mini.rev td:last-child { text-align: left; }
   table.morning { font-size: 12.5px; }
   table.morning td, table.morning th { padding: 6px 5px; }
   table.morning td:first-child { max-width: 150px; }
+  /* Итоги ревизии на узком экране переносят строки: три колонки текста не помещаются в одну строку */
+  table.mini.rev td, table.mini.rev th { white-space: normal; padding: 4px 6px; font-size: 12px; }
+  table.mini.rev td.num { text-align: left; }
   table.morning .sub2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
