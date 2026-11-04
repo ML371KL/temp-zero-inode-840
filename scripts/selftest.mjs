@@ -2893,5 +2893,86 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   assert.ok(trades.every(r => isPlanned(r)));
 });
 
+// ---------- сбор: предохранитель на лимит SEC; бюджет времени бэкфила ----------
+{
+  const { readJsonGz } = await import('./lib/util.mjs');
+  const { PARSER_REV } = await import('./lib/edgar.mjs');
+  const RTMP = join(ROOT, '.selftest-ratelimit');
+  rmSync(RTMP, { recursive: true, force: true });
+  const RATE_HTML = '<html><body>Request Rate Threshold Exceeded</body></html>';
+  const S3_MISSING = '<Error><Code>AccessDenied</Code></Error>';
+  const accN = n => `0000000007-26-${String(n).padStart(6, '0')}`;
+  const pathOf = acc => `edgar/data/444/${acc.replace(/-/g, '')}/${acc}.txt`;
+  const line = acc => `4                ${'ISSUER'.padEnd(62)}${'444'.padEnd(12)}20260908    ${pathOf(acc)}`;
+  const body = acc => `<SEC-DOCUMENT>\n<ACCEPTANCE-DATETIME>20260908171500\n<XML>\n<ownershipDocument><documentType>4</documentType><issuer><issuerCik>444</issuerCik><issuerTradingSymbol>RLT</issuerTradingSymbol></issuer><reportingOwner><reportingOwnerId><rptOwnerCik>8</rptOwnerCik><rptOwnerName>Roe Jane</rptOwnerName></reportingOwnerId><reportingOwnerRelationship><isDirector>1</isDirector></reportingOwnerRelationship></reportingOwner><nonDerivativeTable><nonDerivativeTransaction><securityTitle><value>Common Stock</value></securityTitle><transactionDate><value>2026-09-04</value></transactionDate><transactionCoding><transactionCode>P</transactionCode></transactionCoding><transactionAmounts><transactionShares><value>${Number(acc.slice(-2)) * 100}</value></transactionShares><transactionPricePerShare><value>10</value></transactionPricePerShare></transactionAmounts><postTransactionAmounts><sharesOwnedFollowingTransaction><value>9000</value></sharesOwnedFollowingTransaction></postTransactionAmounts><ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature></nonDerivativeTransaction></nonDerivativeTable></ownershipDocument>\n</XML>`;
+  const accs = [1, 2, 3, 4, 5].map(accN);
+  let blocked = true;
+  const hits = [];
+  const zip = makeQuarterZip();
+  const srv = createServer((req, res) => {
+    const url = decodeURIComponent(req.url);
+    hits.push(url);
+    if (/form\.20260908\.idx$/.test(url)) { res.writeHead(200); res.end(['x', ...accs.map(line)].join('\n')); return; }
+    if (/daily-index/.test(url)) { res.writeHead(403); res.end(S3_MISSING); return; }
+    if (/insider-transactions-data-sets\/2026q\d_form345\.zip$/.test(url)) { res.writeHead(200); res.end(zip); return; }
+    const acc = accs.find(a => url.endsWith(a + '.txt'));
+    if (!acc) { res.writeHead(404); res.end(); return; }
+    if (blocked) { res.writeHead(403, { 'content-type': 'text/html' }); res.end(RATE_HTML); return; }
+    res.writeHead(200); res.end(body(acc));
+  });
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  const env = { ...process.env, EDGAR_BASE: base, POLITE_BACKOFF_MS: '2' };
+  const run = (script, args) => new Promise(resolve => execFile(process.execPath, [join(ROOT, 'scripts', script), '--data', RTMP, ...args],
+    { encoding: 'utf8', env }, (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: stdout + stderr })));
+  try {
+    mkdirSync(join(RTMP, 'state'), { recursive: true });
+    writeJson(join(RTMP, 'state', 'live.json'), { schema: SHARD_VERSION, from: '2026-09-01', lastDay: '2026-09-07', parserRev: PARSER_REV });
+    writeJsonGz(join(RTMP, 'trades', 'live.json.gz'), { v: SHARD_VERSION, trades: [], amend: [] });
+
+    await okAsync('сбор: три подачи подряд упёрлись в лимит SEC — остаток дня в добор без запросов, следующий день не трогаем', async () => {
+      const r = await run('live.mjs', ['--today', '2026-09-10', '--retries', '0']);
+      assert.equal(r.code, 0, r.out);
+      const s = JSON.parse(readFileSync(join(RTMP, 'state', 'live.json'), 'utf8'));
+      assert.equal(hits.filter(h => h.endsWith('.txt')).length, 3, 'запрошены только первые три подачи');
+      assert.equal(Object.keys(s.pending['2026-09-08']).length, 5, 'все пять ждут добора');
+      assert.equal(s.coverage['2026-09-08'].status, 'partial');
+      assert.equal(s.coverage['2026-09-08'].error, 'лимит SEC');
+      assert.ok(!hits.some(h => /form\.20260909\.idx$/.test(h)), 'индекс следующего дня в этом прогоне не запрашивался');
+      assert.match(s.lastError.msg, /лимит SEC/);
+      assert.equal(s.lastDay, '2026-09-08');
+    });
+
+    await okAsync('сбор: после снятия лимита отложенные подачи добираются', async () => {
+      blocked = false;
+      const r = await run('live.mjs', ['--today', '2026-09-10', '--retries', '0']);
+      assert.equal(r.code, 0, r.out);
+      const s = JSON.parse(readFileSync(join(RTMP, 'state', 'live.json'), 'utf8'));
+      assert.equal(s.pending, undefined);
+      assert.equal(s.coverage['2026-09-08'].status, 'complete');
+      assert.equal(readJsonGz(join(RTMP, 'trades', 'live.json.gz')).trades.length, 5);
+    });
+
+    await okAsync('бэкфил: перечитывание кварталов прерывается бюджетом и продолжается следующим запуском', async () => {
+      writeJson(join(RTMP, 'state', 'backfill.json'), { schema: SHARD_VERSION, quarterRev: 1, done: ['2026q1', '2026q2'], missing: [] });
+      const r1 = await run('backfill.mjs', ['--from-year', '2026', '--time-budget-min', '0.000001']);
+      assert.equal(r1.code, 0, r1.out);
+      const b1 = JSON.parse(readFileSync(join(RTMP, 'state', 'backfill.json'), 'utf8'));
+      assert.ok(b1.rebuildFrom, 'перечитывание не закончено — метка остаётся для следующей итерации');
+      assert.notEqual(b1.quarterRev, 3);
+      assert.deepEqual(b1.done, ['2026q1'], 'за прогон с исчерпанным бюджетом — ровно один квартал');
+      const r2 = await run('backfill.mjs', ['--from-year', '2026']);
+      assert.equal(r2.code, 0, r2.out);
+      const b2 = JSON.parse(readFileSync(join(RTMP, 'state', 'backfill.json'), 'utf8'));
+      assert.equal(b2.rebuildFrom, undefined);
+      assert.ok(b2.quarterRev >= 3);
+      assert.ok(b2.done.includes('2026q1'));
+    });
+  } finally {
+    await new Promise(r => srv.close(r));
+    rmSync(RTMP, { recursive: true, force: true });
+  }
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);

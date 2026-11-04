@@ -15,6 +15,11 @@ const MAX = Number(argVal('--max-quarters', '999'));
 // слепой проверке на 2006–2015 (docs/ЗАМОРОЗКА-НАБОРА.md), которая живёт в отдельном
 // каталоге данных и рабочую панель не трогает.
 const FROM_YEAR = Number(argVal('--from-year', '2016'));
+// Бюджет времени: перечитывание всех кварталов (смена QUARTER_REV) идёт по кварталу, состояние пишется после
+// каждого, поэтому прерваться можно в любой момент — следующая итерация backfill.yml продолжит. Без бюджета
+// таймаут задания убил бы прогон до снимка, и сделанное пропало бы. 0 — без ограничения.
+const BUDGET_MS = Number(argVal('--time-budget-min', '0')) * 60000;
+const started = Date.now();
 
 const statePath = join(DATA, 'state', 'backfill.json');
 const state = readJson(statePath, { schema: SHARD_VERSION, done: [], missing: [] });
@@ -33,6 +38,8 @@ if (rebuilding) {
     state.rebuildFrom = state.schema ?? 1;
     state.done = [];
     state.missing = [];
+    // метка пишется сразу: прогон, прерванный до первого квартала, не должен выглядеть завершённым
+    writeJson(statePath, state, true);
   }
   // Состояние живого контура НЕ трогаем. Раньше здесь оно затиралось на {schema: N} —
   // наследие разрушающей миграции, когда каталог сносился вместе с live-шардом. Теперь
@@ -62,6 +69,8 @@ let processed = 0;
 for (const q of wanted) {
   if (state.done.includes(q)) continue;
   if (processed >= MAX) break;
+  // хотя бы один квартал за прогон — иначе итерации могли бы идти без продвижения
+  if (BUDGET_MS && processed > 0 && Date.now() - started > BUDGET_MS) { console.log(`[backfill] бюджет времени исчерпан после ${processed} кварталов — продолжит следующая итерация`); break; }
   const { status, data } = await fetchQuarter(q);
   if (!data) {
     // 403/404: датасет ещё не опубликован — этот период закроет живой контур

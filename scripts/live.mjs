@@ -100,15 +100,28 @@ async function pool(items, n, fn, stop = () => false) {
 
 // Скачать подачу по любому из её путей (под CIK эмитента и под CIK каждого подателя).
 // -> { txt } | { gone: true } (404 по всем путям) | { error }
+// Предохранитель: несколько подач подряд упёрлись в лимит SEC (403 с HTML) после всех повторов — значит, SEC
+// режет этот адрес. Блок снимается после ~10 минут тишины, а каждая следующая подача ещё ~90 с повторяла бы
+// запрос впустую. Дальше в этом прогоне SEC не трогаем: остаток дня — в добор без попытки, следующие дни —
+// следующему прогону.
+const RL_STREAK_MAX = Number(argVal('--ratelimit-streak', '3'));
+let rlStreak = 0, secBlocked = false;
 async function download(paths) {
   let lastErr = null;
   for (const p of paths) {
     try {
       const txt = await fetchFiling(p, { retries: RETRIES });
-      if (txt) return { txt };
+      if (txt) { rlStreak = 0; return { txt }; }
     } catch (e) { lastErr = e; }
   }
-  return lastErr ? { error: String(lastErr.message ?? lastErr) } : { gone: true };
+  if (!lastErr) { rlStreak = 0; return { gone: true }; }
+  const msg = String(lastErr.message ?? lastErr);
+  if (/лимит SEC/.test(msg) && ++rlStreak >= RL_STREAK_MAX && !secBlocked) {
+    secBlocked = true;
+    lastError = { at: nowIso(), day, msg: `лимит SEC: ${rlStreak} подачи подряд — дальше в этом прогоне не запрашиваем` };
+    console.log(`[live] SEC режет запросы (${rlStreak} подачи подряд с 403 лимита) — остаток в добор, дальше в этом прогоне SEC не трогаем`);
+  }
+  return { error: msg };
 }
 
 // ---------- состояние покрытия и добора ----------
@@ -171,7 +184,7 @@ async function run() {
   for (const d of Object.keys(pending).sort()) {
     if (d < addDaysIso(today, -40)) { delete pending[d]; continue; }
     for (const [acc, p] of Object.entries(pending[d])) {
-      if (overBudget()) break;
+      if (overBudget() || secBlocked) break;
       const res = await download(p.paths);
       if (res.txt) {
         ingest(res.txt, acc, d); filingsDone++; picked++;
@@ -193,7 +206,7 @@ async function run() {
   if (badAcc.size) {
     let fixed = 0, failed = 0;
     for (const [acc, r] of badAcc) {
-      if (overBudget()) break;
+      if (overBudget() || secBlocked) break;
       const path = `edgar/data/${r.cik}/${acc.replace(/-/g, '')}/${acc}.txt`;
       const res = await download([path]);
       if (res.txt) { ingest(res.txt, acc, r.fdate, { replace: true }); fixed++; filingsDone++; } else failed++;
@@ -203,7 +216,7 @@ async function run() {
 
   // ---------- 3. новые дни ----------
   outer:
-  while (day <= today) {
+  while (day <= today && !secBlocked) {
     if (isWeekend(day)) { lastCompleted = day; day = addDaysIso(day, 1); continue; }
     let entries;
     try {
@@ -242,11 +255,11 @@ async function run() {
     let collected = 0, gone = 0, budgetHit = false;
     for (const f of filings) {
       const ps = paths.get(f.acc);
-      if (budgetHit || overBudget()) {
-        // Бюджет кончился посреди дня: остаток не теряется — уходит в добор следующего прогона
-        if (!budgetHit) console.log(`[live] бюджет времени исчерпан на ${day} (${filingsDone} подач) — остаток дня в добор`);
+      if (budgetHit || overBudget() || secBlocked) {
+        // Бюджет кончился или SEC режет запросы посреди дня: остаток не теряется — уходит в добор следующего прогона
+        if (!budgetHit && !secBlocked) console.log(`[live] бюджет времени исчерпан на ${day} (${filingsDone} подач) — остаток дня в добор`);
         budgetHit = true;
-        if (!prevPending[f.acc]) pend(day, f.acc, ps, 'бюджет времени', false);
+        if (!prevPending[f.acc]) pend(day, f.acc, ps, secBlocked ? 'лимит SEC' : 'бюджет времени', false);
         continue;
       }
       const res = await download(ps);
@@ -256,7 +269,7 @@ async function run() {
       } else if (res.gone) gone++;
       else { pend(day, f.acc, ps, res.error); console.log(`[live] ${day}: ${f.acc} отложена (${res.error})`); }
     }
-    coverage[day] = { indexed: filings.length, collected, ...(gone ? { gone } : {}), at: nowIso() };
+    coverage[day] = { indexed: filings.length, collected, ...(gone ? { gone } : {}), at: nowIso(), ...(secBlocked ? { error: 'лимит SEC' } : {}) };
     settle(day);
     lastCompleted = day;
     daysDone++;
@@ -284,14 +297,14 @@ async function run() {
     const rStart = Date.now();
     let d = rr.cursor, n = 0;
     // окно могло сдвинуться вперёд после загрузки квартала: дни раньше from не перечитываем
-    while (d >= from && Date.now() - rStart < REREAD_BUDGET_MS && !overBudget()) {
+    while (d >= from && Date.now() - rStart < REREAD_BUDGET_MS && !overBudget() && !secBlocked) {
       if (isWeekend(d)) { d = addDaysIso(d, -1); rr.cursor = d; continue; }
       let entries = null;
       try { ({ entries } = await fetchDayIndex(d, { retries: RETRIES })); } catch (e) { console.log(`[live] перечитывание: ${d} — ${e.message}, продолжу позже`); break; }
       if (entries) {
         const paths = new Map();
         for (const e of entries) (paths.get(e.acc) ?? paths.set(e.acc, []).get(e.acc)).push(e.path);
-        const stopNow = () => Date.now() - rStart >= REREAD_BUDGET_MS || overBudget();
+        const stopNow = () => Date.now() - rStart >= REREAD_BUDGET_MS || overBudget() || secBlocked;
         const ok = await pool(uniqueFilings(entries), REREAD_CONCURRENCY, async f => {
           const res = await download(paths.get(f.acc));
           if (res.txt) { ingest(res.txt, f.acc, d, { replace: true }); n++; }
