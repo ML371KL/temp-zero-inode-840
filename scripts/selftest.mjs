@@ -1825,7 +1825,10 @@ ok('compute (П14): listFor, builtAt, builder, coverage; день без пок�
   const m = R('morning.json');
   assert.equal(m.listFor, recentF, 'нет state/live.json с lastDay — список за день последней покупки');
   assert.match(m.builtAt, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/); assert.equal(m.builder, 'github'); assert.equal(m.coverage, null);
-  const lastDay = addDaysIso(recentF, 2);
+  // День после последней покупки, чей индекс разобран, — будний: выходной списком не считается (livecal.listDayOf),
+  // а recentF + 2 по дате запуска бывает и субботой
+  let lastDay = addDaysIso(recentF, 2);
+  while ([0, 6].includes(new Date(lastDay + 'T00:00:00Z').getUTCDay())) lastDay = addDaysIso(lastDay, 1);
   const cov = { status: 'complete', indexed: 40, collected: 40, pending: 0, at: lastDay + 'T22:10:00Z' };
   mkdirSync(join(TMP, 'state'), { recursive: true });
   const livePath = join(TMP, 'state', 'live.json');
@@ -2246,6 +2249,216 @@ await okAsync('crosscheck.mjs: пишет crossCheck в morning.json по спи
 });
 
 rmSync(NTMP, { recursive: true, force: true });
+
+// ==================== СБОР: календарь, сбои сети, добор, дедуп, разбор индекса (PR fix-collect-1) ====================
+// Ревизия данных 04.11.2026 (audit-840-data-2026-11/REVIEW-DATA.md, дефекты П1, П4, П5, П6, П7, П12).
+{
+  const { missingIndexVerdict, shouldProbeNext, nextWeekday, coverageEntry, pruneCoverage, listDayOf } = await import('./lib/livecal.mjs');
+  const { uniqueFilings, normalizeXmlDate } = await import('./lib/edgar.mjs');
+  const { readJsonGz } = await import('./lib/util.mjs');
+
+  ok('сбор/П1: праздник SEC в будний день не задерживает следующий день (07.09, 12.10, 11.11)', () => {
+    // прогон 03:25 UTC в среду после Дня труда: понедельника нет — это праздник, вторник читается сразу
+    assert.equal(missingIndexVerdict('2026-09-07', '2026-09-09'), 'holiday');
+    assert.equal(missingIndexVerdict('2026-10-12', '2026-10-14'), 'holiday');
+    // День ветеранов — среда; прогон 03:25 UTC в пятницу: четверг читается в пятницу, а не в субботу
+    assert.equal(missingIndexVerdict('2026-11-11', '2026-11-13'), 'holiday');
+    // прежнее правило (day + 2 ≥ today) здесь давало «ещё не вышел» и сдвигало день на сутки
+    assert.equal(addDaysIso('2026-09-07', 2) >= '2026-09-09', true, 'контроль: старое правило остановилось бы');
+  });
+
+  ok('сбор/П1: индекс вчерашнего дня может быть ещё не вышедшим (прогон в 00:30 UTC)', () => {
+    // 00:30 UTC 05.11 = 19:30 ET 04.11: индекс 04.11 выйдет в 22:02 ET — стоп, а не праздник
+    assert.equal(missingIndexVerdict('2026-11-04', '2026-11-05'), 'not-published');
+    assert.equal(missingIndexVerdict('2026-11-05', '2026-11-05'), 'not-published');
+    // проба следующего рабочего дня: она возможна, только если тот день не позже сегодня
+    assert.equal(shouldProbeNext('2026-11-04', '2026-11-05'), true);
+    assert.equal(shouldProbeNext('2026-11-05', '2026-11-05'), false);
+    assert.equal(nextWeekday('2026-11-06'), '2026-11-09');
+    // если индекс следующего рабочего дня уже есть, отсутствующий — праздник при любом времени запуска
+    assert.equal(missingIndexVerdict('2026-11-04', '2026-11-05', true), 'holiday');
+  });
+
+  ok('список: listFor — последний рабочий день с разобранным индексом, не выходной и не праздник', () => {
+    // субботний прогон проходит субботу: lastDay = суббота, а список — за пятницу
+    assert.equal(listDayOf({ lastDay: '2026-11-07' }), '2026-11-06');
+    assert.equal(listDayOf({ lastDay: '2026-11-08' }), '2026-11-06');
+    // праздник (День ветеранов) и «ещё не вышел» пропускаются, разобранный день — нет
+    const coverage = { '2026-11-10': { status: 'complete' }, '2026-11-11': { status: 'holiday' }, '2026-11-12': { status: 'not-published' } };
+    assert.equal(listDayOf({ lastDay: '2026-11-12', coverage }), '2026-11-10');
+    assert.equal(listDayOf({ lastDay: '2026-11-10', coverage }), '2026-11-10');
+    // частично разобранный день — тоже день списка (письмо скажет, что разобран не полностью)
+    assert.equal(listDayOf({ lastDay: '2026-11-10', coverage: { '2026-11-10': { status: 'partial' } } }), '2026-11-10');
+    assert.equal(listDayOf(null), null);
+    assert.equal(listDayOf({ lastDay: 'x' }), null);
+  });
+
+  ok('сбор/П5, П12: строка индекса с двойным пробелом в имени, дедуп по номеру подачи', () => {
+    const idx = [
+      '4                DANIELS  ROBERT P                                             1269019     20261103    edgar/data/1269019/0000821189-26-000209.txt     ',
+      '4                EOG RESOURCES INC                                             821189      20261103    edgar/data/821189/0000821189-26-000209.txt   ',
+      '4/A              MURDOCH  KEITH RUPERT                                         1024835     20261103    edgar/data/1024835/0001628280-26-055398.txt',
+      '424B2            BANK                                                          1           20261103    edgar/data/1/0000000001-26-000001.txt',
+    ].join('\r\n');
+    const e = parseFormIdx(idx);
+    assert.equal(e.length, 3);
+    assert.deepEqual(e.map(x => x.path), ['edgar/data/1269019/0000821189-26-000209.txt', 'edgar/data/821189/0000821189-26-000209.txt', 'edgar/data/1024835/0001628280-26-055398.txt']);
+    assert.deepEqual(e.map(x => x.cik), [1269019, 821189, 1024835]);
+    assert.equal(e[2].form, '4/A');
+    const u = uniqueFilings(e);
+    assert.equal(u.length, 2, 'одна подача под двумя CIK качается один раз');
+    assert.equal(u[0].acc, '0000821189-26-000209');
+  });
+
+  ok('сбор/П7: дата сделки со смещением пояса — та же календарная дата', () => {
+    assert.equal(normalizeXmlDate('2026-10-28-05:00'), '2026-10-28');
+    assert.equal(normalizeXmlDate('2026-10-28+0300'), '2026-10-28');
+    assert.equal(normalizeXmlDate('2026-10-28Z'), '2026-10-28');
+    assert.equal(normalizeXmlDate('2026-10-28'), '2026-10-28');
+    assert.equal(normalizeXmlDate('2026-06-31'), '2026-06-31', 'опечатки не чинятся — их отсекает isIsoDate');
+    const xml = FORM4_XML.replace(/<transactionDate><value>[^<]*<\/value><\/transactionDate>/, '<transactionDate><value>2026-07-27-05:00</value></transactionDate>');
+    const { trades } = parseForm4Txt(xml, '0000000000-26-000001', '2026-07-28');
+    assert.ok(trades.some(t => t.tdate === '2026-07-27'), 'транзакция с датой в поясе не выброшена: ' + trades.map(t => t.tdate).join(','));
+  });
+
+  ok('сбор: запись покрытия по счётчикам', () => {
+    assert.deepEqual(coverageEntry({ indexed: 3, collected: 3, pending: 0, at: 'X' }), { status: 'complete', indexed: 3, collected: 3, pending: 0, at: 'X' });
+    assert.equal(coverageEntry({ indexed: 3, collected: 2, pending: 1, at: 'X' }).status, 'partial');
+    assert.equal(coverageEntry({ indexed: 3, collected: 2, pending: 0, gone: 1, at: 'X' }).status, 'complete', 'снятая SEC подача не держит день неполным');
+    assert.deepEqual(Object.keys(pruneCoverage({ '2026-09-01': {}, '2026-10-20': {} }, '2026-11-04')), ['2026-10-20']);
+  });
+
+  // ---------- сквозной прогон live.mjs против подставного EDGAR ----------
+  const CTMP = join(ROOT, '.selftest-collect');
+  rmSync(CTMP, { recursive: true, force: true });
+  const accN = n => `0000000009-26-${String(n).padStart(6, '0')}`;
+  const pathOf = (cik, acc) => `edgar/data/${cik}/${acc.replace(/-/g, '')}/${acc}.txt`;
+  const form4 = (acc, { cik = 555000, sym = 'TSTA', date = '2026-09-04', sh = 1000, px = 20, owner = 'Doe John' } = {}) =>
+    `<SEC-DOCUMENT>${acc}.txt\n<ACCEPTANCE-DATETIME>20260908171500\n<XML>\n<ownershipDocument><documentType>4</documentType>` +
+    `<issuer><issuerCik>${cik}</issuerCik><issuerTradingSymbol>${sym}</issuerTradingSymbol></issuer><aff10b5One>0</aff10b5One>` +
+    `<reportingOwner><reportingOwnerId><rptOwnerCik>777</rptOwnerCik><rptOwnerName>${owner}</rptOwnerName></reportingOwnerId>` +
+    `<reportingOwnerRelationship><isOfficer>1</isOfficer><officerTitle>CFO</officerTitle></reportingOwnerRelationship></reportingOwner>` +
+    `<nonDerivativeTable><nonDerivativeTransaction><securityTitle><value>Common Stock</value></securityTitle>` +
+    `<transactionDate><value>${date}</value></transactionDate><transactionCoding><transactionCode>P</transactionCode><equitySwapInvolved>0</equitySwapInvolved></transactionCoding>` +
+    `<transactionAmounts><transactionShares><value>${sh}</value></transactionShares><transactionPricePerShare><value>${px}</value></transactionPricePerShare>` +
+    `<transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode></transactionAmounts>` +
+    `<postTransactionAmounts><sharesOwnedFollowingTransaction><value>${sh * 10}</value></sharesOwnedFollowingTransaction></postTransactionAmounts>` +
+    `<ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature></nonDerivativeTransaction></nonDerivativeTable>` +
+    `</ownershipDocument>\n</XML>\n</SEC-DOCUMENT>`;
+  const idxLine = (name, cik, day, path) => `4                ${name.padEnd(62)}${String(cik).padEnd(12)}${day.replace(/-/g, '')}    ${path}`;
+  const S3_MISSING = '<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>';
+  const RATE_HTML = '<html><body><h1>Your Request Originates from an Undeclared Automated Tool</h1>Request Rate Threshold Exceeded</body></html>';
+
+  // Сценарий: 04.09 (пт) уже собран; 07.09 — День труда; 08.09 — четыре подачи; 09.09 — одна; 10.09 — индекс отвечает 503.
+  const A = accN(1), B = accN(2), C = accN(3), D = accN(4), E = accN(5), OLD = accN(9);
+  const files = {
+    [pathOf(1269019, A)]: { body: form4(A, { sym: 'AAA' }) }, [pathOf(555000, A)]: { body: form4(A, { sym: 'AAA' }) },
+    [pathOf(555000, B)]: { body: form4(B, { sym: 'BBB' }), fail: ['ratelimit'] },
+    [pathOf(555000, C)]: { body: form4(C, { sym: 'CCC' }), fail: ['503', '503', '503', '503', '503', '503'] },
+    [pathOf(555000, D)]: { body: form4(D, { sym: 'DDD', date: '2026-09-04-05:00' }) },
+    [pathOf(555000, E)]: { body: form4(E, { sym: 'EEE', date: '2026-09-08' }) },
+    [pathOf(555000, OLD)]: { body: form4(OLD, { sym: 'OLD', date: '2026-09-03-05:00' }) },
+  };
+  const index = {
+    '2026-09-07': 'missing',
+    '2026-09-08': ['Form Type   Company Name   CIK   Date Filed   File Name', '-'.repeat(80),
+      idxLine('DOE  JOHN', 1269019, '2026-09-08', pathOf(1269019, A)), idxLine('TEST ISSUER A', 555000, '2026-09-08', pathOf(555000, A)),
+      idxLine('TEST ISSUER B', 555000, '2026-09-08', pathOf(555000, B)), idxLine('TEST ISSUER C', 555000, '2026-09-08', pathOf(555000, C)),
+      idxLine('TEST ISSUER D', 555000, '2026-09-08', pathOf(555000, D))].join('\n'),
+    '2026-09-09': 'missing',
+    '2026-09-10': '503',
+  };
+  const hits = [];
+  const server = createServer((req, res) => {
+    const url = decodeURIComponent(req.url);
+    hits.push(url);
+    const im = /daily-index\/\d{4}\/QTR\d\/form\.(\d{4})(\d{2})(\d{2})\.idx$/.exec(url);
+    if (im) {
+      const v = index[`${im[1]}-${im[2]}-${im[3]}`] ?? 'missing';
+      if (v === 'missing') { res.writeHead(403, { 'content-type': 'application/xml' }); res.end(S3_MISSING); return; }
+      if (v === '503') { res.writeHead(503); res.end('busy'); return; }
+      res.writeHead(200, { 'content-type': 'text/plain' }); res.end(v); return;
+    }
+    const f = files[url.replace(/^\/Archives\//, '')];
+    if (!f) { res.writeHead(404); res.end(); return; }
+    const step = f.fail?.shift();
+    if (step === 'ratelimit') { res.writeHead(403, { 'content-type': 'text/html' }); res.end(RATE_HTML); return; }
+    if (step === '503') { res.writeHead(503); res.end('busy'); return; }
+    res.writeHead(200, { 'content-type': 'text/plain' }); res.end(f.body);
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const runLive = todayIso => new Promise(resolve => execFile(process.execPath,
+    [join(ROOT, 'scripts', 'live.mjs'), '--data', CTMP, '--today', todayIso, '--retries', '1', '--time-budget-min', '5', '--reread-budget-min', '1'],
+    { encoding: 'utf8', env: { ...process.env, EDGAR_BASE: base, POLITE_BACKOFF_MS: '5' } },
+    (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: stdout + stderr })));
+  const liveState = () => JSON.parse(readFileSync(join(CTMP, 'state', 'live.json'), 'utf8'));
+  const liveRows = () => readJsonGz(join(CTMP, 'trades', 'live.json.gz')).trades;
+  try {
+    mkdirSync(join(CTMP, 'state'), { recursive: true });
+    writeJson(join(CTMP, 'state', 'live.json'), { schema: SHARD_VERSION, from: '2026-09-01', lastDay: '2026-09-04', staleFloor: 1 });
+    // строка старого парсера: дата сделки в поясе, без ownD — её должна починить сама сборка
+    writeJsonGz(join(CTMP, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [
+      { acc: OLD, form: '4', fdate: '2026-09-04', tdate: '2026-09-03-05:00', cik: 555000, t: 'OLD', owners: [{ cik: 777, name: 'Doe John', rel: 'OF', title: 'CFO' }], code: 'P', sh: 1000, px: 20, val: 20000, own: 10000, di: 'D', b5: 0, orig: null, sec: 'Common Stock', fn: {} },
+    ] });
+
+    await okAsync('сбор/П1, П4, П6, П12: прогон в среду 03:25 UTC после Дня труда', async () => {
+      const r = await runLive('2026-09-09');
+      assert.equal(r.code, 0, r.out);
+      const s = liveState();
+      assert.equal(s.coverage['2026-09-07'].status, 'holiday', 'понедельник — праздник, а не «ещё не вышел»');
+      const c8 = s.coverage['2026-09-08'];
+      assert.equal(c8.status, 'partial', JSON.stringify(c8));
+      assert.equal(c8.indexed, 4, 'подачи считаются по номерам, не по строкам индекса');
+      assert.equal(c8.collected, 3);
+      assert.equal(c8.pending, 1);
+      assert.deepEqual(Object.keys(s.pending['2026-09-08']), [C], 'подача с 503 ждёт добора, а не теряется');
+      assert.equal(s.coverage['2026-09-09'].status, 'not-published');
+      assert.equal(s.lastDay, '2026-09-08', 'вторник пройден в среду, а не в четверг');
+      const rows = liveRows();
+      assert.deepEqual(rows.filter(x => x.code === 'P').map(x => x.t).sort(), ['AAA', 'BBB', 'DDD', 'OLD']);
+      assert.equal(rows.find(x => x.t === 'DDD').tdate, '2026-09-04', 'дата с поясом нормализована');
+      const old = rows.filter(x => x.t === 'OLD');
+      assert.equal(old.length, 1, 'старая строка замещена, а не продублирована');
+      assert.equal(old[0].tdate, '2026-09-03');
+      assert.ok('ownD' in old[0], 'строка разобрана новым парсером');
+      assert.equal(hits.filter(h => h.endsWith(A + '.txt')).length, 1, 'подача под двумя CIK скачана один раз');
+      assert.equal(hits.filter(h => h.endsWith(B + '.txt')).length, 2, 'лимит SEC (403 с HTML) переждан и повторён');
+    });
+
+    await okAsync('сбор/П4, П6: 503 на индексе не роняет прогон; добор отложенной подачи', async () => {
+      index['2026-09-09'] = ['x', idxLine('TEST ISSUER E', 555000, '2026-09-09', pathOf(555000, E))].join('\n');
+      const r = await runLive('2026-09-10');
+      assert.equal(r.code, 0, r.out);
+      const s = liveState();
+      // C ещё отвечает 503 (два повтора за прогон съели две неудачи из шести)
+      assert.equal(s.coverage['2026-09-08'].status, 'partial');
+      assert.equal(s.pending['2026-09-08'][C].tries, 2, 'счётчик попыток растёт');
+      assert.equal(s.coverage['2026-09-09'].status, 'complete');
+      assert.equal(s.coverage['2026-09-10'].status, 'not-published', 'индекс текущего дня ответил 503 — «ещё нет», стоп');
+      assert.match(s.coverage['2026-09-10'].error, /503/);
+      assert.equal(s.lastDay, '2026-09-09');
+      assert.ok(liveRows().some(x => x.t === 'EEE'));
+    });
+
+    await okAsync('сбор/П6: отложенная подача добирается, день становится полным', async () => {
+      files[pathOf(555000, C)].fail = [];
+      index['2026-09-10'] = ['x'].join('\n');
+      const r = await runLive('2026-09-11');
+      assert.equal(r.code, 0, r.out);
+      const s = liveState();
+      assert.deepEqual(s.coverage['2026-09-08'], { ...s.coverage['2026-09-08'], status: 'complete', indexed: 4, collected: 4, pending: 0 });
+      assert.equal(s.pending, undefined, 'очередь добора пуста');
+      assert.equal(s.coverage['2026-09-10'].status, 'complete');
+      assert.equal(s.coverage['2026-09-10'].indexed, 0);
+      assert.ok(liveRows().some(x => x.t === 'CCC'));
+      assert.equal(s.staleFloor, undefined, 'строк старой схемы не осталось — пол опустился до нуля');
+    });
+  } finally {
+    await new Promise(r => server.close(r));
+    rmSync(CTMP, { recursive: true, force: true });
+  }
+}
 
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);

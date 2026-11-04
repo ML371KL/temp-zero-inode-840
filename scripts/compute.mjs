@@ -25,6 +25,7 @@ import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './
 import { readOpens, opensOf, nextTradingDay } from './lib/opens.mjs';
 import { MORNING, BREADTH, buildDayFull, tradeResult, summarize, breadth } from './lib/morning.mjs';
 import { readPaperJournal, buildPaper } from './lib/paper.mjs';
+import { listDayOf } from './lib/livecal.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 
@@ -470,11 +471,12 @@ for (const r of buys) {
   });
 }
 const allFdates = [...new Set(buys.map(r => r.fdate))].sort();
-// Для какой даты подачи собран список: последний день, чей индекс EDGAR разобран (state/live.json), а не последний день
-// с покупками — иначе день без покупок выглядел бы для сторожа «списком, который не вышел». Покрытие дня
-// (indexed/collected/status) кладёт в live.json сборщик подач; пока поля нет — null.
+// Для какой даты подачи собран список: последний рабочий день, чей индекс EDGAR разобран (state/live.json), а не последний
+// день с покупками — иначе день без покупок выглядел бы для сторожа «списком, который не вышел». Выходные и праздники
+// списком не считаются (lastDay встаёт и на них — lib/livecal.mjs, listDayOf). Покрытие дня (indexed/collected/status)
+// кладёт в live.json сборщик подач; нет записи — null.
 const liveSt = readJson(join(DATA, 'state', 'live.json'), null);
-const listFor = [liveSt?.lastDay, allFdates.at(-1)].filter(isIsoDate).sort().at(-1) ?? null;
+const listFor = [listDayOf(liveSt), allFdates.at(-1)].filter(isIsoDate).sort().at(-1) ?? null;
 const coverage = (listFor && liveSt?.coverage?.[listFor]) || null;
 const dayDates = [...new Set([...allFdates, ...(listFor ? [listFor] : [])])].sort();
 // День D+1 состоялся и закрыт, только если он раньше сегодняшнего: сборка в середине сессии
@@ -977,7 +979,7 @@ W('meta.json', {
   backtest: { rows: backtestRows.length, years },
   feed: { rows: feedRows.length, days: FEED_DAYS },
   set: { rows: backtestRows.filter(r => r.set === 1).length, live: feedRows.filter(r => r.set === 1).length },
-  quartersDone: backfillState.done ?? [], liveLastDay: liveState.lastDay ?? null,
+  quartersDone: backfillState.done ?? [], liveLastDay: liveState.lastDay ?? null, liveCoverage: liveState.coverage ?? null,
   pricesUpdated: priceState.updated ?? null, pricesMissing: Object.keys(priceState.missing ?? {}).length,
   spyLast: spy[spy.length - 1][0], iwm: !!iwm?.length,
 });
