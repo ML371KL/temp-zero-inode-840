@@ -282,8 +282,14 @@ export async function fetchYahooDaily(ticker, fromIso) {
   const url = `https://${host}/v8/finance/chart/${encodeURIComponent(yahooSymbol(ticker))}?period1=${p1}&period2=${p2}&interval=1d&events=div%2Csplits`;
   const { status, body } = await politeFetch(url, { ua: BROWSER_UA, as: 'text', retries: 3 });
   if (status === 404 || status === 403 || !body) return { missing: true };
-  let j;
-  try { j = JSON.parse(body); } catch { return { missing: true }; }
+  return parseYahooChart(body);
+}
+
+// Разбор ответа Yahoo chart (текст JSON или уже разобранный объект) -> { series, splits, ohlc, ... } | { missing: true }.
+// Отдельно от запроса: сборка утреннего списка на VPS получает тот же ответ через воркер (Yahoo с адреса VPS не трогаем).
+export function parseYahooChart(body) {
+  let j = body;
+  if (typeof body === 'string') { try { j = JSON.parse(body); } catch { return { missing: true }; } }
   const r = j?.chart?.result?.[0];
   if (!r || !r.timestamp?.length) return { missing: true };
   // Ряд чужого инструмента хуже отсутствия ряда: он выглядит правдоподобно и молча

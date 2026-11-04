@@ -230,9 +230,23 @@ const MONTH_NOM = ['январь', 'февраль', 'март', 'апрель',
 const monthRu = ym => { const [y, m] = String(ym).split('-'); return `${MONTH_NOM[Number(m) - 1] ?? ym} ${y}`; };
 
 let mView = 'main', mDay = null;       // main — основной список (скор ≥2), all — все от $10 млн
+// Список берётся из двух мест: страница (ежедневная сборка на GitHub) и воркер (сборка на VPS сразу после индекса EDGAR, на часы раньше).
+// Показывается свежее: по дате подачи listFor, при равенстве — по времени сборки builtAt (полный пересчёт GitHub позже VPS и побеждает).
+// Любой из двух может не ответить: тогда вторая; старые файлы без listFor уступают.
+async function fetchMorning() {
+  const fromWorker = async () => {
+    const res = await fetch(QUOTES_BASE + '/morning', { cache: 'no-store' });
+    if (!res.ok) throw new Error('worker /morning: HTTP ' + res.status);
+    return res.json();
+  };
+  const got = (await Promise.allSettled([fetchJson('morning.json'), fromWorker()]))
+    .filter(r => r.status === 'fulfilled' && Array.isArray(r.value?.days)).map(r => r.value);
+  if (!got.length) throw new Error('morning: ни страница, ни воркер не ответили');
+  return got.sort((a, b) => (b.listFor ?? '').localeCompare(a.listFor ?? '') || (b.builtAt ?? '').localeCompare(a.builtAt ?? ''))[0];
+}
 async function loadMorning() {
   if (!state.morning) {
-    try { state.morning = await fetchJson('morning.json'); }
+    try { state.morning = await fetchMorning(); }
     catch { $('#m-table').innerHTML = '<tr><td class="empty">Данные ещё не собраны.</td></tr>'; return; }
   }
   if (!state.stats) { try { state.stats = await fetchJson('stats.json'); } catch { /* плашка всплеска появится позже */ } }
@@ -270,7 +284,8 @@ const sgnMoney = v => {
 // воркер на краю Cloudflare (worker/index.js): он держит ответ 30 секунд в кэше края, так что
 // опрос отсюда не может разогнать обращения к источнику. Слой необязательный: если воркер молчит,
 // экран тихо остаётся на снимке и работает целиком.
-const QUOTES_URL = 'https://radar840-quotes.financehub.workers.dev/quotes';
+const QUOTES_BASE = 'https://radar840-quotes.financehub.workers.dev';
+const QUOTES_URL = QUOTES_BASE + '/quotes';
 const LIVE_PERIOD_MS = 30000;
 const ySym = t => String(t).replace(/[./]/g, '-');   // BRK.B -> BRK-B, как в сборке
 let liveTimer = null;

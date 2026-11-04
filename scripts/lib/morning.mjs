@@ -226,3 +226,17 @@ export function breadth(counts, { partialFrom = null, p = BREADTH } = {}) {
     })),
   };
 }
+
+// Сверка основных списков двух сборок одного дня (VPS и полный пересчёт на GitHub): состав и скор. a — «было» (VPS), b — «стало» (GitHub).
+// Бумаги вне основного списка (скор 0–1) не сравниваются: на письмо они не влияют. diff — по убыванию скора; was/now — скор или null (нет в списке).
+export function compareMain(a, b) {
+  const ma = new Map((a ?? []).filter(x => x.main).map(x => [x.t, x])), mb = new Map((b ?? []).filter(x => x.main).map(x => [x.t, x]));
+  const diff = [];
+  for (const [t, x] of mb) {
+    const y = ma.get(t);
+    if (!y || y.score !== x.score) diff.push({ t, name: x.name, was: y ? y.score : null, now: x.score, val: x.val });
+  }
+  for (const [t, y] of ma) if (!mb.has(t)) diff.push({ t, name: y.name, was: y.score, now: null, val: y.val });
+  diff.sort((p, q) => (q.now ?? q.was) - (p.now ?? p.was) || q.val - p.val || (p.t < q.t ? -1 : 1));
+  return { same: diff.length === 0, diff, vps: ma.size, github: mb.size };
+}

@@ -1,0 +1,13 @@
+[Unit]
+Description=Инсайдерский радар 840 · утренний список на VPS: старт в 22:03 по Нью-Йорку, будни
+
+[Timer]
+Unit=insider840-morning.service
+# Индекс EDGAR за день выходит в 22:01–22:04 ET. Время нью-йоркское (с переходом на зимнее и летнее): окно привязано к нему, а не к UTC.
+# Федеральные праздники, когда SEC закрыта и индекса нет, скрипт знает сам (scripts/lib/calendar.mjs) и завершается без тревоги.
+OnCalendar=Mon..Fri *-*-* 22:03:00 America/New_York
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
