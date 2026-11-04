@@ -50,7 +50,7 @@ jobs:
         run: npm test
 
       - name: Квартальные датасеты SEC
-        run: node scripts/backfill.mjs
+        run: node scripts/backfill.mjs --time-budget-min 120
 
       - name: Живой хвост (после последнего датасета)
         run: node scripts/live.mjs --time-budget-min 110
@@ -79,9 +79,11 @@ jobs:
             const j = p => existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : {};
             const prices = j('data/prices/_state.json');
             const live = j('data/state/live.json');
+            const bf = j('data/state/backfill.json');
             const yest = new Date(Date.now() - 36e5 * 96).toISOString().slice(0, 10); // 4 суток: выходные + праздник
             const liveOk = live.lastDay && live.lastDay >= yest;
-            console.log((prices.backfillDone && liveOk) ? 'yes' : 'no');
+            // Перечитывание кварталов, прерванное бюджетом, держит rebuildFrom: завершённым бэкфил не считается
+            console.log((prices.backfillDone && liveOk && !bf.rebuildFrom) ? 'yes' : 'no');
           " | tail -1)
           echo "Итерация $ITER, завершено: $DONE"
           if [ "$DONE" = "yes" ]; then
