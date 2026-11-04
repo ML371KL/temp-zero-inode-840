@@ -26,7 +26,7 @@ import { readJson, writeJson, readJsonGz, writeJsonGz, addDaysIso, SEC_UA } from
 import { fetchDayIndex, uniqueFilings, edgarBase, SHARD_VERSION } from '../lib/edgar.mjs';
 import { FEED, loadFeed, reconcile, mergeFeedRows } from '../lib/feed.mjs';
 import { nyWall, nyToMs } from '../lib/evening.mjs';
-import { isSecClosed } from '../lib/calendar.mjs';
+import { isSecClosed, isMarketClosed } from '../lib/calendar.mjs';
 import { fetchBars, applyBars, barsFrom } from '../lib/bars.mjs';
 import { OPENS_BENCH, readOpens, opensOf } from '../lib/opens.mjs';
 import { readPriceCache } from '../lib/prices.mjs';
@@ -61,6 +61,13 @@ function run(cmd, args, { cwd, env, label }) {
     p.on('error', e => { log(`${label}: не запустился — ${e.message}`); resolveP(127); });
     p.on('close', code => resolveP(code ?? 1));
   });
+}
+// День D0 списка = день подачи, если биржа в этот день торговала. Календарь D0 берётся по SPY, а у ветки data в 22:03 ET ряды только до D−1: пока бар D у SPY не
+// догружен, цена ≥$5 и оборот считались бы на день раньше, чем в проверке стратегии. Биржа не торговала (Страстная пятница) — D0 законно раньше D.
+export function d0Verdict(plan, day, lastChance = false) {
+  if (plan?.d0 === day || isMarketClosed(day)) return { ok: true };
+  const why = `бар D0 списка — ${plan?.d0 ?? 'нет'}, а день подачи ${day}: бары SPY не догружены, цена и оборот считались бы на день раньше`;
+  return lastChance ? { ok: true, warn: why } : { ok: false, why };
 }
 const node = (script, args, o) => run(process.execPath, ['--max-old-space-size=3072', join(CODE, script), ...args], { cwd: CODE, label: script, ...o });
 
@@ -227,6 +234,11 @@ export async function attempt(opts, day, ctx) {
     for (let pass = 1; pass <= 2; pass++) {
       if (await node('scripts/compute.mjs', [...common, '--plan', planFile], { env })) return fail('compute (план докачки) завершился с ошибкой');
       const plan = readJson(planFile, { bars: {}, opens: {} });
+      if (pass === 1) {
+        const v = d0Verdict(plan, day, ctx.lastChance);
+        if (!v.ok) return fail(v.why);
+        if (v.warn) log('ВНИМАНИЕ (последняя попытка, идём как есть):', v.warn);
+      }
       const names = [...new Set([...Object.keys(plan.bars), ...Object.keys(plan.opens)])];
       const items = names.map(sym => ({ sym, from: barsFrom(plan.bars[sym] ? plan.bars[sym].last : lastBar(opts.data, sym), day, plan.opens[sym] ?? []) }));
       if (items.length) {
