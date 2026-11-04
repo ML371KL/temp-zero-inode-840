@@ -15,8 +15,8 @@ import {
   parseYahooChart, readPriceCache,
 } from './lib/prices.mjs';
 import { barsFrom, fetchBars, applyBars } from './lib/bars.mjs';
-import { isSecClosed } from './lib/calendar.mjs';
-import { main as morningMain, liveVerdict, reconcileStage } from './vps/morning-build.mjs';
+import { isSecClosed, isMarketClosed } from './lib/calendar.mjs';
+import { main as morningMain, liveVerdict, reconcileStage, d0Verdict } from './vps/morning-build.mjs';
 import { parseFeedJournal, loadFeed, pruneFeed, feedFile, reconcile, mergeFeedRows } from './lib/feed.mjs';
 import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf, compareMain } from './lib/morning.mjs';
 import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
@@ -1930,6 +1930,21 @@ ok('сборка на VPS: вердикт по живому контуру — �
   assert.equal(part.ok, false); assert.match(part.why, /90 из 100.*добора 10/);
   assert.deepEqual(liveVerdict({ lastDay: D, coverage: cov('partial') }, D, 0, true), { ok: true, partial: true });
   assert.deepEqual(liveVerdict({ lastDay: D }, D, 0), { ok: true, partial: false }, 'старое состояние без coverage — достаточно lastDay');
+});
+ok('календарь биржи: Страстная пятница закрыта (SEC работает), День Колумба и ветеранов открыты; Новый год в субботу не переносится', () => {
+  for (const d of ['2026-04-03', '2027-03-26', '2026-11-26', '2026-07-03', '2026-12-25', '2026-01-19', '2026-06-19', '2023-01-02', '2026-11-07'])
+    assert.equal(isMarketClosed(d), true, d);
+  for (const d of ['2026-11-11', '2026-10-12', '2026-11-04', '2021-12-31', '2026-04-02', '2026-04-06'])
+    assert.equal(isMarketClosed(d), false, d);
+  assert.equal(isSecClosed('2026-04-03'), false, 'SEC в Страстную пятницу работает');
+});
+ok('сборка на VPS: D0 списка обязан быть днём подачи, если биржа торговала; без бара SPY за D — повтор, на последней попытке идём с предупреждением', () => {
+  assert.deepEqual(d0Verdict({ d0: '2026-11-04' }, '2026-11-04'), { ok: true });
+  const bad = d0Verdict({ d0: '2026-11-03' }, '2026-11-04');
+  assert.equal(bad.ok, false); assert.match(bad.why, /D0 списка — 2026-11-03, а день подачи 2026-11-04/);
+  assert.equal(d0Verdict({ d0: null }, '2026-11-04').ok, false, 'календаря SPY нет совсем');
+  assert.equal(d0Verdict({ d0: '2026-11-03' }, '2026-11-04', true).ok, true); assert.match(d0Verdict({ d0: '2026-11-03' }, '2026-11-04', true).warn, /не догружены/);
+  assert.deepEqual(d0Verdict({ d0: '2026-04-02' }, '2026-04-03'), { ok: true }, 'биржа не торговала (Страстная пятница): D0 — четверг');
 });
 ok('сверка списков: состав и скор основного списка, остальные бумаги не сравниваются', () => {
   const r = (t, score, extra = {}) => ({ t, name: t + ' Inc', score, main: score >= 2, val: 1e5, ...extra });

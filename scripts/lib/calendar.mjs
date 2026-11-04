@@ -38,3 +38,26 @@ export function isSecClosed(day) {
   if (w === 0 || w === 6) return true;
   return secHolidays(Number(day.slice(0, 4))).has(day);
 }
+
+// Биржа (NYSE) закрыта: выходные и биржевые праздники. От календаря SEC отличается: Страстная пятница — биржа закрыта, а SEC работает и индекс выходит;
+// День Колумба и День ветеранов — биржа открыта, SEC закрыта. Нужна сборке на VPS, чтобы отличить «нет бара D0, потому что биржа не торговала» от «бары не догружены».
+function easter(y) {   // григорианская Пасха (алгоритм Meeus/Jones/Butcher)
+  const a = y % 19, b = Math.floor(y / 100), c = y % 100, d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25), g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30, i = Math.floor(c / 4), k = c % 4, l = (32 + 2 * e + 2 * i - h - k) % 7, m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31), day = ((h + l - 7 * m + 114) % 31) + 1;
+  return iso(y, month, day);
+}
+export function nyseHolidays(year) {
+  const set = new Set([
+    ...[[6, 19], [7, 4], [12, 25]].map(([m, d]) => observed(iso(year, m, d))),
+    nth(year, 1, 1, 3), nth(year, 2, 1, 3), nth(year, 5, 1, -1), nth(year, 9, 1, 1), nth(year, 11, 4, 4),
+    addDaysIso(easter(year), -2),                       // Страстная пятница
+  ]);
+  const ny = iso(year, 1, 1);                           // Новый год: на субботу не переносится (в пятницу 31 декабря биржа открыта), с воскресенья — на понедельник
+  if (dow(ny) !== 6) set.add(dow(ny) === 0 ? addDaysIso(ny, 1) : ny);
+  return set;
+}
+export function isMarketClosed(day) {
+  const w = dow(day);
+  return w === 0 || w === 6 || nyseHolidays(Number(day.slice(0, 4))).has(day);
+}
