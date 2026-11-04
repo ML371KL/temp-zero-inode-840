@@ -1607,6 +1607,50 @@ await okAsync('воркер котировок: открытие дня идёт
     assert.equal(b2.quotes.AAA.p, 10.5);
   } finally { globalThis.caches = realCaches; globalThis.fetch = realFetch; }
 });
+await okAsync('воркер: журнал вечерней схемы в R2 — приём по токену, чтение без него, защита от порчи', async () => {
+  const worker = (await import(pathToFileURL(join(ROOT, 'worker', 'index.js')).href)).default;
+  const objs = new Map();
+  const R2 = {
+    put: async (k, body, o) => { objs.set(k, { body, size: body.length, uploaded: new Date('2026-11-05T01:00:00Z'), customMetadata: o?.customMetadata ?? {} }); },
+    head: async k => objs.get(k) ?? null,
+    get: async k => objs.get(k) ?? null,
+    list: async ({ prefix }) => ({ objects: [...objs.entries()].filter(([k]) => k.startsWith(prefix)).map(([key, o]) => ({ key, size: o.size, uploaded: o.uploaded })) }),
+  };
+  const ENV = { PAPER: R2, PAPER_TOKEN: 'sekret' };
+  const call = (method, path, { body, token, env = ENV } = {}) => worker.fetch(
+    new Request('https://w.example' + path, { method, body, headers: token ? { Authorization: 'Bearer ' + token } : {} }), env, { waitUntil() {} });
+  const two = JSON.stringify({ k: 'run' }) + '\n' + JSON.stringify({ k: 'event', id: 'A' }) + '\n';
+  const F = '/paper/log/2026-11-04.jsonl';
+  // приём: только с верным токеном
+  assert.equal((await call('PUT', F, { body: two })).status, 401, 'без токена');
+  assert.equal((await call('PUT', F, { body: two, token: 'wrong' })).status, 401, 'чужой токен');
+  assert.equal(objs.size, 0, 'ничего не записано');
+  const ok = await call('PUT', F, { body: two, token: 'sekret' });
+  assert.equal(ok.status, 200); assert.deepEqual(await ok.json(), { ok: true, key: 'log/2026-11-04.jsonl', lines: 2, bytes: two.length });
+  // чтение — без токена
+  const rd = await call('GET', F);
+  assert.equal(rd.status, 200); assert.equal(await rd.text(), two); assert.match(rd.headers.get('content-type'), /ndjson/); assert.equal(rd.headers.get('cache-control'), 'no-store');
+  const ix = await (await call('GET', '/paper/index')).json();
+  assert.deepEqual(ix.files.map(f => f.name), ['2026-11-04.jsonl']); assert.equal(ix.files[0].size, two.length);
+  assert.equal((await call('GET', '/paper/log/2026-01-01.jsonl')).status, 404);
+  // токен проверяется без записи
+  assert.equal((await call('GET', '/paper/ping')).status, 401); assert.equal((await call('GET', '/paper/ping', { token: 'sekret' })).status, 200);
+  // защита от порчи: мусор, чужой вид записи, имя файла, усечённый журнал, переразмер
+  assert.equal((await call('PUT', F, { body: two + 'не json\n', token: 'sekret' })).status, 400);
+  assert.equal((await call('PUT', F, { body: JSON.stringify({ k: 'drop table' }) + '\n', token: 'sekret' })).status, 400);
+  assert.equal((await call('PUT', '/paper/log/x.jsonl', { body: two, token: 'sekret' })).status, 404);
+  const shrunk = await call('PUT', F, { body: JSON.stringify({ k: 'run' }) + '\n', token: 'sekret' });
+  assert.equal(shrunk.status, 409, 'журнал только растёт'); assert.equal((await shrunk.json()).stored, 2);
+  assert.equal((await call('PUT', F, { body: two + JSON.stringify({ k: 'stat' }) + '\n', token: 'sekret' })).status, 200, 'длиннее — принимается');
+  assert.equal((await call('PUT', F, { body: 'x'.repeat(2 * 1024 * 1024 + 1), token: 'sekret' })).status, 413);
+  // приём закрыт, если не настроен, и не открыт всем
+  assert.equal((await call('PUT', F, { body: two, token: 'sekret', env: { PAPER: R2 } })).status, 503, 'нет секрета — приём закрыт');
+  assert.equal((await call('PUT', F, { body: two, token: 'sekret', env: { PAPER_TOKEN: 'sekret' } })).status, 503, 'нет бакета');
+  assert.equal((await call('GET', '/paper/index', { env: {} })).status, 503);
+  // котировки по-прежнему только GET
+  assert.equal((await call('PUT', '/quotes?symbols=AAA', { body: '' })).status, 405);
+});
+
 // ---------- вечерний сборщик: сквозной прогон против подставных SEC и воркера ----------
 await okAsync('сборщик: форма в вечернем окне -> событие и котировки по бумаге и IWM; повторный запуск ничего не дублирует', async () => {
   const day = '2026-10-01';
@@ -1616,12 +1660,17 @@ await okAsync('сборщик: форма в вечернем окне -> соб
 <entry><title>4 - Early (0002) (Reporting)</title><link href="https://www.sec.gov/Archives/edgar/data/333/000100000026000002/0001000000-26-000002-index.htm"/><updated>${day}T10:00:00-04:00</updated><category term="4"/><id>urn:tag:sec.gov,2008:accession-number=0001000000-26-000002</id></entry>
 <entry><title>424B2 - Bank</title><link href="https://www.sec.gov/Archives/edgar/data/444/000100000026000003/0001000000-26-000003-index.htm"/><updated>${day}T17:25:00-04:00</updated><category term="424B2"/><id>urn:tag:sec.gov,2008:accession-number=0001000000-26-000003</id></entry>
 </feed>`;
-  const hits = { feed: 0, filings: [], quotes: [] };
+  const hits = { feed: 0, filings: [], quotes: [], puts: [], failPut: false };
   const server = createServer((req, res) => {
     if (req.url.startsWith('/cgi-bin/browse-edgar')) { hits.feed++; res.writeHead(200, { 'content-type': 'application/atom+xml' }); res.end(atom); }
     else if (req.url.startsWith('/Archives/edgar/data/')) {
       hits.filings.push(req.url);
       res.writeHead(200); res.end(form('0001000000-26-000001'));
+    } else if (req.method === 'PUT' && req.url.startsWith('/paper/log/')) {
+      let raw = '';
+      req.on('data', c => { raw += c; });
+      req.on('end', () => { hits.puts.push({ url: req.url, auth: req.headers.authorization, body: raw }); res.writeHead(hits.failPut ? 500 : 200, { 'content-type': 'application/json' }); res.end(hits.failPut ? '{"error":"сбой"}' : '{"ok":true}'); });
+      return;
     } else if (req.url.startsWith('/quotes')) {
       hits.quotes.push(req.url);
       const q = { TST: { p: 9.9, t: 1, st: 'POST', b: 9.5, a: 9.6, bs: 200, as: 100, pp: 9.55, pt: 1793830000 }, IWM: { p: 200, t: 1, st: 'POST', b: 0, a: 0, pp: 200.5, pt: 1793830000 } };
@@ -1636,7 +1685,7 @@ await okAsync('сборщик: форма в вечернем окне -> соб
   const dir = join(NTMP, 'paper-run');
   const run = () => new Promise(resolve => execFile(process.execPath,
     ['--import', pathToFileURL(preload).href, join(ROOT, 'scripts', 'evening', 'collector.mjs'), '--dir', dir, '--once'],
-    { encoding: 'utf8', env: { ...process.env, FAKE_SEC_BASE: base, QUOTES_URL: base + '/quotes' } },
+    { encoding: 'utf8', env: { ...process.env, FAKE_SEC_BASE: base, QUOTES_URL: base + '/quotes', PAPER_URL: base, PAPER_TOKEN: 'tok' } },
     (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: stdout + stderr })));
   try {
     const r1 = await run();
@@ -1664,6 +1713,18 @@ await okAsync('сборщик: форма в вечернем окне -> соб
     const after = parseJournal(readFileSync(join(dir, 'log', files[0]), 'utf8'));
     assert.equal(after.events.size, 1); assert.equal([...after.quotes.values()].flat().length, 8, 'после перезапуска котировки не дублируются');
     assert.equal(readFileSync(join(dir, 'log', files[0]), 'utf8').split('\n').filter(Boolean).length, before + 2, 'добавились только служебные строки: запуск и статистика');
+    // отправка журнала в воркер: целиком, с токеном, на путь с датой файла; на каждый запуск (файл вырос) — одна отправка
+    assert.equal(hits.puts.length, 2);
+    assert.equal(hits.puts[0].url, '/paper/log/' + files[0]); assert.equal(hits.puts[0].auth, 'Bearer tok');
+    assert.equal(hits.puts[1].body, readFileSync(join(dir, 'log', files[0]), 'utf8'), 'уходит весь журнал, а не только прирост');
+    // сбой воркера: код выхода ненулевой (тревога), журнал остаётся на диске и уйдёт при следующей отправке
+    hits.failPut = true;
+    const r3 = await run();
+    assert.notEqual(r3.code, 0); assert.match(r3.out, /HTTP 500/);
+    hits.failPut = false;
+    const n3 = hits.puts.length;
+    const r4 = await run();
+    assert.equal(r4.code, 0, r4.out); assert.equal(hits.puts.length, n3 + 1, 'недоставленное ушло при следующем запуске');
   } finally { await new Promise(r => server.close(r)); }
 });
 

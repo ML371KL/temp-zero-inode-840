@@ -96,19 +96,20 @@ jobs:
         continue-on-error: true
         run: node scripts/lows.mjs --time-budget-min 10
 
-      # Журнал вечерней схемы на бумаге: его пишет сборщик на VPS (ops/insider840-evening) и пушит в ветку paper.
-      # Нет ветки или сбой забора — блок на панели просто не обновится: ежедневное обновление важнее.
-      - name: Журнал вечерней схемы (ветка paper, необязательно)
+      # Журнал вечерней схемы на бумаге: его пишет сборщик на VPS (ops/insider840-evening) и присылает в воркер котировок (R2);
+      # читается без токена. Нет журнала или воркер не отвечает — блок на панели просто не обновится: ежедневное обновление важнее.
+      - name: Журнал вечерней схемы (воркер R2, необязательно)
         continue-on-error: true
+        env:
+          PAPER_URL: https://radar840-quotes.financehub.workers.dev
         run: |
-          mkdir -p data/paper
-          if git ls-remote --exit-code origin paper >/dev/null 2>&1; then
-            git fetch --depth 1 origin paper
-            git archive --format=tar origin/paper | tar -x -C data/paper
-            echo "Журнал вечерней схемы: $(find data/paper -name '*.jsonl' | wc -l) файлов"
-          else
-            echo "Ветки paper ещё нет — вечерняя схема не собирается"
-          fi
+          mkdir -p data/paper/log
+          curl -fsS --retry 3 --max-time 30 "$PAPER_URL/paper/index" -o /tmp/paper-index.json
+          node -e "for (const f of JSON.parse(require('fs').readFileSync('/tmp/paper-index.json', 'utf8')).files) console.log(f.name)" > /tmp/paper-files.txt
+          while read -r f; do
+            curl -fsS --retry 3 --max-time 30 "$PAPER_URL/paper/log/$f" -o "data/paper/log/$f"
+          done < /tmp/paper-files.txt
+          echo "Журнал вечерней схемы: $(wc -l < /tmp/paper-files.txt) файлов"
 
       - name: Вычисления и payload
         run: node scripts/compute.mjs

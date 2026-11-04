@@ -1,10 +1,10 @@
 // Вечерний сборщик (VPS): новые формы 4 из ленты EDGAR getcurrent раз в минуту -> вечерние события
 // (принятые 16:00–20:00 по Нью-Йорку, покупка P обыкновенных акций от $10 тыс.) -> котировка в момент
-// обнаружения и через 5, 15 и 30 минут после времени приёма -> журнал JSONL, который уходит в ветку paper.
+// обнаружения и через 5, 15 и 30 минут после времени приёма -> журнал JSONL, который уходит в воркер (R2) и читается ежедневной сборкой.
 // Зачем и что с журналом делает сборка панели — scripts/lib/evening.mjs, docs/ВЕЧЕРНЯЯ-СХЕМА.md.
 //
 // Запуск по таймеру systemd в 15:55 по Нью-Йорку, будни (ops/insider840-evening). Работает до --until
-// (20:35 ET), в конце коммитит и пушит журнал. Перезапуск безопасен: состояние читается из журнала.
+// (20:35 ET); журнал отправляется в воркер каждые 5 минут и в конце. Перезапуск безопасен: состояние читается из журнала.
 //
 // Ограничения источников:
 //  · SEC — только politeFetch с SEC_UA проекта, не чаще 5 запросов в секунду (intervalMs 220);
@@ -14,8 +14,7 @@
 //    если он закрыт для этого адреса, это видно в журнале (http, err), а запись идёт по воркеру.
 //
 // Использование: node scripts/evening/collector.mjs [--dir paper] [--until 20:35] [--once] [--dry-run]
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { politeFetch, SEC_UA } from '../lib/util.mjs';
 import { fetchFiling, parseForm4Txt, acceptedAtSec } from '../lib/edgar.mjs';
@@ -27,11 +26,14 @@ import {
 
 const args = process.argv.slice(2);
 const argVal = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d; };
-const DIR = argVal('--dir', process.env.PAPER_DIR ?? 'paper');          // рабочая копия ветки paper
+const DIR = argVal('--dir', process.env.PAPER_DIR ?? 'paper');          // каталог журнала (log/ГГГГ-ММ-ДД.jsonl)
 const UNTIL = argVal('--until', '20:35');                                // конец работы по Нью-Йорку
 const ONCE = args.includes('--once');                                    // один такт (для проб и тестов)
 const DRY = args.includes('--dry-run');                                  // не писать журнал и не пушить
 const QUOTES_URL = process.env.QUOTES_URL ?? 'https://radar840-quotes.financehub.workers.dev/quotes';
+const PAPER_URL = (process.env.PAPER_URL ?? 'https://radar840-quotes.financehub.workers.dev').replace(/\/$/, '');   // воркер: приём журнала в R2
+const PAPER_TOKEN = process.env.PAPER_TOKEN ?? '';                       // секрет приёма (только запись)
+const SHIP_EVERY_MS = 5 * 60e3;
 const USE_NASDAQ = process.env.EVENING_NASDAQ === '1';
 const NASDAQ_UA = 'InsiderRadar/1.0 (rodionkalmykov@gmail.com)';
 const FEED = 'https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&owner=only&count=100&output=atom';
@@ -155,20 +157,32 @@ async function pollQuotes(state) {
   return n;
 }
 
-// ---------- push в ветку paper ----------
-function pushPaper() {
+// ---------- отправка журнала в воркер (R2) ----------
+// Журнал на диске — источник истины; в воркер он уходит ЦЕЛИКОМ (PUT на каждый файл за вечер, идемпотентно) каждые 5 минут и в конце
+// вечера. Токен — только на запись; ежедневная сборка читает без него. Что уже отправлено и каким размером — в shipped.json рядом с
+// журналом: неизменившиеся файлы не шлются повторно, недоставленные уходят при следующей отправке (хоть через сутки).
+const shippedPath = join(DIR, '..', 'shipped.json');
+const loadShipped = () => { try { return JSON.parse(readFileSync(shippedPath, 'utf8')); } catch { return {}; } };
+async function shipJournal() {
   if (DRY) return true;
-  if (!existsSync(join(DIR, '.git'))) { log(`${DIR} не репозиторий — push пропущен (ops/insider840-evening/install.sh готовит его)`); return false; }
-  const sh = (a, o = {}) => execFileSync('git', ['-C', DIR, ...a], { encoding: 'utf8', timeout: 120000, env: { ...process.env, GIT_SSH_COMMAND: process.env.PAPER_KEY
-    ? `ssh -i ${process.env.PAPER_KEY} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${join(DIR, '..', 'known_hosts')}` : (process.env.GIT_SSH_COMMAND ?? 'ssh') }, ...o });
-  try {
-    sh(['add', '-A']);
-    const status = sh(['status', '--porcelain']);
-    if (status.trim()) sh(['-c', 'user.name=insider-evening-bot', '-c', 'user.email=actions@users.noreply.github.com', 'commit', '-q', '-m', `вечерний журнал ${nyWall(Date.now()).slice(0, 10)}`]);
-    sh(['push', 'origin', 'paper']);
-    log('журнал отправлен в ветку paper');
-    return true;
-  } catch (e) { log('push не удался:', String(e.message || e).split('\n')[0]); return false; }
+  if (!PAPER_TOKEN) { log('PAPER_TOKEN не задан — журнал остаётся на диске, в хранилище не уходит'); return false; }
+  if (!existsSync(logDir)) return true;
+  const shipped = loadShipped();
+  let allOk = true;
+  for (const name of readdirSync(logDir).filter(f => f.endsWith('.jsonl')).sort()) {
+    const body = readFileSync(join(logDir, name));
+    if (shipped[name] === body.length) continue;
+    try {
+      const r = await fetch(`${PAPER_URL}/paper/log/${name}`, {
+        method: 'PUT', body, headers: { Authorization: `Bearer ${PAPER_TOKEN}`, 'Content-Type': 'application/x-ndjson', 'User-Agent': NASDAQ_UA },
+        signal: AbortSignal.timeout(30000),
+      });
+      if (r.ok) { shipped[name] = body.length; log(`журнал ${name} отправлен (${body.length} байт)`); }
+      else { allOk = false; log(`журнал ${name}: воркер ответил HTTP ${r.status} ${(await r.text()).slice(0, 160)}`); }
+    } catch (e) { allOk = false; log(`журнал ${name}: ${String(e.message || e).split('\n')[0]}`); }
+  }
+  try { writeFileSync(shippedPath, JSON.stringify(shipped)); } catch (e) { log('shipped.json не записан:', String(e.message || e)); }
+  return allOk;
 }
 
 // ---------- главный цикл ----------
@@ -176,7 +190,7 @@ const untilMs = (() => { const t = nyToMs(`${nyWall(Date.now()).slice(0, 10)}T${
 const state = loadToday();
 write({ k: 'run', start: new Date().toISOString(), until: UNTIL, moments: MOMENTS_ALL, nasdaq: USE_NASDAQ ? 1 : 0, v: 1 });
 log(`старт: событий в журнале ${state.events.size}, до ${UNTIL} ET${DRY ? ', пробный режим' : ''}`);
-let ticks = 0, errs = 0, lastStat = 0;
+let ticks = 0, errs = 0, lastStat = 0, lastShip = Date.now();
 for (;;) {
   try {
     // Сначала котировки, срок которых уже наступил (разбор ленты может занять десятки секунд — они не должны ждать),
@@ -186,12 +200,13 @@ for (;;) {
     if (f.fresh) await pollQuotes(state);
     if (Date.now() - lastStat > 10 * 60e3) { lastStat = Date.now(); write({ k: 'stat', at: new Date().toISOString(), events: state.events.size, quotes: state.have.size, fetched: f.fetched, errs }); }
   } catch (e) { errs++; log('такт не удался:', String(e.message || e).split('\n')[0]); }
+  if (Date.now() - lastShip > SHIP_EVERY_MS) { lastShip = Date.now(); await shipJournal(); }
   ticks++;
   if (ONCE || Date.now() >= untilMs) break;
   // следующий такт — в начале минуты +5 с: время приёма в форме с секундами, и 5/15/30 минут отсчитываются точно
   const now = Date.now();
   await sleep(Math.max(1000, 60000 - (now % 60000) + 5000));
 }
-const pushed = pushPaper();
+const shippedOk = await shipJournal();
 log(`готово: тактов ${ticks}, событий ${state.events.size}, ошибок ${errs}`);
-if (!pushed && !DRY && existsSync(join(DIR, '.git'))) process.exitCode = 1;       // недоставленный журнал — тревога; он останется на диске
+if (!shippedOk && !DRY) process.exitCode = 1;       // недоставленный журнал — тревога; он останется на диске и уйдёт при следующей отправке

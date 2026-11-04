@@ -9,8 +9,7 @@
 //
 // Вывод пригоден для решения «хватает ли вечернего bid/ask»: если у воркера книга годна у большинства форм,
 // оценка спреда не нужна; если нет — смотреть nasdaq или принимать оценку (она помечена в журнале est).
-import { writeFileSync, existsSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { politeFetch, SEC_UA } from '../lib/util.mjs';
 import { fromWorker, validBook, entryPx, benchPx, nyWall } from '../lib/evening.mjs';
 
@@ -38,14 +37,18 @@ if (flag('--check')) {
     ok('воркер /quotes без заголовка Origin', q.ok && !!j?.quotes?.IWM, `HTTP ${q.status}, поля: ${Object.keys(j?.quotes?.IWM ?? {}).join(',')}`);
     ok('воркер отдаёт bid/ask и вечернюю цену (поля b, a, pp в ответе)', ['b', 'a', 'pp'].every(k => k in (j?.quotes?.IWM ?? {})), 'если нет — воркер ещё не выложен с этим PR');
   } catch (e) { ok('воркер', false, String(e.message)); }
-  const dir = process.env.PAPER_DIR ?? '/var/lib/insider840-evening/paper';
-  if (existsSync(dir + '/.git')) {
+  // приём журнала в воркере (R2): индекс читается без токена, ping проверяет токен, ничего не записывая
+  const base = (process.env.PAPER_URL ?? QUOTES_URL.replace(/\/quotes$/, '')).replace(/\/$/, '');
+  try {
+    const r = await fetch(base + '/paper/index', { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(15000) });
+    ok('журнал: GET /paper/index (R2 подключён)', r.ok, `HTTP ${r.status}`);
+  } catch (e) { ok('журнал: GET /paper/index', false, String(e.message)); }
+  if (process.env.PAPER_TOKEN) {
     try {
-      const env = { ...process.env, GIT_SSH_COMMAND: process.env.PAPER_KEY ? `ssh -i ${process.env.PAPER_KEY} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=${dir}/../known_hosts` : (process.env.GIT_SSH_COMMAND ?? 'ssh') };
-      execFileSync('git', ['-C', dir, 'ls-remote', '--exit-code', 'origin', 'HEAD'], { env, stdio: 'pipe', timeout: 30000 });
-      ok('git: доступ к origin по ключу paper', true);
-    } catch (e) { ok('git: доступ к origin по ключу paper', false, String(e.stderr ?? e.message).split('\n')[0]); }
-  } else ok('git: рабочая копия ветки paper', false, `${dir} не репозиторий — ops/insider840-evening/install.sh`);
+      const r = await fetch(base + '/paper/ping', { headers: { 'User-Agent': UA, Authorization: 'Bearer ' + process.env.PAPER_TOKEN }, signal: AbortSignal.timeout(15000) });
+      ok('журнал: токен приёма принят воркером', r.ok, `HTTP ${r.status}`);
+    } catch (e) { ok('журнал: токен приёма', false, String(e.message)); }
+  } else ok('журнал: токен приёма (PAPER_TOKEN в env)', false, 'не задан');
   process.exit(Object.values(out.checks).every(c => c.ok) ? 0 : 1);
 }
 
