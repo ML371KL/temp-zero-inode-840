@@ -8,12 +8,12 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz, isIsoDate } from './lib/util.mjs';
 import { zipCreate, zipExtract } from './lib/zip.mjs';
-import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, SHARD_VERSION } from './lib/edgar.mjs';
+import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, acceptedAt, SHARD_VERSION } from './lib/edgar.mjs';
 import {
   mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo,
   trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough, fetchYahooDaily,
 } from './lib/prices.mjs';
-import { buildDay, tradeResult, summarize, breadth, bestRole, tagsOf } from './lib/morning.mjs';
+import { buildDay, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf } from './lib/morning.mjs';
 import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
 import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import { Panel, monthlyFromDaily, portfolioSeries, factorAlpha, factorSeries, vsBenchmark, neweyWestT, universeSeries, pairedDiff, turnover } from './lib/portfolio.mjs';
@@ -224,6 +224,25 @@ ok('parseForm4Txt отбрасывает строку с невалидной д
   const { trades } = parseForm4Txt(bad, 'ACC-BAD', '2026-07-01');
   assert.equal(trades.length, 1);            // битая строка отброшена, валидная осталась
   assert.equal(trades[0].sh, 3000);
+});
+
+ok('приём формы: время из шапки .txt — необязательное поле строки, по Нью-Йорку', () => {
+  assert.equal(acceptedAt('<SEC-HEADER>\n<ACCEPTANCE-DATETIME>20261103162053\nACCESSION NUMBER: 1'), '2026-11-03T16:20');
+  assert.equal(acceptedAt('<ACCEPTANCE-DATETIME>20261103082635'), '2026-11-03T08:26');
+  assert.equal(acceptedAt('<ACCEPTANCE-DATETIME>20261331082635'), null, 'несуществующая дата');
+  assert.equal(acceptedAt('<ACCEPTANCE-DATETIME>20261103252635'), null, 'несуществующее время');
+  assert.equal(acceptedAt('нет шапки'), null);
+  assert.equal(acceptedAt(undefined), null);
+  const withHeader = FORM4_XML.replace('<SEC-DOCUMENT>\n', '<SEC-DOCUMENT>0001-26-000001.txt : 20260503\n<SEC-HEADER>0001-26-000001.hdr.sgml : 20260503\n<ACCEPTANCE-DATETIME>20260503172115\nACCESSION NUMBER:\t0001-26-000001\n</SEC-HEADER>\n');
+  const r = parseForm4Txt(withHeader, 'ACC-T', '2026-05-03').trades[0];
+  assert.equal(r.at, '2026-05-03T17:21');
+  // без шапки поля нет вовсе (а не null): у строк квартальных датасетов его тоже не бывает
+  const bare = parseForm4Txt(FORM4_XML, 'ACC-X', '2026-05-03').trades[0];
+  assert.equal('at' in bare, false);
+  // Поле не запускает перечитывание шардов: детектор смотрит на ownD, а не на at, и версия схемы прежняя
+  const stale = [{ acc: 'A', fdate: '2026-05-10', at: '2026-05-10T09:00' }, { acc: 'B', fdate: '2026-05-10', ownD: null }, r, bare];
+  assert.deepEqual(stale.filter(x => !('ownD' in x)).map(x => x.acc), ['A'], 'старая строка без ownD остаётся устаревшей, а новая без at — нет');
+  assert.equal(SHARD_VERSION, 3);
 });
 
 ok('живой контур: устаревшие строки видны по содержимому, а не по метке состояния', () => {
@@ -766,6 +785,22 @@ ok('утренний список: отбор строк, свёртка по б
   assert.equal(bestRole(['D', 'O', 'T']), 'O'); assert.equal(bestRole([]), 'X');
   assert.deepEqual(tagsOf({ role: 'F', dd: null, val: 1e6 }), ['off', 'big']);
 });
+ok('утренний список: приём формы — после закрытия, в торги, до открытия; время первой формы дня', () => {
+  assert.equal(sessionOf('2026-11-03T16:00'), 'post');
+  assert.equal(sessionOf('2026-11-03T15:59'), 'rth');
+  assert.equal(sessionOf('2026-11-03T09:30'), 'rth');
+  assert.equal(sessionOf('2026-11-03T09:29'), 'pre');
+  assert.equal(sessionOf('2026-11-03T21:20'), 'post');
+  assert.equal(sessionOf(null), null);
+  assert.equal(sessionOf(undefined), null);
+  const base = { name: 'X', who: ['A'], role: 'D', val: 5e4, dd: -0.1, dv: 4e7, px: 20, drop: null };
+  const [aaa, bbb] = buildDay([
+    { ...base, t: 'AAA', at: '2026-11-03T18:10' }, { ...base, t: 'AAA', at: '2026-11-03T11:00' }, { ...base, t: 'AAA', at: null },
+    { ...base, t: 'BBB', val: 4e4 },                                   // времени нет (квартальный датасет) — пусто, не выдумка
+  ]);
+  assert.equal(aaa.at, '2026-11-03T11:00'); assert.equal(aaa.ses, 'rth', 'бумага узнана по первой форме дня');
+  assert.equal(bbb.at, null); assert.equal(bbb.ses, null);
+});
 ok('утренний список: результат сделки — от открытия до закрытия, минус IWM, причины пропуска', () => {
   const r = tradeResult([100, 102, 99], [200, 201, 199]);
   assert.equal(r.r, 0.02); assert.equal(r.b, 0.005); assert.equal(r.ex, 0.015);
@@ -905,7 +940,7 @@ const recentF = addDaysIso(today, -6), recentT = addDaysIso(today, -7);
 writeJsonGz(join(TMP, 'trades', 'live.json.gz'), {
   v: SHARD_VERSION,
   trades: [
-    T({ acc: 'L1', fdate: recentF, tdate: recentT, cik: 222, t: 'LIVA', owners: ceo, code: 'P', sh: 5000, px: livaAt(recentT), val: 275000, own: 15000 }),
+    T({ acc: 'L1', fdate: recentF, tdate: recentT, cik: 222, t: 'LIVA', owners: ceo, code: 'P', sh: 5000, px: livaAt(recentT), val: 275000, own: 15000, at: `${recentF}T17:21` }),
     // Поправка к A2: замещает оригинал по содержательному ключу
     T({ acc: 'A2R', form: '4/A', fdate: '2020-02-25', tdate: '2020-02-11', cik: 111, t: 'ALFA', owners: dir, code: 'P', sh: 2000, px: alfaAt('2020-02-11') + 0.5, val: 203000, own: 2000, orig: '2020-02-13' }),
   ],
@@ -1009,6 +1044,8 @@ ok('compute: утренний список, счётчик D+1 и всплеск
   const row = day.rows[0];
   assert.equal(row.t, 'LIVA'); assert.equal(row.lvl, 30); assert.equal(row.val, 275000);
   assert.equal(row.role, 'C'); assert.ok(row.tags.includes('off'));
+  assert.equal(row.at, `${recentF}T17:21`); assert.equal(row.ses, 'post', 'время приёма доходит до строки списка');
+  assert.equal(m.params.stake, 10000, 'ставка для «суммы нетто» приходит из сборки');
   assert.equal(row.o, 50); assert.equal(row.c, 51);
   assert.equal(row.ex, 0.015, 'сделка +2% минус IWM +0.5%');
   assert.equal(m.counter.l30.n, 1); assert.equal(m.counter.l30.mean, 0.015); assert.equal(m.counter.upTo, d1L);
@@ -1352,6 +1389,61 @@ await okAsync('цены: ответ Yahoo даёт пары открытие/з�
       [days[0], 10, 10.5], [days[1], 11, 11.2], [days[2], null, 11], [days[3], 12, 12.4], [days[4], 12.5, 12.6]]);
     assert.equal(res.series.length, 5);
   } finally { globalThis.fetch = real; }
+});
+await okAsync('воркер котировок: открытие дня идёт в ответе на обоих путях, CORS и формат прежние', async () => {
+  const worker = (await import(pathToFileURL(join(ROOT, 'worker', 'index.js')).href)).default;
+  const store = new Map();
+  const realCaches = globalThis.caches, realFetch = globalThis.fetch;
+  globalThis.caches = { default: {
+    match: async k => store.has(k) ? store.get(k).clone() : undefined,
+    put: async (k, r) => { store.set(k, r); },
+  } };
+  const SESSION = 1793716200;                       // начало сессии «сегодня»
+  const chartBody = (sym, open, barAt) => ({ chart: { result: [{
+    meta: { symbol: sym, regularMarketPrice: 10.5, regularMarketTime: SESSION + 3600, marketState: 'REGULAR', chartPreviousClose: 10, currentTradingPeriod: { regular: { start: SESSION } } },
+    timestamp: [barAt], indicators: { quote: [{ open: [open] }] },
+  }] } });
+  let mode = 'quote';
+  globalThis.fetch = async url => {
+    const u = String(url);
+    if (u.startsWith('https://fc.yahoo.com')) return new Response('', { status: 404, headers: { 'set-cookie': 'A3=cookie; Path=/' } });
+    if (u.includes('getcrumb')) return new Response('crumb123');
+    if (u.includes('/v7/finance/quote')) {
+      assert.ok(mode === 'quote', 'v7 не должен вызываться при явном запасном пути');
+      return new Response(JSON.stringify({ quoteResponse: { result: [
+        { symbol: 'AAA', regularMarketPrice: 10.5, regularMarketOpen: 10, regularMarketTime: SESSION + 3600, marketState: 'REGULAR', regularMarketPreviousClose: 9.9 },
+        { symbol: 'IWM', regularMarketPrice: 200, regularMarketTime: SESSION + 3600, marketState: 'REGULAR', regularMarketPreviousClose: 199 },
+      ] } }));
+    }
+    if (u.includes('/v8/finance/chart/AAA')) return new Response(JSON.stringify(chartBody('AAA', 10, SESSION)));
+    if (u.includes('/v8/finance/chart/IWM')) return new Response(JSON.stringify(chartBody('IWM', 199.5, SESSION - 86400)));   // бар вчерашний
+    return new Response('?', { status: 500 });
+  };
+  const ask = async (qs, origin = 'https://ml371kl.github.io') => {
+    const pending = [];
+    const res = await worker.fetch(new Request('https://radar840-quotes.financehub.workers.dev/quotes?' + qs, { headers: { Origin: origin } }), {}, { waitUntil: p => pending.push(p) });
+    await Promise.all(pending);
+    return res;
+  };
+  try {
+    const r1 = await ask('symbols=AAA,IWM');
+    assert.equal(r1.status, 200);
+    assert.equal(r1.headers.get('access-control-allow-origin'), 'https://ml371kl.github.io');
+    const b1 = await r1.json();
+    assert.equal(b1.src, 'quote');
+    assert.deepEqual(b1.quotes.AAA, { p: 10.5, t: SESSION + 3600, st: 'REGULAR', prev: 9.9, o: 10 });
+    assert.equal(b1.quotes.IWM.o, null, 'открытия в ответе нет — поле null, а не выдумка');
+    // кэш края: второй запрос не идёт наверх
+    const r1b = await ask('symbols=AAA,IWM');
+    assert.equal(r1b.headers.get('x-cache'), 'hit');
+    // запасной путь: открытие из бара того же запроса, вчерашний бар открытием не считается
+    mode = 'chart';
+    const b2 = await (await ask('symbols=AAA,IWM&src=chart')).json();
+    assert.equal(b2.src, 'chart');
+    assert.equal(b2.quotes.AAA.o, 10);
+    assert.equal(b2.quotes.IWM.o, null, 'бар до начала сессии: открытие прошлого дня не отдаётся');
+    assert.equal(b2.quotes.AAA.p, 10.5);
+  } finally { globalThis.caches = realCaches; globalThis.fetch = realFetch; }
 });
 rmSync(NTMP, { recursive: true, force: true });
 

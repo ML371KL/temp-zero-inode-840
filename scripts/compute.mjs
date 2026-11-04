@@ -434,7 +434,7 @@ for (const r of buys) {
   if (r._dv === null || r._dv === undefined || r.fdate < DAY_CUT) continue;
   (dayCand.get(r.fdate) ?? dayCand.set(r.fdate, []).get(r.fdate)).push({
     t: r.T, name: ref.get(r.cik)?.name ?? r.t, who: (r.owners ?? []).map(o => o.name),
-    role: r._role, val: r.val, dd: r._dd, dv: r._dv, px: r._pxL ?? null,
+    role: r._role, val: r.val, dd: r._dd, dv: r._dv, px: r._pxL ?? null, at: r.at ?? null,
     drop: r._gate.ok ? null : (r._gate.drop ?? 'x'),
   });
 }
@@ -475,7 +475,7 @@ const counterOut = {
 const morningDays = allFdates.slice(-MORNING.daysShown).reverse().map(dayWithResults);
 W('morning.json', {
   built: today, pricesAsOf: spy?.length ? spy[spy.length - 1][0] : null,
-  params: { minVal: MORNING.minVal, minPx: MORNING.minPx, dvMain: MORNING.dvMain, dvWide: MORNING.dvWide },
+  params: { minVal: MORNING.minVal, minPx: MORNING.minPx, dvMain: MORNING.dvMain, dvWide: MORNING.dvWide, stake: MORNING.stake },
   counter: counterOut, days: morningDays,
 });
 if (COUNTER_DUMP) writeJson(COUNTER_DUMP, counterTrades);

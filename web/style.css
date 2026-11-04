@@ -236,6 +236,7 @@ table.morning td { vertical-align: top; }
 table.morning td.marks { white-space: normal; min-width: 150px; }
 table.morning td.marks .pill { margin: 0 2px 2px 0; }
 table.morning .who-m, table.morning .marks-m { display: none; }
+table.morning td.c-ses { white-space: nowrap; }
 td.empty {
   color: var(--ink-2); padding: 18px 12px; line-height: 1.55;
   white-space: normal; max-width: 72ch;
@@ -276,7 +277,10 @@ table.mini.rev th:last-child, table.mini.rev td:last-child { text-align: left; }
      бумаги, оборот, открытие и закрытие прячутся (цены остаются в подсказке и на десктопе) */
   table.morning .c-who, table.morning .c-dv, table.morning .c-open, table.morning .c-close { display: none; }
   table.morning .who-m, table.morning .marks-m { display: block; }
-  table.morning .c-marks { display: none; }
+  table.morning .c-marks, table.morning .c-ses { display: none; }
+  /* Живые цены: цена с изменением остаётся на виду, место ей уступает «От макс.» */
+  table.morning.live .c-close { display: table-cell; }
+  table.morning.live .c-dd { display: none; }
   table.morning .marks-m .pill { margin: 2px 3px 0 0; }
   table.morning { font-size: 12.5px; }
   table.morning td, table.morning th { padding: 6px 5px; }

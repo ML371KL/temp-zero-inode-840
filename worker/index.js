@@ -1,4 +1,4 @@
-// Живые котировки рабочего набора. Единственная причина существования этого воркера —
+// Живые котировки утреннего списка (и прежнего скринера). Единственная причина существования этого воркера —
 // Yahoo не отдаёт CORS-заголовок, поэтому браузер не может спросить цену сам.
 //
 // ГЛАВНОЕ ОГРАНИЧЕНИЕ, РАДИ КОТОРОГО ВСЁ УСТРОЕНО ИМЕННО ТАК.
@@ -125,14 +125,23 @@ async function fetchChart(symbols) {
       { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
     if (r.status === 429) { const e = new Error('429'); e.rateLimited = true; throw e; }
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    const m = (await r.json())?.chart?.result?.[0]?.meta;
+    const res = (await r.json())?.chart?.result?.[0];
+    const m = res?.meta;
     if (!m || typeof m.regularMarketPrice !== 'number') throw new Error('нет цены');
+    // Открытие дня — из того же запроса (бар range=1d). До начала сегодняшней регулярной сессии
+    // единственный бар вчерашний, и его открытие выдавало бы себя за сегодняшнее: отдаём его,
+    // только если бар начался не раньше текущей сессии.
+    const open = res?.indicators?.quote?.[0]?.open?.[0];
+    const sessionStart = m.currentTradingPeriod?.regular?.start;
+    const barStart = res?.timestamp?.[0];
+    const openOk = typeof open === 'number' && open > 0 && (typeof sessionStart !== 'number' || barStart >= sessionStart);
     return {
       symbol: m.symbol ?? s,
       regularMarketPrice: m.regularMarketPrice,
       regularMarketTime: m.regularMarketTime ?? null,
       marketState: m.marketState ?? null,
       regularMarketPreviousClose: m.chartPreviousClose ?? null,
+      regularMarketOpen: openOk ? open : null,
     };
   }));
   for (const g of got) if (g.status === 'fulfilled') out.push(g.value);
@@ -211,6 +220,9 @@ export default {
           t: q.regularMarketTime ?? null,
           st: q.marketState ?? null,
           prev: typeof q.regularMarketPreviousClose === 'number' ? q.regularMarketPreviousClose : null,
+          // Открытие дня: утренний список считает изменение от него. Клиент сверяет дату t и
+          // состояние st: до начала сессии v7 отдаёт открытие прошлого дня.
+          o: typeof q.regularMarketOpen === 'number' && q.regularMarketOpen > 0 ? q.regularMarketOpen : null,
         };
       }
       const missing = symbols.filter(s => !quotes[s]);

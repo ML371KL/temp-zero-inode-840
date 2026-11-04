@@ -74,7 +74,7 @@ function route() {
   if (!TABS.includes(tab)) { tab = 'morning'; arg = undefined; }  // неизвестный якорь — не белый экран
   for (const a of tabs) a.classList.toggle('active', a.dataset.tab === tab);
   for (const p of document.querySelectorAll('.tab-panel')) p.classList.toggle('active', p.id === 'tab-' + tab);
-  if (tab === 'morning') loadMorning();
+  if (tab === 'morning') loadMorning().then(startLive); else stopLive();
   if (tab === 'feed') loadFeed(arg);
   if (tab === 'stats') loadStats();
   if (tab === 'ticker') { loadTickerIndex(); if (arg) openTicker(decodeURIComponent(arg)); }
@@ -247,9 +247,86 @@ for (const b of document.querySelectorAll('#m-level .chip')) {
     if (state.morning) renderMorning();
   });
 }
-$('#m-day').addEventListener('change', e => { mDay = e.target.value; if (state.morning) renderMorning(); });
+$('#m-day').addEventListener('change', e => {
+  mDay = e.target.value;
+  state.live = null;                       // котировки предыдущей даты к этой не относятся
+  if (state.morning) { renderMorning(); pollLive({ force: true }); }
+});
 
 const lvlRows = day => (day?.rows ?? []).filter(x => mLevel === 30 ? x.lvl === 30 : true);
+// Денежная сумма со знаком: +$5.4 тыс. (в таблицах панели десятичная точка)
+const sgnMoney = v => {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '—';
+  const a = Math.abs(v);
+  const body = a >= 1e6 ? '$' + (a / 1e6).toFixed(2) + ' млн' : a >= 1e3 ? '$' + (a / 1e3).toFixed(1) + ' тыс.' : '$' + Math.round(a);
+  return (v > 0 ? '+' : v < 0 ? '-' : '') + body;
+};
+
+// ---------- ЖИВЫЕ ЦЕНЫ ----------
+// В день D+1 во время торгов утренний список показывает текущую цену и изменение от открытия.
+// Yahoo не отдаёт CORS-заголовок, поэтому спросить цену напрямую браузер не может. Посредник — свой
+// воркер на краю Cloudflare (worker/index.js): он держит ответ 30 секунд в кэше края, так что
+// опрос отсюда не может разогнать обращения к источнику. Слой необязательный: если воркер молчит,
+// экран тихо остаётся на снимке и работает целиком.
+const QUOTES_URL = 'https://radar840-quotes.financehub.workers.dev/quotes';
+const LIVE_PERIOD_MS = 30000;
+const ySym = t => String(t).replace(/[./]/g, '-');   // BRK.B -> BRK-B, как в сборке
+let liveTimer = null;
+state.live = null;                                    // последний ответ воркера, null — живого слоя нет
+const onMorning = () => { const h = location.hash; return h === '' || h.startsWith('#morning') || h.startsWith('#screener'); };
+// Дата котировки по Нью-Йорку: цена принадлежит своей сессии, а не местному дню
+const nyDate = sec => new Date(sec * 1000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+// Следующий рабочий день после подачи — ожидаемый D+1 (праздники не знаем: в праздник живой слой просто не включится)
+function nextBusinessDay(iso) {
+  const d = new Date(iso + 'T00:00:00Z');
+  do { d.setUTCDate(d.getUTCDate() + 1); } while (d.getUTCDay() === 0 || d.getUTCDay() === 6);
+  return d.toISOString().slice(0, 10);
+}
+// Выбранный день, торги D+1 которого ещё не закрыты в снимке: только по нему идёт опрос
+const liveDay = () => { const d = state.morning?.days.find(x => x.date === mDay); return d && !d.done && d.rows.length ? d : null; };
+// Котировка годится, только если она за сегодняшнюю сессию D+1 и идут торги (или уже закрылись):
+// до начала сессии v7 отдаёт открытие и время прошлого дня, и «изменение от открытия» было бы чужим.
+function liveOf(sym, d1) {
+  const x = state.live?.quotes?.[ySym(sym)];
+  if (!x || typeof x.p !== 'number' || typeof x.o !== 'number' || !(x.o > 0)) return null;
+  if (x.st !== 'REGULAR' && x.st !== 'POST') return null;
+  return x.t && nyDate(x.t) === d1 ? x : null;
+}
+const MARKET_STATE = { REGULAR: 'торги идут', POST: 'торги закрыты' };
+
+// force — разовый опрос по явному поводу (экран только что отрисован, вкладка стала видимой).
+// Требование видимости относится к ПОВТОРНОМУ опросу по таймеру: именно он в фоновой вкладке
+// тянул бы источник сутками.
+async function pollLive({ force = false } = {}) {
+  if ((!force && document.visibilityState !== 'visible') || !onMorning()) return;
+  const day = liveDay();
+  if (!day) { if (state.live) { state.live = null; renderDay(); } return; }
+  // Спрашиваем весь список выбранного дня и IWM для сравнения: один запрос, предел воркера — 50 тикеров
+  const syms = [...new Set([...day.rows.map(r => r.t), 'IWM'])].slice(0, 50);
+  try {
+    const res = await fetch(`${QUOTES_URL}?symbols=${encodeURIComponent(syms.join(','))}`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const body = await res.json();
+    if (!body?.quotes) throw new Error('пустой ответ');
+    state.live = body;
+  } catch (error) {
+    // Тихо: снимок остаётся на месте. Единственный след — столбцы живых цен не появляются.
+    state.live = null;
+    console.warn('[live] котировки недоступны:', error?.message || error);
+  }
+  if (onMorning()) renderDay();
+}
+function startLive() {
+  if (liveTimer) return;
+  pollLive({ force: true });
+  liveTimer = setInterval(pollLive, LIVE_PERIOD_MS);
+}
+function stopLive() { clearInterval(liveTimer); liveTimer = null; }
+// Опрос идёт только у видимой вкладки: фоновая вкладка сутками тянула бы источник впустую.
+addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && onMorning()) startLive();
+  else stopLive();
+});
 
 // Полоса живого счётчика: те же числа, что в ревизии, но по спискам, опубликованным с запуска.
 // Тест по дням — сделки одного дня не независимы (общий рынок), поэтому t считается по средним дням.
@@ -263,6 +340,7 @@ function renderCounter() {
   }
   const cell = (v, lab, hint, klass = '') => `<div class="sc" title="${esc(hint)}"><b class="${klass}">${v}</b><span>${esc(lab)}</span></div>`;
   const tStrong = s.tDays !== null && s.tDays !== undefined && Math.abs(s.tDays) >= 2;
+  const stake = state.morning.params?.stake ?? 1e4;
   $('#m-counter').innerHTML = head + '<div class="strip-cells">'
     + cell(String(s.n), 'сделок', `За ${plural(s.days, 'торговый день', 'торговых дня', 'торговых дней')}; одна сделка на бумагу в день`)
     + cell(fmtPct(s.mean, 2), 'среднее к IWM', 'Доходность открытие → закрытие минус внутридневная доходность IWM того же дня', cls(s.mean))
@@ -271,7 +349,8 @@ function renderCounter() {
     + cell(s.tDays === null || s.tDays === undefined ? '—' : String(s.tDays), 't по дням',
       'Среднее за день, затем t-статистика по дням. От нуля отличимо при |t| ≥ 2', tStrong ? cls(s.tDays) : 'muted')
     + cell(fmtPct(s.net, 2), `после ${pctPlain(c.cost, 1)} на круг`, 'Среднее за вычетом издержек на круг. Эффект исчезает при издержках около 0.2%', cls(s.net))
-    + cell(fmtPct(s.cumNet, 1), 'сумма нетто', 'Сумма доходностей всех сделок после издержек, в долях одной позиции: столько заработала бы позиция равного размера на каждую сделку', cls(s.cumNet))
+    + cell(sgnMoney(s.cumNet * stake), `на ${fmtMoney(stake)} в сделке`,
+      `Итог всех ${s.n} сделок после издержек, если в каждую вложено по ${fmtMoney(stake)}. Это не доходность портфеля: сделки идут в разные дни, и одни и те же деньги работают снова и снова`, cls(s.cumNet))
     + '</div>';
 }
 
@@ -293,9 +372,18 @@ function renderSurge() {
     + ` z = ${b.z === null ? '—' : b.z} · ${esc(monthRu(b.asOf))}</span></span>` + spark;
 }
 
-function dayNote(day, rows) {
+// Время котировки — по Нью-Йорку, как и сама сессия
+function liveStamp() {
+  const at = state.live?.at;
+  if (!at) return null;
+  const time = new Date(at * 1000).toLocaleTimeString('ru-RU', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit' });
+  const st = Object.values(state.live.quotes ?? {})[0]?.st;
+  return `живые цены · ${time} Нью-Йорк${MARKET_STATE[st] ? ' · ' + MARKET_STATE[st] : ''}${state.live.stale ? ' · источник молчит, показано последнее' : ''}`;
+}
+function dayNote(day, rows, liveOn = false) {
   if (!day) return '';
   if (!rows.length) return '';
+  if (liveOn) return liveStamp() ?? '';
   if (!day.done) return day.entry ? '' : 'торги D+1 ещё не прошли';
   const res = rows.filter(x => x.ex !== undefined);
   if (!res.length) return `торги ${fmtDate(day.entry)}: результатов нет`;
@@ -310,39 +398,62 @@ function renderMorning() {
   const days = state.morning.days;
   // Выбор даты: десять последних дат подачи, число бумаг уровня в подписи
   $('#m-day').innerHTML = days.map(d => `<option value="${esc(d.date)}"${d.date === mDay ? ' selected' : ''}>${esc(fmtDate(d.date))} · ${lvlRows(d).length}</option>`).join('');
+  renderDay();
+}
+
+// Таблица выбранного дня. Отдельно от renderMorning: опрос живых цен перерисовывает только её,
+// не трогая выпадающий список даты (он закрывался бы под рукой).
+function renderDay() {
+  const days = state.morning.days;
   const day = days.find(d => d.date === mDay) ?? null;
   const rows = lvlRows(day);
-  $('#m-note').textContent = dayNote(day, rows);
+  const d1 = day ? nextBusinessDay(day.date) : null;
+  const liveOn = !!day && !day.done && rows.some(x => liveOf(x.t, d1));
+  const bq = liveOn ? liveOf('IWM', d1) : null;
+  $('#m-note').textContent = dayNote(day, rows, liveOn);
   const past = !!day?.done;
+  const cols = past || liveOn;
+  $('#m-table').className = 'morning' + (liveOn ? ' live' : '');
   // Классы c-* нужны узкому экрану: «Кто», «Оборот», «Открытие» и «Закрытие» там прячутся
   const th = `<tr><th>Бумага</th><th class="c-who">Кто</th>
     <th class="num" title="Сумма всех покупок бумаги в этот день подачи (покупки от $10 тыс., прошедшие гейты)">Сумма</th>
-    <th class="num" title="Насколько ниже 52-недельного максимума была цена на дату сделки">От макс.</th>
+    <th class="num c-dd" title="Насколько ниже 52-недельного максимума была цена на дату сделки">От макс.</th>
     <th class="num c-dv" title="Медианный дневной долларовый оборот бумаги за 60 торговых дней до сделки">Оборот</th>
-    <th class="c-marks">Пометки</th>${past ? `<th class="num c-open" title="Цена открытия следующего торгового дня — вход">Открытие</th>
-    <th class="num c-close" title="Цена закрытия того же дня — выход">Закрытие</th>
-    <th class="num" title="Доходность открытие → закрытие минус доходность IWM за тот же день">К IWM</th>` : ''}</tr>`;
+    <th class="c-ses" title="Когда форма принята на EDGAR (время по Нью-Йорку): после закрытия — с 16:00. Ночью форм принимается больше всего (61%), и у них день D+1 сильнее: +0.34% против +0.21% у принятых в торги">Приём</th>
+    <th class="c-marks">Пометки</th>${cols ? `<th class="num c-open" title="Цена открытия следующего торгового дня — вход">Открытие</th>
+    <th class="num c-close" title="${liveOn ? 'Текущая цена и изменение от открытия; обновляется каждые 30 секунд, пока вкладка открыта' : 'Цена закрытия того же дня — выход'}">${liveOn ? 'Сейчас' : 'Закрытие'}</th>
+    <th class="num" title="${liveOn ? 'Изменение от открытия минус изменение IWM от открытия' : 'Доходность открытие → закрытие минус доходность IWM за тот же день'}">К IWM</th>` : ''}</tr>`;
   $('#m-table').innerHTML = th + (rows.length ? rows.map(x => {
     const who = x.nWho > 1 ? `${esc(trunc(x.who[0], 20))} <span class="sub2-inline">и ещё ${x.nWho - 1}</span>` : esc(trunc(x.who[0] ?? '—', 24));
     const marks = (x.tags ?? []).map(t => MTAG[t] ? `<span class="pill ${MTAG[t][1]}" title="${esc(MTAG[t][2])}">${esc(MTAG[t][0])}</span>` : '').join(' ');
     // Сделка пропущена — причина в подсказке; открытие и закрытие у такой строки пусты
-    const result = !past ? '' : x.skip
+    const lq = liveOn ? liveOf(x.t, d1) : null;
+    const lchg = lq ? lq.p / lq.o - 1 : null;
+    const lex = lq && bq ? lchg - (bq.p / bq.o - 1) : null;
+    const result = liveOn ? (lq
+      ? `<td class="num c-open">${fmtPrice(lq.o)}</td><td class="num c-close">${fmtPrice(lq.p)}<span class="sub2 ${cls(lchg)}">${fmtPct(lchg, 2)}</span></td>`
+        + `<td class="num ${cls(lex)}" title="${esc(lex === null ? 'IWM сейчас недоступен' : `От открытия ${fmtPct(lchg, 2)}, IWM ${fmtPct(bq.p / bq.o - 1, 2)}`)}">${fmtPct(lex, 2)}</td>`
+      : `<td class="num c-open muted">—</td><td class="num c-close muted">—</td><td class="num muted" title="Живой цены по этой бумаге сейчас нет">—</td>`)
+    : !past ? '' : x.skip
       ? `<td class="num c-open muted">—</td><td class="num c-close muted">—</td>`
         + `<td class="num muted" title="${esc(SKIP[x.skip] ?? x.skip)}">пропуск</td>`
       : `<td class="num c-open">${fmtPrice(x.o)}</td><td class="num c-close">${fmtPrice(x.c)}</td>`
         + `<td class="num ${cls(x.ex)}" title="${esc(`Сделка ${fmtPct(x.r, 2)}, IWM ${fmtPct(x.b, 2)}`)}">${fmtPct(x.ex, 2)}</td>`;
+    const sesLab = { post: 'после закрытия', rth: 'в торги', pre: 'до открытия' }[x.ses] ?? null;
+    const sesTitle = x.at ? `Форма принята на EDGAR ${x.at.replace('T', ' ')} по Нью-Йорку` : 'Время приёма неизвестно';
     const roleLine = `${esc(ROLE_LABEL[x.role] ?? x.role)}${x.n > 1 ? ' · ' + plural(x.n, 'покупка', 'покупки', 'покупок') : ''}`;
     return `<tr>
       <td><a class="tick" href="#ticker/${encodeURIComponent(x.t)}">${esc(x.t)}</a>
         <span class="sub2 nm" title="${esc(x.name)}">${esc(trunc(x.name, 28))}</span>
         <span class="sub2 who-m">${esc(trunc(x.who[0] ?? '—', 18))}${x.nWho > 1 ? ' +' + (x.nWho - 1) : ''} · ${roleLine}</span>
-        <span class="marks-m">${marks}</span></td>
+        <span class="marks-m">${marks}${sesLab ? ` <span class="pill gray" title="${esc(sesTitle)}">${esc(sesLab)}</span>` : ''}</span></td>
       <td class="c-who">${who}<span class="sub2">${roleLine}</span></td>
       <td class="num">${fmtMoney(x.val)}</td>
-      <td class="num ${cls(x.dd)}">${fmtPct(x.dd, 0)}</td>
+      <td class="num c-dd ${cls(x.dd)}">${fmtPct(x.dd, 0)}</td>
       <td class="num c-dv">${fmtMoney(x.dv)}</td>
+      <td class="c-ses" title="${esc(sesTitle)}">${sesLab ? `${esc(x.at.slice(11, 16))}<span class="sub2">${esc(sesLab)}</span>` : '<span class="muted">—</span>'}</td>
       <td class="marks c-marks">${marks}</td>${result}</tr>`;
-  }).join('') : `<tr><td colspan="${past ? 9 : 6}" class="empty">${days.length
+  }).join('') : `<tr><td colspan="${cols ? 10 : 7}" class="empty">${days.length
     ? 'В этот день подходящих покупок нет — список бывает пустым.' : 'Данные ещё не собраны.'}</td></tr>`);
   $('#m-foot').innerHTML = 'Покупка на открытии следующего торгового дня, продажа на закрытии того же дня; сумма на бумагу одинаковая. '
     + 'Почему так — на вкладке <a href="#stats">Статистика</a>.';
