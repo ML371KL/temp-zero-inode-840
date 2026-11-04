@@ -16,7 +16,7 @@ import {
 } from './lib/prices.mjs';
 import { barsFrom, fetchBars, applyBars } from './lib/bars.mjs';
 import { isSecClosed } from './lib/calendar.mjs';
-import { main as morningMain } from './vps/morning-build.mjs';
+import { main as morningMain, liveVerdict } from './vps/morning-build.mjs';
 import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf, compareMain } from './lib/morning.mjs';
 import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
 import { EVENING, nyWall, nyToMs, inEveningWindow, parseAtom, filingPath, buildEvent, fromWorker, validBook, entryPx, benchPx, paperTrade, summarizePaper, planQuotes, parseJournal, pickQuote } from './lib/evening.mjs';
@@ -1917,6 +1917,18 @@ ok('календарь SEC: федеральные праздники и их п
     assert.equal(isSecClosed(d), true, d);
   for (const d of ['2026-11-04', '2026-11-05', '2026-04-03', '2026-07-02', '2026-11-12', '2027-01-04'])
     assert.equal(isSecClosed(d), false, d);
+});
+ok('сборка на VPS: вердикт по живому контуру — индекс не вышел, разобран частично, на последней попытке идём как есть', () => {
+  const D = '2026-11-04', cov = (status, extra = {}) => ({ [D]: { status, indexed: 100, collected: 90, pending: 10, at: 'x', ...extra } });
+  assert.deepEqual(liveVerdict({ lastDay: D, coverage: cov('complete', { collected: 100, pending: 0 }) }, D, 0), { ok: true, partial: false });
+  assert.equal(liveVerdict({ lastDay: '2026-11-03' }, D, 0).ok, false, 'индекс D не разобран');
+  assert.match(liveVerdict({ lastDay: '2026-11-03' }, D, 1).why, /код 1/);
+  assert.equal(liveVerdict({ lastDay: D, coverage: cov('not-published') }, D, 0).ok, false);
+  assert.equal(liveVerdict({ lastDay: D, coverage: cov('holiday') }, D, 0).ok, false);
+  const part = liveVerdict({ lastDay: D, coverage: cov('partial') }, D, 0);
+  assert.equal(part.ok, false); assert.match(part.why, /90 из 100.*добора 10/);
+  assert.deepEqual(liveVerdict({ lastDay: D, coverage: cov('partial') }, D, 0, true), { ok: true, partial: true });
+  assert.deepEqual(liveVerdict({ lastDay: D }, D, 0), { ok: true, partial: false }, 'старое состояние без coverage — достаточно lastDay');
 });
 ok('сверка списков: состав и скор основного списка, остальные бумаги не сравниваются', () => {
   const r = (t, score, extra = {}) => ({ t, name: t + ' Inc', score, main: score >= 2, val: 1e5, ...extra });

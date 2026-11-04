@@ -102,6 +102,16 @@ async function fetchPaper(opts) {
   } catch (e) { log('журнал вечерней схемы недоступен (необязательно):', e.message); }
 }
 
+// Итог шага live.mjs для дня day: state/live.json (lastDay, coverage[day] от сборщика подач) и код выхода. Индекс разобран не до day или не
+// вышел — повтор; разобран частично (часть форм ждёт добора: сеть, лимит SEC) — повтор подберёт остаток, на последней попытке идём как есть.
+export function liveVerdict(live, day, code, lastChance = false) {
+  const cov = live?.coverage?.[day] ?? null;
+  if (code || !(live?.lastDay >= day)) return { ok: false, why: `формы разобраны не до ${day} (live.mjs код ${code}, lastDay=${live?.lastDay ?? '—'}${cov?.status ? ', ' + cov.status : ''})` };
+  if (cov?.status === 'not-published' || cov?.status === 'holiday') return { ok: false, why: `индекс за ${day}: ${cov.status}` };
+  if (cov?.status === 'partial' && !lastChance) return { ok: false, why: `индекс за ${day} разобран не полностью: ${cov.collected} из ${cov.indexed} форм, ждут добора ${cov.pending} (повтор)` };
+  return { ok: true, partial: cov?.status === 'partial' };
+}
+
 const lastBar = (data, t) => { const s = readPriceCache(data, t); return s?.length ? s[s.length - 1][0] : null; };
 
 // Одна попытка. Возвращает { ok, why?, retry? }. ctx.stage хранит завершённые шаги между попытками.
@@ -123,8 +133,9 @@ export async function attempt(opts, day, ctx) {
   if (!opts.noLive && !st.live) {
     log(`формы дня ${day} (live.mjs)…`);
     const code = await node('scripts/live.mjs', ['--data', opts.data, '--time-budget-min', '25'], { env });
-    const live = readJson(join(opts.data, 'state', 'live.json'), {});
-    if (code || !(live.lastDay >= day)) return fail(`формы разобраны не до ${day} (live.mjs код ${code}, lastDay=${live.lastDay ?? '—'})`);
+    const v = liveVerdict(readJson(join(opts.data, 'state', 'live.json'), {}), day, code, ctx.lastChance);
+    if (!v.ok) return fail(v.why);
+    if (v.partial) log('индекс разобран не полностью — последняя попытка, идём как есть (недобор виден в coverage)');
     st.live = true;
   }
   if (!st.paper) { await fetchPaper(opts); st.paper = true; }
