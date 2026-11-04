@@ -286,6 +286,8 @@ function rowLine(x) {
 function trunc(s, n) { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 // Пустой день: первая строка самодостаточна, как и у обычного письма. Бумаги со скором 0–1 упоминаются одной строкой.
 // Индекс разобран не полностью — это сказано в письме: «сигналов нет» по неполным данным нельзя выдавать за полное «нет».
+// Список собран по ленте EDGAR (индекса за день не было): он может быть неполным, и это сказано в письме; полный пересчёт пришлёт уточнение
+const sourceNote = () => (morning?.source === 'feed' ? '<i>Список собран по ленте EDGAR: индекс за день ещё не вышел, возможны неполные данные.</i>' : '');
 function emptyMessage(day, counter, cov) {
   const rest = restOf(day);
   const lines = [
@@ -294,6 +296,7 @@ function emptyMessage(day, counter, cov) {
   ];
   if (rest.length) lines.push(`Ещё ${plural(rest.length, 'бумага', 'бумаги', 'бумаг')} со скором 0–1 — на панели.`);
   if (cov?.status === 'partial' && cov.indexed > 0) lines.push(`Индекс разобран не полностью: ${cov.collected ?? 0} из ${cov.indexed} форм.`);
+  if (sourceNote()) lines.push(sourceNote());
   lines.push('', counterLine(counter), '', footer());
   return lines.join('\n');
 }
@@ -385,7 +388,7 @@ console.log(`[notify] новых утренних списков: ${fresh.length
 
 // ---------- отправка ----------
 // eventId — «840|morning|дата подачи»: список, доставленный повторно, на хабе ляжет на прежнюю запись.
-const messages = fresh.map(d => ({ date: d.date, text: mainOf(d).length ? morningMessage(d, morning.counter) : emptyMessage(d, morning.counter, cov), markup: undefined, id: dayId(d), eventId: '840|' + dayId(d) }));
+const messages = fresh.map(d => ({ date: d.date, text: mainOf(d).length ? morningMessage(d, morning.counter, sourceNote()) : emptyMessage(d, morning.counter, cov), markup: undefined, id: dayId(d), eventId: '840|' + dayId(d) }));
 
 // Отметка в воркере: письмо за дату уже отправил другой отправитель — не повторяем, дату считаем отправленной.
 // Читается и в пробном прогоне (только чтение); при ошибке воркера письмо уходит.

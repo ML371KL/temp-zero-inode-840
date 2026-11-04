@@ -6,7 +6,7 @@ import { rmSync, mkdirSync, readFileSync, writeFileSync, readdirSync, cpSync, ex
 import { createServer } from 'node:http';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz, isIsoDate } from './lib/util.mjs';
+import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz, readJsonGz, isIsoDate } from './lib/util.mjs';
 import { zipCreate, zipExtract } from './lib/zip.mjs';
 import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, acceptedAt, acceptedAtSec, SHARD_VERSION } from './lib/edgar.mjs';
 import {
@@ -16,7 +16,8 @@ import {
 } from './lib/prices.mjs';
 import { barsFrom, fetchBars, applyBars } from './lib/bars.mjs';
 import { isSecClosed } from './lib/calendar.mjs';
-import { main as morningMain, liveVerdict } from './vps/morning-build.mjs';
+import { main as morningMain, liveVerdict, reconcileStage } from './vps/morning-build.mjs';
+import { parseFeedJournal, loadFeed, pruneFeed, feedFile, reconcile, mergeFeedRows } from './lib/feed.mjs';
 import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf, compareMain } from './lib/morning.mjs';
 import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
 import { EVENING, nyWall, nyToMs, inEveningWindow, parseAtom, filingPath, buildEvent, fromWorker, validBook, entryPx, benchPx, paperTrade, summarizePaper, planQuotes, parseJournal, pickQuote } from './lib/evening.mjs';
@@ -2258,6 +2259,158 @@ await okAsync('crosscheck.mjs: пишет crossCheck в morning.json по спи
   // воркер недоступен
   mine([row('A', 3)]);
   const r3 = await run('http://127.0.0.1:9'); assert.equal(r3.code, 0); assert.match(r3.out, /недоступен/);
+});
+
+// ---------- PR-3: лента формы 4 на весь день, сверка с индексом, список по ленте ----------
+const atomOf = entries => '<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">' + entries.map(e => `<entry><title>${e.form ?? '4'} - X (0001) (Reporting)</title>`
+  + `<link rel="alternate" type="text/html" href="https://www.sec.gov/Archives/edgar/data/${e.cik}/${e.acc.replace(/-/g, '')}/${e.acc}-index.htm"/>`
+  + `<summary type="html">\n &lt;b&gt;Filed:&lt;/b&gt; ${e.filed} &lt;b&gt;AccNo:&lt;/b&gt; ${e.acc} &lt;b&gt;Size:&lt;/b&gt; 4 KB\n</summary><updated>${e.filed}T11:00:00-05:00</updated>`
+  + `<category scheme="https://www.sec.gov/" label="form type" term="${e.form ?? '4'}"/><id>urn:tag:sec.gov,2008:accession-number=${e.acc}</id></entry>`).join('') + '</feed>';
+const formTxt = (acc, filed) => FORM4_XML.replace('<SEC-DOCUMENT>\n', `<SEC-DOCUMENT>${acc}.txt : ${filed.replace(/-/g, '')}\n<SEC-HEADER>${acc}.hdr.sgml : ${filed.replace(/-/g, '')}\n<ACCEPTANCE-DATETIME>${filed.replace(/-/g, '')}101500\nACCESSION NUMBER:\t${acc}\n</SEC-HEADER>\n`);
+
+ok('лента: Filed из описания записи, журнал с оборванной строкой, чтение за несколько дней, уборка старых файлов', () => {
+  const e = parseAtom(atomOf([{ acc: '0001000000-26-000011', cik: 111, filed: '2026-11-04' }, { acc: '0001000000-26-000012', cik: 222, filed: '2026-11-05', form: '4/A' }]));
+  assert.deepEqual(e.map(x => [x.acc, x.filed, x.form]), [['0001000000-26-000011', '2026-11-04', '4'], ['0001000000-26-000012', '2026-11-05', '4/A']]);
+  assert.equal(parseAtom('<feed><entry><link href="https://www.sec.gov/Archives/edgar/data/1/x/0001000000-26-000013-index.htm"/><id>urn:tag:sec.gov,2008:accession-number=0001000000-26-000013</id></entry></feed>')[0].filed, null, 'нет описания — даты нет');
+  const j = parseFeedJournal([JSON.stringify({ k: 'run' }), JSON.stringify({ k: 'seen', acc: 'A', filed: '2026-11-04' }), JSON.stringify({ k: 'form', acc: 'A', filed: '2026-11-04', trades: [] }), '{"k":"seen","acc":"B","fi'].join('\n'));
+  assert.deepEqual([j.seen.size, j.forms.size, j.runs.length], [1, 1, 1], 'оборванная последняя строка не ломает чтение');
+  const dir = join(NTMP, 'feed-load');
+  rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true });
+  for (const [d, a] of [['2026-11-03', 'X'], ['2026-11-04', 'Y'], ['2026-10-01', 'OLD']]) writeFileSync(feedFile(dir, d), JSON.stringify({ k: 'seen', acc: a, filed: d }) + '\n');
+  assert.deepEqual([...loadFeed(dir, '2026-11-04').seen.keys()].sort(), ['X', 'Y'], 'день и два предыдущих: подача 22:00–06:00 лежит в журнале соседнего дня');
+  assert.equal(pruneFeed(dir, '2026-11-04'), 1); assert.equal(existsSync(feedFile(dir, '2026-10-01')), false); assert.equal(existsSync(feedFile(dir, '2026-11-03')), true);
+});
+ok('лента: сверка с индексом — чего нет в индексе, чего не видела лента, что замечено, но не скачано; слияние строк без дублей', () => {
+  const D = '2026-11-04';
+  const feed = parseFeedJournal([
+    { k: 'seen', acc: 'A', form: '4', filed: D }, { k: 'form', acc: 'A', filed: D, trades: [{ acc: 'A', code: 'P', tdate: D, sec: 'Common', val: 1 }] },
+    { k: 'seen', acc: 'C', form: '4', filed: D }, { k: 'form', acc: 'C', filed: D, trades: [{ acc: 'C', code: 'P', tdate: D, sec: 'Common', val: 2 }], amend: [{ acc: 'C', orig: D }] },
+    { k: 'seen', acc: 'E', form: '4', filed: D },                                     // замечена, не скачана
+    { k: 'seen', acc: 'Z', form: '4', filed: '2026-11-03' }, { k: 'seen', acc: 'T', form: '424B2', filed: D },   // другой день, другой тип
+  ].map(x => JSON.stringify(x)).join('\n'));
+  const r = reconcile(feed, new Set(['A', 'B', 'E']), D);
+  assert.deepEqual(r, { indexed: 3, seen: 3, parsed: 2, extra: ['C'], missing: 1, unparsed: ['E'] });
+  const shard = { trades: [{ acc: 'A', code: 'P', tdate: D, sec: 'Common', val: 1 }], amend: [] };
+  assert.equal(mergeFeedRows(shard, feed.forms, ['A', 'C', 'нет-такой']), 1, 'A уже лежит — не дублируется, C добавлена');
+  assert.equal(shard.trades.length, 2); assert.deepEqual(shard.amend, [{ acc: 'C', orig: D }]);
+  assert.equal(mergeFeedRows(shard, feed.forms, ['C']), 0); assert.equal(shard.amend.length, 1, 'повторное слияние ничего не меняет');
+});
+await okAsync('лента: сборщик — подачи дня замечаются и разбираются, недоступный файл добирается следующим тактом, перезапуск без дублей', async () => {
+  const day = '2026-10-01';
+  const entries = [{ acc: '0001000000-26-000011', cik: 111222, filed: day }, { acc: '0001000000-26-000012', cik: 333, filed: day }, { acc: '0001000000-26-000013', cik: 444, filed: day, form: '424B2' }];
+  const hits = { filings: [], b404: true };
+  const server = createServer((req, res) => {
+    if (req.url.startsWith('/cgi-bin/browse-edgar')) { res.writeHead(200, { 'content-type': 'application/atom+xml' }); res.end(atomOf(/start=0(&|$)/.test(req.url) ? entries : [])); return; }
+    const m = /\/Archives\/edgar\/data\/\d+\/\d+\/(\d{10}-\d{2}-\d{6})\.txt$/.exec(req.url);
+    if (m) { hits.filings.push(m[1]); if (m[1].endsWith('12') && hits.b404) { res.writeHead(404); res.end(); } else { res.writeHead(200); res.end(formTxt(m[1], day)); } return; }
+    res.writeHead(404); res.end();
+  });
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const dir = join(NTMP, 'feed-run');
+  rmSync(dir, { recursive: true, force: true });
+  const run = () => new Promise(resolve => execFile(process.execPath, [join(ROOT, 'scripts', 'vps', 'feed-collector.mjs'), '--dir', dir, '--once'],
+    { encoding: 'utf8', env: { ...process.env, EDGAR_BASE: `http://127.0.0.1:${server.address().port}` } }, (err, so, se) => resolve({ code: err ? (err.code ?? 1) : 0, out: so + se })));
+  try {
+    const r1 = await run();
+    assert.equal(r1.code, 0, r1.out);
+    const f = readdirSync(dir)[0], read = () => parseFeedJournal(readFileSync(join(dir, f), 'utf8'));
+    let j = read();
+    assert.deepEqual([...j.seen.keys()], ['0001000000-26-000011', '0001000000-26-000012'], '424B2 чужого типа не замечается');
+    assert.deepEqual([...j.forms.keys()], ['0001000000-26-000011'], 'вторая подача ещё не отдаётся (404) — только замечена');
+    const form = j.forms.get('0001000000-26-000011');
+    assert.equal(form.filed, day); assert.equal(form.at, `${day}T10:15`); assert.ok(form.trades.length >= 1 && form.trades.every(t => t.acc === '0001000000-26-000011' && t.fdate === day), 'строки как у живого контура, дата подачи из ленты');
+    hits.b404 = false;
+    const r2 = await run();
+    assert.equal(r2.code, 0, r2.out);
+    j = read();
+    assert.deepEqual([...j.forms.keys()].sort(), ['0001000000-26-000011', '0001000000-26-000012']);
+    const lines = readFileSync(join(dir, f), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
+    assert.equal(lines.filter(x => x.k === 'seen').length, 2, 'перезапуск не дублирует замеченные');
+    assert.deepEqual(hits.filings, ['0001000000-26-000011', '0001000000-26-000012', '0001000000-26-000012'], 'разобранную подачу повторно не качаем');
+    assert.ok(lines.some(x => x.k === 'stat' && x.polls >= 1), 'такт записан в журнал');
+  } finally { await new Promise(r => server.close(r)); }
+});
+
+await okAsync('сборка на VPS: сверка индекса с лентой — подача, которой нет в индексе, добавляется в список, покрытие дня знает о ленте', async () => {
+  const work = join(TMP, '..', '.selftest-feed1');
+  rmSync(work, { recursive: true, force: true });
+  const data = join(work, 'repo'), feedDir = join(work, 'feed'), D = '2026-11-04';
+  mkdirSync(feedDir, { recursive: true });
+  const row = acc => ({ acc, code: 'P', tdate: D, fdate: D, sec: 'Common Stock', val: 5e4, t: 'EXT' });
+  writeFileSync(feedFile(feedDir, D), [
+    { k: 'seen', acc: 'IN-1', form: '4', filed: D }, { k: 'form', acc: 'IN-1', filed: D, trades: [row('IN-1')], amend: [] },
+    { k: 'seen', acc: 'LATE', form: '4', filed: D }, { k: 'form', acc: 'LATE', filed: D, trades: [row('LATE')], amend: [] },
+  ].map(x => JSON.stringify(x)).join('\n') + '\n');
+  writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, trades: [row('IN-1')], amend: [] });
+  const info = await reconcileStage({ data, feedDir }, D, { fetchIndex: async () => ({ entries: [{ acc: 'IN-1' }, { acc: 'IN-1' }, { acc: 'ONLY-INDEX' }] }) });
+  assert.deepEqual({ ...info, at: null, extraAcc: info.extraAcc }, { seen: 2, parsed: 2, indexed: 2, extra: 1, extraAcc: ['LATE'], missing: 1, unparsed: 0, merged: 1, from: '06:00', at: null });
+  assert.deepEqual(readJsonGz(join(data, 'trades', 'live.json.gz')).trades.map(r => r.acc).sort(), ['IN-1', 'LATE']);
+  assert.equal(readJson(join(data, 'state', 'feed.json'))[D].extra, 1);
+  // лента за день пуста — сверки нет, шард не тронут
+  assert.equal(await reconcileStage({ data, feedDir: join(work, 'нет') }, D, { fetchIndex: async () => ({ entries: [] }) }), null);
+  rmSync(work, { recursive: true, force: true });
+});
+await okAsync('сборка на VPS: индекса нет до последней попытки — список по ленте с пометкой источника, покрытие «индекс не вышел», выход с ошибкой (тревога)', async () => {
+  const work = join(TMP, '..', '.selftest-feed2');
+  rmSync(work, { recursive: true, force: true });
+  const data = join(work, 'repo'), feedDir = join(work, 'feed');
+  for (const d of ['trades', 'reference', 'prices', 'state']) cpSync(join(TMP, d), join(data, d), { recursive: true });
+  rmSync(join(data, 'prices', '_opens.json.gz'), { force: true });
+  // подача L1 убрана из шарда и лежит только в журнале ленты
+  const shardPath = join(data, 'trades', 'live.json.gz'), shard = readJsonGz(shardPath);
+  const l1 = shard.trades.filter(r => r.acc === 'L1');
+  assert.ok(l1.length, 'в фикстуре есть подача L1');
+  shard.trades = shard.trades.filter(r => r.acc !== 'L1'); writeJsonGz(shardPath, shard);
+  mkdirSync(feedDir, { recursive: true });
+  writeFileSync(feedFile(feedDir, recentF), [{ k: 'seen', acc: 'L1', cik: 222, form: '4', filed: recentF }, { k: 'form', acc: 'L1', filed: recentF, at: `${recentF}T17:21`, trades: l1, amend: [] }].map(x => JSON.stringify(x)).join('\n') + '\n');
+  const d0 = bizDays('2015-01-01', today).filter(d => d <= recentF).at(-1);
+  for (const sym of ['SPY', 'IWM', 'LIVA']) writePriceCache(data, sym, readPriceCache(data, sym).filter(r => r[0] < d0));
+  const over = { LIVA: { [d1L]: [50, 51] }, IWM: { [d1L]: [100, 100.5] }, SPY: { [d1L]: [100, 101] } };
+  const src = { LIVA: livaSeries, IWM: bizDays('2015-01-01', today).map(d => [d, 100, 100, 1e6]), SPY: bizDays('2015-01-01', today).map(d => [d, 100, 100, 1e6]) };
+  const charts = Object.fromEntries(Object.entries(src).map(([sym, s]) => [sym, from => chartOf(s.filter(r => r[0] >= from), over[sym])]));
+  const api = await fakeWorker({ charts });
+  const sec = createServer((req, res) => { res.writeHead(404); res.end(); });          // SEC: индекса нет
+  await new Promise(r => sec.listen(0, '127.0.0.1', r));
+  const realBase = process.env.EDGAR_BASE;
+  process.env.EDGAR_BASE = `http://127.0.0.1:${sec.address().port}`;
+  try {
+    const code = await morningMain(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', recentF, '--no-sync', '--feed-dir', feedDir, '--once', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+    assert.equal(code, 1, 'список доставлен, но индекс не вышел — тревога');
+    assert.equal(api.calls.morningPuts.length, 1);
+    const sent = JSON.parse(api.calls.morningPuts[0]);
+    assert.equal(sent.source, 'feed'); assert.equal(sent.listFor, recentF); assert.equal(sent.builder, 'vps');
+    assert.equal(sent.coverage.status, 'not-published'); assert.equal(sent.coverage.collected, 1); assert.equal(sent.coverage.feed.source, 'feed'); assert.equal(sent.coverage.feed.merged, l1.length);
+    const row = sent.days.find(d => d.date === recentF).rows[0], ref = R('morning.json').days.find(d => d.date === recentF).rows[0];
+    for (const k of ['t', 'val', 'mx', 'score', 'main', 'dv', 'px', 'cost', 'tags']) assert.deepEqual(row[k], ref[k], 'поле ' + k + ': по ленте то же, что по индексу');
+    assert.equal(readJson(join(work, 'done', `${recentF}.json`)).source, 'feed');
+  } finally {
+    if (realBase === undefined) delete process.env.EDGAR_BASE; else process.env.EDGAR_BASE = realBase;
+    await api.close(); await new Promise(r => sec.close(r)); rmSync(work, { recursive: true, force: true });
+  }
+  // индекса нет, а лента пуста — собрать нечем: сборка не придумывает пустой список
+  const work2 = join(TMP, '..', '.selftest-feed3');
+  rmSync(work2, { recursive: true, force: true });
+  const api2 = await fakeWorker({ charts: {} }), sec2 = createServer((req, res) => { res.writeHead(404); res.end(); });
+  await new Promise(r => sec2.listen(0, '127.0.0.1', r));
+  process.env.EDGAR_BASE = `http://127.0.0.1:${sec2.address().port}`;
+  try {
+    mkdirSync(join(work2, 'feed'), { recursive: true });
+    const code = await morningMain(['--state', work2, '--data', join(work2, 'repo'), '--date', recentF, '--no-sync', '--feed-dir', join(work2, 'feed'), '--once'], { PAPER_URL: api2.base, PAPER_TOKEN: 'tok' });
+    assert.equal(code, 1); assert.equal(api2.calls.morningPuts.length, 0);
+  } finally {
+    if (realBase === undefined) delete process.env.EDGAR_BASE; else process.env.EDGAR_BASE = realBase;
+    await api2.close(); await new Promise(r => sec2.close(r)); rmSync(work2, { recursive: true, force: true });
+  }
+});
+ok('notify: список по ленте — в письме сказано, что индекс не вышел; по индексу пометки нет', () => {
+  const dir = seededDir('data-feedsrc');
+  const days = [mDay(nDay(-1), [mRow('AAA', 3e5)])];
+  const out = notify(days, { dir, extra: { source: 'feed' } });
+  assert.match(out, /Список собран по ленте EDGAR: индекс за день ещё не вышел, возможны неполные данные\./);
+  const d2 = seededDir('data-feedsrc2');
+  const out2 = notify([mDay(nDay(-1), [])], { dir: d2, extra: { source: 'feed' } });
+  assert.match(out2, /утренний список пуст/); assert.match(out2, /по ленте EDGAR/, 'и в письме «сигналов нет»: лента могла видеть не всё');
+  assert.ok(!/по ленте EDGAR/.test(notify(days, { dir: seededDir('data-feedsrc3'), extra: { source: 'index' } })));
 });
 
 rmSync(NTMP, { recursive: true, force: true });
