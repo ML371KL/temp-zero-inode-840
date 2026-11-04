@@ -4,7 +4,7 @@
 // они дороже всего и от схемы сделок не зависят).
 // Использование: node scripts/backfill.mjs [--data data] [--max-quarters N]
 import { readJson, writeJson, readJsonGz, writeJsonGz, isoToday } from './lib/util.mjs';
-import { fetchQuarter, quarterList, SHARD_VERSION } from './lib/edgar.mjs';
+import { fetchQuarter, quarterList, SHARD_VERSION, QUARTER_REV } from './lib/edgar.mjs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -24,10 +24,12 @@ const state = readJson(statePath, { schema: SHARD_VERSION, done: [], missing: []
 // на «нет сделок» — прод останавливался на часы. Теперь частично пересобранный набор
 // остаётся консистентным, потому что схема v3 не меняет состав строк, а только уточняет
 // поля владения; версия помечается лишь когда пройдены все кварталы.
-const rebuilding = state.schema !== SHARD_VERSION;
+// Ревизия разбора кварталов (QUARTER_REV) растёт, когда меняется нормализация уже загруженных строк
+// (11.2026: природа сделки только по сноскам полей сделки). Механизм тот же — замещение на месте.
+const rebuilding = state.schema !== SHARD_VERSION || (state.quarterRev ?? 1) < QUARTER_REV;
 if (rebuilding) {
   if (!state.rebuildFrom) {
-    console.log(`[backfill] схема шардов ${state.schema ?? 1} -> ${SHARD_VERSION}: перечитываю кварталы, данные не удаляю`);
+    console.log(`[backfill] схема шардов ${state.schema ?? 1} -> ${SHARD_VERSION}, разбор ${state.quarterRev ?? 1} -> ${QUARTER_REV}: перечитываю кварталы, данные не удаляю`);
     state.rebuildFrom = state.schema ?? 1;
     state.done = [];
     state.missing = [];
@@ -115,6 +117,7 @@ const remaining = wanted.filter(q => !state.done.includes(q) && !state.missing.i
 // и преждевременная отметка остановила бы пересборку на полпути.
 if (rebuilding && !remaining.length) {
   state.schema = SHARD_VERSION;
+  state.quarterRev = QUARTER_REV;
   delete state.rebuildFrom;
   writeJson(statePath, state, true);
   console.log(`[backfill] пересборка схемы завершена: все ${wanted.length} кварталов перечитаны`);

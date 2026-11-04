@@ -6,13 +6,17 @@
 // детекции аннулированных сделок (4/A без строк, которые были в оригинале).
 import { politeFetch, parseTsv, secDate, num, isIsoDate } from './util.mjs';
 import { zipExtract } from './zip.mjs';
-import { rowFootnoteFlags, fnIds } from './footnotes.mjs';
+import { rowFootnoteFlags, holdingFootnoteFlags, fnIds } from './footnotes.mjs';
 
 export const SHARD_VERSION = 3;
 // Ревизия разбора уже собранных строк (сноски, даты). Рост номера НЕ сбрасывает шард и не задерживает
 // сегодняшний день: live.mjs перечитывает окно [from, lastDay] в остаток бюджета (state.reread) и
-// замещает строки подач свежим разбором. 1 — разбор до 11.2026.
-export const PARSER_REV = 1;
+// замещает строки подач свежим разбором. 1 — разбор до 11.2026; 2 — природа сделки только по
+// сноскам полей сделки, сноски к остатку и форме владения — в fnh (ревизия данных, П2).
+export const PARSER_REV = 2;
+// То же для квартальных датасетов: backfill.mjs перечитывает кварталы с меньшей ревизией и замещает
+// строки на месте (как при смене схемы, но без смены SHARD_VERSION и без задержки живого контура).
+export const QUARTER_REV = 2;
 
 // Остаток владения (SHRS_OWND_FOLWNG_TRANS) относится к КОНКРЕТНОЙ форме владения, а не
 // к лицу: прямой пакет и пакет «через траст» — разные счётчики. Строки одной подачи мы
@@ -125,7 +129,7 @@ export function normalizeQuarterZip(zipBuf) {
     // Класс бумаги важен: в Table I попадают и привилегированные акции, и варранты —
     // их цена не сопоставима с котировкой обыкновенных, а сигнал у них другой природы
     const key = `${r.ACCESSION_NUMBER}|${r.TRANS_CODE}|${tdate}|${r.SECURITY_TITLE}`;
-    const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), fnIds: new Set(), sec: r.SECURITY_TITLE || '' };
+    const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), fnIds: new Set(), holdIds: new Set(), sec: r.SECURITY_TITLE || '' };
     a.sh += sh;
     a.cost += sh * (px ?? 0);
     // Учёт по форме владения (см. foldOwnership): остаток относится к ней, а не к лицу
@@ -143,9 +147,13 @@ export function normalizeQuarterZip(zipBuf) {
       f.ownMax = f.ownMax === null ? own : Math.max(f.ownMax, own);
     }
     a.forms.set(di, f);
+    // Природу сделки определяют только сноски к полям самой сделки. Сноски к остатку и форме владения
+    // описывают пакет («в остатке есть N акций из DRIP/ESPP») — раньше они отсеивали обычные покупки
+    // (66% отсевов DRIP/ESPP в 2016–2026, CEO Uber $10 млн 10.09.2026). Они идут в теги (fnh).
     for (const id of fnIds(r.TRANS_SHARES_FN, r.TRANS_PRICEPERSHARE_FN, r.SECURITY_TITLE_FN,
-      r.TRANS_ACQUIRED_DISP_CD_FN, r.NATURE_OF_OWNERSHIP_FN, r.DIRECT_INDIRECT_OWNERSHIP_FN,
-      r.SHRS_OWND_FOLWNG_TRANS_FN, r.TRANS_DATE_FN)) a.fnIds.add(id);
+      r.TRANS_ACQUIRED_DISP_CD_FN, r.TRANS_DATE_FN, r.TRANS_CODE_FN, r.DEEMED_EXECUTION_DATE_FN)) a.fnIds.add(id);
+    for (const id of fnIds(r.NATURE_OF_OWNERSHIP_FN, r.DIRECT_INDIRECT_OWNERSHIP_FN,
+      r.SHRS_OWND_FOLWNG_TRANS_FN, r.VALU_OWND_FOLWNG_TRANS_FN)) a.holdIds.add(id);
     a.acc = r.ACCESSION_NUMBER; a.code = r.TRANS_CODE; a.tdate = tdate;
     agg.set(key, a);
   }
@@ -155,10 +163,13 @@ export function normalizeQuarterZip(zipBuf) {
     const sub = subs.get(a.acc);
     const noteMap = notes.get(a.acc);
     const rowTexts = noteMap ? [...a.fnIds].map(id => noteMap.get(id)).filter(Boolean) : [];
+    const holdTexts = noteMap ? [...a.holdIds].filter(id => !a.fnIds.has(id)).map(id => noteMap.get(id)).filter(Boolean) : [];
     const allTexts = noteMap ? [...noteMap.values()] : [];
     if (sub.remarks) allTexts.push(sub.remarks); // Remarks часто содержит дату плана 10b5-1
     const px = a.sh > 0 ? a.cost / a.sh : null;
     const ow = foldOwnership(a.forms, a.code);
+    const fn = rowFootnoteFlags(rowTexts, allTexts, holdTexts);
+    const fnh = holdingFootnoteFlags(holdTexts, fn);
     trades.push({
       acc: a.acc, form: sub.form, fdate: sub.fdate, tdate: a.tdate,
       cik: sub.cik, t: sub.t,
@@ -169,7 +180,7 @@ export function normalizeQuarterZip(zipBuf) {
       own: ow.own, di: ow.di, ownD: ow.ownD, shD: ow.shD, b5: sub.b5,
       orig: sub.orig ?? null,
       sec: a.sec.slice(0, 60),
-      fn: rowFootnoteFlags(rowTexts, allTexts),
+      fn, ...(Object.keys(fnh).length ? { fnh } : {}),
     });
   }
 
@@ -347,7 +358,7 @@ export function parseForm4Txt(txt, acc, fdate) {
     const di = tagVal(nature, 'directOrIndirectOwnership') === 'I' ? 'I' : 'D';
     const secTitle = tagVal(tr, 'securityTitle') ?? '';
     const key = `${code}|${tdate}|${secTitle}`;
-    const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), ids: new Set(), sec: secTitle };
+    const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), ids: new Set(), holdIds: new Set(), sec: secTitle };
     a.sh += sh; a.cost += sh * (px ?? 0);
     const f = a.forms.get(di) ?? { sh: 0, own: null, ownMin: null, ownMax: null };
     f.sh += sh;
@@ -361,8 +372,15 @@ export function parseForm4Txt(txt, acc, fdate) {
       f.ownMax = f.ownMax === null ? own : Math.max(f.ownMax, own);
     }
     a.forms.set(di, f);
-    // Сноски, привязанные к полям именно этой транзакции
-    for (const idm of tr.matchAll(/<footnoteId\s+id="([^"]+)"/g)) a.ids.add(idm[1]);
+    // Сноски, привязанные к полям именно этой транзакции. Сноски к остатку (postTransactionAmounts) и
+    // форме владения (ownershipNature) описывают пакет, а не сделку («в остатке есть N акций из DRIP»):
+    // природу сделки они не определяют и идут в теги (fnh).
+    const holdPart = (/<postTransactionAmounts>[\s\S]*?<\/postTransactionAmounts>/.exec(tr)?.[0] ?? '')
+      + (/<ownershipNature>[\s\S]*?<\/ownershipNature>/.exec(tr)?.[0] ?? '');
+    const txnPart = tr.replace(/<postTransactionAmounts>[\s\S]*?<\/postTransactionAmounts>/, '')
+      .replace(/<ownershipNature>[\s\S]*?<\/ownershipNature>/, '');
+    for (const idm of txnPart.matchAll(/<footnoteId\s+id="([^"]+)"/g)) a.ids.add(idm[1]);
+    for (const idm of holdPart.matchAll(/<footnoteId\s+id="([^"]+)"/g)) a.holdIds.add(idm[1]);
     a.code = code; a.tdate = tdate;
     agg.set(key, a);
   }
@@ -370,7 +388,10 @@ export function parseForm4Txt(txt, acc, fdate) {
   const trades = [];
   for (const a of agg.values()) {
     const rowTexts = [...a.ids].map(id => noteMap.get(id)).filter(Boolean);
+    const holdTexts = [...a.holdIds].filter(id => !a.ids.has(id)).map(id => noteMap.get(id)).filter(Boolean);
     const ow = foldOwnership(a.forms, a.code);
+    const fn = rowFootnoteFlags(rowTexts, allTexts, holdTexts);
+    const fnh = holdingFootnoteFlags(holdTexts, fn);
     trades.push({
       acc, form: docType, fdate, tdate: a.tdate, cik, t, owners,
       code: a.code, sh: Math.round(a.sh),
@@ -378,7 +399,7 @@ export function parseForm4Txt(txt, acc, fdate) {
       val: Math.round(a.cost), own: ow.own, di: ow.di, ownD: ow.ownD, shD: ow.shD, b5,
       orig: orig ?? null,
       sec: String(a.sec).slice(0, 60),
-      fn: rowFootnoteFlags(rowTexts, allTexts),
+      fn, ...(Object.keys(fnh).length ? { fnh } : {}),
       // Необязательное поле: у строк квартальных датасетов и у старых строк живого шарда его нет
       ...(at ? { at } : {}),
     });
