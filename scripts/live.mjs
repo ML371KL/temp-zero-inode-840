@@ -13,8 +13,8 @@
 // шард сохраняется, код выхода 0, ошибка — в покрытие и state.lastError. Подача, которую не удалось
 // скачать (сеть, 5xx, лимит SEC), не теряется: она ложится в state.pending и добирается следующими прогонами.
 import { readJson, writeJson, readJsonGz, writeJsonGz, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
-import { fetchDayIndex, fetchFiling, parseForm4Txt, uniqueFilings, SHARD_VERSION, PARSER_REV } from './lib/edgar.mjs';
-import { isWeekend, nextWeekday, missingIndexVerdict, shouldProbeNext, coverageEntry, pruneCoverage } from './lib/livecal.mjs';
+import { fetchDayIndex, fetchFiling, parseForm4Txt, uniqueFilings, secKey, SHARD_VERSION, PARSER_REV } from './lib/edgar.mjs';
+import { isWeekend, nextWeekday, missingIndexVerdict, shouldProbeNext, coverageEntry, pruneCoverage, firstUncoveredDay, windowStart } from './lib/livecal.mjs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -33,20 +33,12 @@ const overBudget = () => Date.now() - started > BUDGET_MS;
 
 // Первый непокрытый датасетами день выводится из state/backfill.json
 const backfillState = readJson(join(DATA, 'state', 'backfill.json'), { done: [] });
-let defaultFrom = '2026-04-01';
-{
-  const done = (backfillState.done ?? []).slice().sort();
-  if (done.length) {
-    const last = done[done.length - 1]; // "2026q1"
-    const y = Number(last.slice(0, 4)), q = Number(last.slice(5));
-    defaultFrom = q === 4 ? `${y + 1}-01-01` : `${y}-${String(q * 3 + 1).padStart(2, '0')}-01`;
-  }
-}
+const defaultFrom = firstUncoveredDay(backfillState.done);
 
 const statePath = join(DATA, 'state', 'live.json');
 const state = readJson(statePath, {});
 const shardPath = join(DATA, 'trades', 'live.json.gz');
-const from = state.from ?? defaultFrom;
+const from = windowStart(state.from, backfillState.done);
 
 const rawShard = readJsonGz(shardPath, null);
 const shard = rawShard && !Array.isArray(rawShard) ? rawShard : { v: SHARD_VERSION, trades: [], amend: [] };
@@ -69,7 +61,7 @@ shard.trades = shard.trades.filter(r => r.fdate >= from);
 shard.amend = shard.amend.filter(a => a.orig >= '2000-01-01');
 if (shard.trades.length !== before) console.log(`[live] вычищено ${before - shard.trades.length} строк, покрытых датасетами`);
 
-const rowKey = r => `${r.acc}|${r.code}|${r.tdate}|${r.sec ?? ''}`;
+const rowKey = r => `${r.acc}|${r.code}|${r.tdate}|${secKey(r.sec)}`;
 const byKey = new Map(shard.trades.map(r => [rowKey(r), r]));
 const keysByAcc = new Map();
 for (const k of byKey.keys()) { const acc = k.slice(0, k.indexOf('|')); (keysByAcc.get(acc) ?? keysByAcc.set(acc, new Set()).get(acc)).add(k); }

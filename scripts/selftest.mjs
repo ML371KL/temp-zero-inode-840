@@ -2626,5 +2626,104 @@ rmSync(NTMP, { recursive: true, force: true });
   });
 }
 
+// ==================== ЦЕНЫ И ДАТАСЕТЫ: объём в открытиях, очередь цен, новый адрес кварталов, ключ класса (PR fix-collect-3) ====================
+// Ревизия данных 04.11.2026 (П9, П10, П13).
+{
+  const { dailyQueue, latestFilingDays, volumesOf } = await import('./lib/opens.mjs');
+  const { secKey, fetchQuarter, DATASET_URLS } = await import('./lib/edgar.mjs');
+  const { firstUncoveredDay, windowStart } = await import('./lib/livecal.mjs');
+  const iwm = [200, 201, 199], spy = [500, 502, 499];
+
+  ok('цены/П9: открытие, равное вчерашнему закрытию, — не застывшая котировка, если объём есть', () => {
+    // CBU 31.08.2026: открытие 63,16 = закрытию 28.08, объём 196 638 — обычный торговый день
+    const r = tradeResult([63.16, 62.75, 63.16, 196638], iwm, spy);
+    assert.equal(r.skip, undefined, JSON.stringify(r));
+    assert.ok(r.ex < 0);
+    assert.equal(tradeResult([63.16, 63.16, 63.16, 0], iwm, spy).skip, 'frozen', 'нулевой объём — торгов не было');
+    assert.equal(tradeResult([63.16, 62.75, 63.16], iwm, spy).skip, 'frozen', 'старая запись без объёма читается по прежнему правилу');
+    assert.equal(tradeResult([63.0, 62.75, 63.16], iwm, spy).skip, undefined);
+  });
+
+  ok('цены/П9: запись открытий несёт объём дня из того же ответа', () => {
+    const ohlc = [['2026-08-28', 63.23, 63.16], ['2026-08-31', 63.16, 62.75], ['2026-09-01', 62.8, 62.9]];
+    const series = [['2026-08-28', 63.16, 63.16, 146981], ['2026-08-31', 62.75, 62.75, 196638]];
+    const p = pickOpens(ohlc, ['2026-08-28'], { vol: volumesOf(series), from: '2026-08-01' });
+    assert.deepEqual(p, { '2026-08-31': [63.16, 62.75, 63.16, 196638] });
+    const q = pickOpens(ohlc, ['2026-08-31'], { vol: volumesOf(series), from: '2026-08-01' });
+    assert.deepEqual(q, { '2026-09-01': [62.8, 62.9, 62.75] }, 'объёма нет в ответе — запись из трёх чисел');
+  });
+
+  ok('цены/П13: бумаги двух последних дней подачи — сразу после бенчмарков', () => {
+    const trades = [
+      { code: 'P', fdate: '2026-11-02' }, { code: 'P', fdate: '2026-11-03' }, { code: 'P', fdate: '2026-10-30' }, { code: 'S', fdate: '2026-11-04' },
+    ];
+    assert.deepEqual(latestFilingDays(trades), ['2026-11-02', '2026-11-03']);
+    const all = new Map([
+      ['OLDA', { recent: true, last: '2026-09-01' }], ['NEWB', { recent: true, last: '2026-11-03' }],
+      ['DEAD', { recent: false, last: '2024-01-02' }], ['NEWA', { recent: true, last: '2026-11-02' }], ['MIDC', { recent: true, last: '2026-10-30' }],
+    ]);
+    assert.deepEqual(dailyQueue(all, ['SPY', 'IWM'], latestFilingDays(trades)), ['SPY', 'IWM', 'NEWA', 'NEWB', 'OLDA', 'MIDC']);
+  });
+
+  ok('датасеты/П10: ключ класса одинаков у формы XML и у датасета SEC', () => {
+    assert.equal(secKey('Common Stock, par value $0.001 per share (&quot;Common Stock'), secKey('"Common Stock, par value $0.001 per share (""Common Stock"")"'));
+    assert.equal(secKey('Virtus Dividend, Interest &amp; Premium Strategy Fund'), secKey('Virtus Dividend, Interest & Premium Strategy Fund'));
+    assert.equal(secKey('Class "B1" Preferred Shares'), secKey('Class &quot;B1&quot; Preferred Shares'));
+    assert.notEqual(secKey('Class A Common Stock'), secKey('Class B Common Stock'));
+    assert.equal(secKey(null), '');
+  });
+
+  ok('датасеты/П10: окно живого контура сдвигается за загруженный квартал', () => {
+    assert.equal(firstUncoveredDay(['2025q4', '2026q1']), '2026-04-01');
+    assert.equal(firstUncoveredDay(['2026q1', '2026q2', '2026q3']), '2026-10-01');
+    assert.equal(firstUncoveredDay(['2026q4']), '2027-01-01');
+    assert.equal(windowStart('2026-04-01', ['2026q1', '2026q2', '2026q3']), '2026-10-01', 'прежний from не держит окно на апреле');
+    assert.equal(windowStart('2026-09-01', ['2026q1']), '2026-09-01');
+  });
+
+  await okAsync('датасеты/П10: новый адрес кварталов первым, старый — запасным', async () => {
+    const zip = makeQuarterZip();
+    const seen = [];
+    const srv = createServer((req, res) => {
+      seen.push(req.url);
+      const old = req.url === '/files/structureddata/data/insider-transactions-data-sets/2025q4_form345.zip';
+      const fresh = req.url === '/files/datastandardsinnovation/data/insider-transactions-data-sets/2026q3_form345.zip';
+      if (old || fresh) { res.writeHead(200, { 'content-type': 'application/zip' }); res.end(zip); return; }
+      res.writeHead(404, { 'content-type': 'text/html' }); res.end('<html>Page Not Found</html>');
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const prev = process.env.EDGAR_BASE;
+    process.env.EDGAR_BASE = `http://127.0.0.1:${srv.address().port}`;
+    try {
+      assert.match(DATASET_URLS('2026q3')[0], /datastandardsinnovation/);
+      const a = await fetchQuarter('2026q3');
+      assert.ok(a.data && a.data.trades.length === 3);
+      assert.match(a.url, /datastandardsinnovation/);
+      const b = await fetchQuarter('2025q4');
+      assert.ok(b.data);
+      assert.match(b.url, /structureddata/, 'старый квартал — по прежнему адресу');
+      const c = await fetchQuarter('2027q1');
+      assert.equal(c.data, null, 'неопубликованный квартал — по обоим адресам 404');
+      assert.equal(seen.filter(u => u.includes('2027q1')).length, 2);
+    } finally {
+      if (prev === undefined) delete process.env.EDGAR_BASE; else process.env.EDGAR_BASE = prev;
+      await new Promise(r => srv.close(r));
+    }
+  });
+}
+
+ok('датасеты: флажок 10b5-1 «true» и сноска о плане на поле свопа — покупка плановая (CRBG, Nippon Life, 2026q3)', () => {
+  const z = zipCreate({
+    'SUBMISSION.tsv': 'ACCESSION_NUMBER\tFILING_DATE\tDOCUMENT_TYPE\tISSUERCIK\tISSUERNAME\tISSUERTRADINGSYMBOL\tAFF10B5ONE\tDATE_OF_ORIG_SUB\tREMARKS\nN-1\t11-SEP-2026\t4\t1889539\tCorebridge\tCRBG\ttrue\t\t\nN-2\t11-SEP-2026\t4\t1889539\tCorebridge\tCRBG\tfalse\t\t',
+    'REPORTINGOWNER.tsv': 'ACCESSION_NUMBER\tRPTOWNERCIK\tRPTOWNERNAME\tRPTOWNER_RELATIONSHIP\tRPTOWNER_TITLE\nN-1\t9\tNIPPON LIFE INSURANCE CO\tTenPercentOwner\t\nN-2\t9\tNIPPON LIFE INSURANCE CO\tTenPercentOwner\t',
+    'NONDERIV_TRANS.tsv': 'ACCESSION_NUMBER\tTRANS_DATE\tTRANS_CODE\tEQUITY_SWAP_INVOLVED\tTRANS_SHARES\tTRANS_PRICEPERSHARE\tSHRS_OWND_FOLWNG_TRANS\tDIRECT_INDIRECT_OWNERSHIP\tEQUITY_SWAP_TRANS_CD_FN\tTRANS_SHARES_FN\nN-1\t10-SEP-2026\tP\t0\t136500\t33.78\t122092722\tD\t\t\nN-2\t10-SEP-2026\tP\t0\t136500\t33.78\t122092722\tD\tF1\t',
+    'FOOTNOTES.tsv': 'ACCESSION_NUMBER\tFOOTNOTE_ID\tFOOTNOTE_TXT\nN-2\tF1\tThe purchases reported herein were effected pursuant to a Rule 10b5-1 plan adopted by the Reporting Person on August 7, 2026.',
+  });
+  const { trades } = normalizeQuarterZip(z);
+  assert.equal(trades.find(r => r.acc === 'N-1').b5, 1, 'флажок «true»');
+  assert.equal(trades.find(r => r.acc === 'N-2').fn.b5, 1, 'сноска на EQUITY_SWAP_TRANS_CD_FN — поле сделки');
+  assert.ok(trades.every(r => isPlanned(r)));
+});
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);

@@ -38,6 +38,21 @@ export function coverageEntry({ indexed, collected, pending, gone = 0, at, error
   return e;
 }
 
+// Первый день, не покрытый загруженными квартальными датасетами («2026q3» -> «2026-10-01»).
+export function firstUncoveredDay(done, fallback = '2026-04-01') {
+  const last = (done ?? []).slice().sort().at(-1);
+  if (!last) return fallback;
+  const y = Number(last.slice(0, 4)), q = Number(last.slice(5));
+  return q === 4 ? `${y + 1}-01-01` : `${y}-${String(q * 3 + 1).padStart(2, '0')}-01`;
+}
+// Начало окна живого контура: не раньше первого непокрытого датасетами дня. Когда бэкфил подхватывает новый
+// квартал, живые строки за него вычищаются (данные SEC приоритетнее). До 11.2026 начало, раз записанное в
+// state.from, не двигалось: окно навсегда оставалось с 2026-04-01.
+export function windowStart(stateFrom, done) {
+  const d = firstUncoveredDay(done);
+  return stateFrom && stateFrom > d ? stateFrom : d;
+}
+
 export function pruneCoverage(coverage, today, days = COVERAGE_DAYS) {
   const cut = addDaysIso(today, -days);
   const out = {};
