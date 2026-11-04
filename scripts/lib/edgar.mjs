@@ -16,7 +16,10 @@ export const SHARD_VERSION = 3;
 export const PARSER_REV = 2;
 // То же для квартальных датасетов: backfill.mjs перечитывает кварталы с меньшей ревизией и замещает
 // строки на месте (как при смене схемы, но без смены SHARD_VERSION и без задержки живого контура).
-export const QUARTER_REV = 2;
+// 3 — флажок 10b5-1 «true» и сноски со всех полей сделки датасета (EQUITY_SWAP_TRANS_CD_FN и др.).
+export const QUARTER_REV = 3;
+// Поля датасета, сноски к которым описывают пакет, а не сделку (см. П2 в FIXES-COLLECT.md)
+const HOLD_FN_FIELDS = new Set(['NATURE_OF_OWNERSHIP_FN', 'DIRECT_INDIRECT_OWNERSHIP_FN', 'SHRS_OWND_FOLWNG_TRANS_FN', 'VALU_OWND_FOLWNG_TRANS_FN']);
 
 // Остаток владения (SHRS_OWND_FOLWNG_TRANS) относится к КОНКРЕТНОЙ форме владения, а не
 // к лицу: прямой пакет и пакет «через траст» — разные счётчики. Строки одной подачи мы
@@ -44,7 +47,21 @@ function foldOwnership(forms, code) {
   return out;
 }
 
-const DATASET_URL = q => `https://www.sec.gov/files/structureddata/data/insider-transactions-data-sets/${q}_form345.zip`;
+// Адрес квартальных датасетов SEC сменился: 2026q2 (09.07.2026) и 2026q3 (07.10.2026) лежат под
+// /files/datastandardsinnovation/, прежние — под /files/structureddata/. По старому адресу новые кварталы
+// отвечают 404, и бэкфил считал их «не опубликованными». Пробуем оба пути, новый первым.
+export const DATASET_URLS = q => [
+  `${edgarBase()}/files/datastandardsinnovation/data/insider-transactions-data-sets/${q}_form345.zip`,
+  `${edgarBase()}/files/structureddata/data/insider-transactions-data-sets/${q}_form345.zip`,
+];
+
+// Ключ класса бумаги для склейки строк: XML формы хранит название с экранированием (&quot;), датасет SEC —
+// в кавычках CSV; длина обрезки у них разная. Без нормализации одна и та же строка получала два ключа
+// (188 строк 04–09.2026), и при загрузке квартала строки задвоились бы.
+export function secKey(s) {
+  return String(s ?? '').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/"/g, '').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 40);
+}
 
 export function quarterList(fromYear, toYear, toQ) {
   const out = [];
@@ -85,7 +102,9 @@ export function normalizeQuarterZip(zipBuf) {
       fdate: secDate(r.FILING_DATE),
       cik: Number(r.ISSUERCIK),
       t: (r.ISSUERTRADINGSYMBOL || '').trim().toUpperCase(),
-      b5: r.AFF10B5ONE === '1' ? 1 : 0,
+      // Флажок плана SEC пишет то «1»/«0», то «true»/«false» (2026q3: 3 798 «1» и 1 237 «true»). До 11.2026
+      // признавалась только «1», и каждая четвёртая отмеченная форма датасета читалась как дискреционная.
+      b5: ['1', 'true'].includes(String(r.AFF10B5ONE ?? '').trim().toLowerCase()) ? 1 : 0,
       orig: secDate(r.DATE_OF_ORIG_SUB),
       remarks: r.REMARKS || '',
     });
@@ -150,10 +169,12 @@ export function normalizeQuarterZip(zipBuf) {
     // Природу сделки определяют только сноски к полям самой сделки. Сноски к остатку и форме владения
     // описывают пакет («в остатке есть N акций из DRIP/ESPP») — раньше они отсеивали обычные покупки
     // (66% отсевов DRIP/ESPP в 2016–2026, CEO Uber $10 млн 10.09.2026). Они идут в теги (fnh).
-    for (const id of fnIds(r.TRANS_SHARES_FN, r.TRANS_PRICEPERSHARE_FN, r.SECURITY_TITLE_FN,
-      r.TRANS_ACQUIRED_DISP_CD_FN, r.TRANS_DATE_FN, r.TRANS_CODE_FN, r.DEEMED_EXECUTION_DATE_FN)) a.fnIds.add(id);
-    for (const id of fnIds(r.NATURE_OF_OWNERSHIP_FN, r.DIRECT_INDIRECT_OWNERSHIP_FN,
-      r.SHRS_OWND_FOLWNG_TRANS_FN, r.VALU_OWND_FOLWNG_TRANS_FN)) a.holdIds.add(id);
+    // Поля сделки — все *_FN, кроме полей остатка и формы владения: сноска о плане 10b5-1 бывает и на
+    // EQUITY_SWAP_TRANS_CD_FN (Nippon Life в CRBG, 2026q3), и на TRANS_TIMELINESS_FN.
+    for (const [k, v] of Object.entries(r)) {
+      if (!v || !k.endsWith('_FN')) continue;
+      for (const id of fnIds(v)) (HOLD_FN_FIELDS.has(k) ? a.holdIds : a.fnIds).add(id);
+    }
     a.acc = r.ACCESSION_NUMBER; a.code = r.TRANS_CODE; a.tdate = tdate;
     agg.set(key, a);
   }
@@ -198,9 +219,13 @@ export function normalizeQuarterZip(zipBuf) {
 }
 
 export async function fetchQuarter(q) {
-  const { status, body } = await politeFetch(DATASET_URL(q));
-  if (!body) return { status, data: null };
-  return { status, data: normalizeQuarterZip(body) };
+  let status = null;
+  for (const url of DATASET_URLS(q)) {
+    const res = await politeFetch(url);
+    status = res.status;
+    if (res.body) return { status, data: normalizeQuarterZip(res.body), url };
+  }
+  return { status, data: null };
 }
 
 // ---- Живой контур: daily-index ----
@@ -356,7 +381,7 @@ export function parseForm4Txt(txt, acc, fdate) {
     const own = num(tagVal(post, 'sharesOwnedFollowingTransaction'));
     const nature = tag(tr, 'ownershipNature') ?? '';
     const di = tagVal(nature, 'directOrIndirectOwnership') === 'I' ? 'I' : 'D';
-    const secTitle = tagVal(tr, 'securityTitle') ?? '';
+    const secTitle = unescapeXml(tagVal(tr, 'securityTitle') ?? '');
     const key = `${code}|${tdate}|${secTitle}`;
     const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), ids: new Set(), holdIds: new Set(), sec: secTitle };
     a.sh += sh; a.cost += sh * (px ?? 0);

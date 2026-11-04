@@ -4,7 +4,7 @@
 // копию data/ на VPS: кэш цен, сплиты и открытия дня входа. В ветку data VPS ничего не пишет.
 import { join } from 'node:path';
 import { parseYahooChart, readPriceCache, writePriceCache, mergeSeries } from './prices.mjs';
-import { readOpens, writeOpens, mergeOpens, pickOpens, OPENS_BENCH } from './opens.mjs';
+import { readOpens, writeOpens, mergeOpens, pickOpens, volumesOf, OPENS_BENCH } from './opens.mjs';
 import { readJson, writeJson, addDaysIso } from './util.mjs';
 
 export const BARS_CHUNK = 20;            // тикеров за вызов воркера (у воркера потолок 25 подзапросов)
@@ -65,8 +65,10 @@ export function applyBars(dataDir, got, { opensNeeds = {}, bench = OPENS_BENCH, 
       const add = r.splits.filter(s => !have.has(s[0]));
       if (add.length) { splits[sym] = [...(splits[sym] ?? []), ...add].sort((a, b) => (a[0] < b[0] ? -1 : 1)); splitsChanged = true; }
     }
-    if (bench.includes(sym)) { mergeOpens(store, sym, pickOpens(r.ohlc, [], { all: true })); stat.opens++; }
-    else if (opensNeeds[sym]?.length) { mergeOpens(store, sym, pickOpens(r.ohlc, opensNeeds[sym])); stat.opens++; }
+    // Объём дня — в запись открытия, как у ежедневной загрузки (prices.mjs): по нему tradeResult узнаёт застывшую котировку (П9)
+    const vol = volumesOf(r.series);
+    if (bench.includes(sym)) { mergeOpens(store, sym, pickOpens(r.ohlc, [], { all: true, vol })); stat.opens++; }
+    else if (opensNeeds[sym]?.length) { mergeOpens(store, sym, pickOpens(r.ohlc, opensNeeds[sym], { vol })); stat.opens++; }
   }
   writeOpens(dataDir, store, updated);
   if (splitsChanged) writeJson(splitsPath, splits);

@@ -4,7 +4,7 @@
 // они дороже всего и от схемы сделок не зависят).
 // Использование: node scripts/backfill.mjs [--data data] [--max-quarters N]
 import { readJson, writeJson, readJsonGz, writeJsonGz, isoToday } from './lib/util.mjs';
-import { fetchQuarter, quarterList, SHARD_VERSION, QUARTER_REV } from './lib/edgar.mjs';
+import { fetchQuarter, quarterList, secKey, SHARD_VERSION, QUARTER_REV } from './lib/edgar.mjs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -78,7 +78,7 @@ for (const q of wanted) {
   };
   for (const r of data.trades) bucket(r.tdate.slice(0, 4))?.trades.push(r);
   for (const a of data.amend) bucket(a.orig.slice(0, 4))?.amend.push(a); // поправка живёт в году оригинала
-  const rowKey = r => `${r.acc}|${r.code}|${r.tdate}|${r.sec ?? ''}`;
+  const rowKey = r => `${r.acc}|${r.code}|${r.tdate}|${secKey(r.sec)}`;
   for (const [y, add] of byYear) {
     const shard = readShard(y);
     const seenT = new Set(shard.trades.map(rowKey));

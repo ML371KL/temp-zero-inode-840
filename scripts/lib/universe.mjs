@@ -1,6 +1,7 @@
 // Загрузка и дедупликация сделок; вселенная эмитентов.
 import { readJsonGz, readJson } from './util.mjs';
 import { exchangeAt } from './symbols.mjs';
+import { secKey } from './edgar.mjs';
 import { readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -25,7 +26,7 @@ export function loadAllTrades(dataDir) {
 
   // Ключ строки включает класс бумаги: одна подача может содержать покупки нескольких
   // классов (Class A + Class C), и без этого вторая строка молча затирала бы первую.
-  const rowKey = r => `${r.acc}|${r.code}|${r.tdate}|${r.sec ?? ''}`;
+  const rowKey = r => `${r.acc}|${r.code}|${r.tdate}|${secKey(r.sec)}`;
   const byKey = new Map();
   const amend = [];
   // Датасетные строки приоритетнее live: они прошли нормализацию SEC
@@ -47,7 +48,7 @@ export function loadAllTrades(dataDir) {
   // это разные покупки (KOD 30.09.2026: три формы Baker Bros на $58,6 / $35,0 / $60,5 млн), их складываем.
   const groups = new Map();
   for (const r of byKey.values()) {
-    const k = `${r.cik}|${r.owners[0]?.cik ?? 0}|${r.tdate}|${r.code}|${r.sec ?? ''}`;
+    const k = `${r.cik}|${r.owners[0]?.cik ?? 0}|${r.tdate}|${r.code}|${secKey(r.sec)}`;
     (groups.get(k) ?? groups.set(k, []).get(k)).push(r);
   }
   const out = [];
