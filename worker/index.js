@@ -249,6 +249,121 @@ async function handlePaper(request, env, url, origin) {
   return json({ error: 'not found' }, 404, origin);
 }
 
+// ---------- утренний список (R2) ----------
+// Сборка на VPS (scripts/vps/morning-build.mjs) кладёт готовый morning.json сюда: PUT /morning с тем же токеном приёма (PAPER_TOKEN);
+// панель и сторож читают GET /morning без токена (no-store; Last-Modified — момент записи в R2). Хранится одна, самая свежая версия:
+// более старая (по listFor, затем по builtAt) не принимается (409) — запоздавший повтор не откатит список.
+// /morning/letter/ГГГГ-ММ-ДД — отметка «письмо за этот день отправлено» (кем и когда). GitHub читает её перед своей рассылкой,
+// чтобы не продублировать письмо VPS; пишет её отправитель после того, как Telegram принял сообщение. Первая запись остаётся.
+const MORNING_KEY = 'morning/latest.json';
+const MORNING_MAX_BYTES = 4 * 1024 * 1024;               // файл — десятки килобайт; больше — ошибка отправителя
+const LETTER_MAX_BYTES = 1024;
+const LETTER = /^\/morning\/letter\/(\d{4}-\d{2}-\d{2})$/;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+function checkMorning(text) {
+  let m;
+  try { m = JSON.parse(text); } catch { return { ok: false, why: 'не JSON' }; }
+  if (!m || typeof m !== 'object' || Array.isArray(m)) return { ok: false, why: 'не объект' };
+  if (!ISO_DATE.test(m.listFor ?? '')) return { ok: false, why: 'нет listFor' };
+  if (typeof m.builtAt !== 'string' || Number.isNaN(Date.parse(m.builtAt))) return { ok: false, why: 'нет builtAt' };
+  if (m.builder !== 'github' && m.builder !== 'vps') return { ok: false, why: 'builder не github и не vps' };
+  if (!Array.isArray(m.days) || m.days.length > 60) return { ok: false, why: 'нет days' };
+  if (!m.counter || typeof m.counter !== 'object') return { ok: false, why: 'нет counter' };
+  return { ok: true, listFor: m.listFor, builtAt: new Date(m.builtAt).toISOString(), builder: m.builder };
+}
+// Тело запроса с пределом по размеру (Content-Length может отсутствовать или лгать)
+async function bodyText(request, max) {
+  if (Number(request.headers.get('Content-Length') ?? 0) > max) return null;
+  const text = await request.text();
+  return text.length > max ? null : text;
+}
+async function handleMorning(request, env, url, origin) {
+  if (!env.PAPER) return json({ error: 'хранилище не подключено' }, 503, origin);
+  const path = url.pathname, letter = LETTER.exec(path);
+  const get = request.method === 'GET', put = request.method === 'PUT';
+  if (get && path === '/morning') {
+    const obj = await env.PAPER.get(MORNING_KEY);
+    if (!obj) return json({ error: 'списка ещё нет' }, 404, origin, { 'Cache-Control': 'no-store' });
+    return new Response(obj.body, { status: 200, headers: {
+      'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...cors(origin),
+      ...(obj.uploaded ? { 'Last-Modified': new Date(obj.uploaded).toUTCString() } : {}),
+    } });
+  }
+  if (get && letter) {
+    const obj = await env.PAPER.get('morning/letter/' + letter[1] + '.json');
+    if (!obj) return json({ error: 'письмо за эту дату не отмечено' }, 404, origin, { 'Cache-Control': 'no-store' });
+    return new Response(obj.body, { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...cors(origin) } });
+  }
+  if (put && (path === '/morning' || letter)) {
+    if (!env.PAPER_TOKEN) return json({ error: 'приём не настроен (нет секрета PAPER_TOKEN)' }, 503, origin);
+    if (!authorized(request, env)) return json({ error: 'нужен токен' }, 401, origin);
+    const text = await bodyText(request, letter ? LETTER_MAX_BYTES : MORNING_MAX_BYTES);
+    if (text === null) return json({ error: 'тело слишком велико' }, 413, origin);
+    if (letter) {
+      let m;
+      try { m = JSON.parse(text); } catch { return json({ error: 'не JSON' }, 400, origin); }
+      if (!m || (m.by !== 'vps' && m.by !== 'github') || Number.isNaN(Date.parse(m.at))) return json({ error: 'нужны by (vps|github) и at' }, 400, origin);
+      const key = 'morning/letter/' + letter[1] + '.json';
+      const prev = await env.PAPER.get(key);
+      if (prev) return json({ ok: true, existed: true, marker: await new Response(prev.body).json() }, 200, origin);
+      const marker = { by: m.by, at: new Date(m.at).toISOString(), ok: true };
+      await env.PAPER.put(key, JSON.stringify(marker), { httpMetadata: { contentType: 'application/json' } });
+      return json({ ok: true, existed: false, marker }, 200, origin);
+    }
+    const check = checkMorning(text);
+    if (!check.ok) return json({ error: check.why }, 400, origin);
+    const prev = await env.PAPER.head(MORNING_KEY);
+    const pm = prev?.customMetadata;
+    if (pm?.listFor) {
+      const older = check.listFor < pm.listFor || (check.listFor === pm.listFor && Date.parse(check.builtAt) < Date.parse(pm.builtAt));
+      if (older) return json({ error: 'в хранилище версия новее', stored: { listFor: pm.listFor, builtAt: pm.builtAt }, sent: { listFor: check.listFor, builtAt: check.builtAt } }, 409, origin);
+    }
+    await env.PAPER.put(MORNING_KEY, text, { httpMetadata: { contentType: 'application/json' }, customMetadata: { listFor: check.listFor, builtAt: check.builtAt, builder: check.builder } });
+    return json({ ok: true, listFor: check.listFor, builtAt: check.builtAt, bytes: text.length }, 200, origin);
+  }
+  return json({ error: 'not found' }, 404, origin);
+}
+
+// ---------- дневные бары для сборки на VPS ----------
+// Сборка утреннего списка на VPS не ходит в Yahoo напрямую (адрес VPS почти выбрал часовой лимит из-за 839), а просит бары у воркера:
+// GET /bars?symbols=AAPL,MGM:2025-09-01&from=2026-10-20 с тем же токеном. Для тикера можно задать свою дату начала после двоеточия.
+// Отдаёт ответ Yahoo chart как есть (разбирает его сборка тем же кодом, что и ежедневная): бары, сплиты, открытия.
+const BARS_MAX_SYMBOLS = 25;                              // подзапросов у воркера на вызов ограничено
+async function handleBars(request, env, url, origin) {
+  if (request.method !== 'GET') return json({ error: 'method' }, 405, origin);
+  if (!env.PAPER_TOKEN) return json({ error: 'не настроен (нет секрета PAPER_TOKEN)' }, 503, origin);
+  if (!authorized(request, env)) return json({ error: 'нужен токен' }, 401, origin);
+  const dflt = url.searchParams.get('from') ?? '';
+  const items = [];
+  for (const part of (url.searchParams.get('symbols') ?? '').toUpperCase().split(',')) {
+    const [sym, from = dflt] = part.trim().split(':');
+    if (!/^[A-Z0-9.\-]{1,12}$/.test(sym ?? '') || !ISO_DATE.test(from) || from < '2015-01-01') continue;
+    if (!items.some(x => x.sym === sym)) items.push({ sym, from });
+  }
+  if (!items.length) return json({ error: 'нужны symbols и from (ГГГГ-ММ-ДД)' }, 400, origin);
+  if (items.length > BARS_MAX_SYMBOLS) return json({ error: 'не больше ' + BARS_MAX_SYMBOLS + ' тикеров за вызов' }, 400, origin);
+  // Ответы Yahoo не разбираются и не пересериализуются: на бесплатном плане у воркера 10 мс процессорного времени, а ответ по двадцати тикерам с историей — сотни килобайт.
+  // Текст вставляется в общий ответ как есть; не похожее на JSON-объект считается сбоем тикера.
+  const bars = {}, failed = {};
+  let limited = false;
+  const p2 = Math.floor(Date.now() / 1000) + 86400;
+  await Promise.all(items.map(async ({ sym, from }) => {
+    try {
+      const p1 = Math.floor(Date.parse(from + 'T00:00:00Z') / 1000);
+      const r = await fetch(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol(sym))}?period1=${p1}&period2=${p2}&interval=1d&events=div%2Csplits`,
+        { headers: { 'User-Agent': UA, 'Accept': 'application/json' } });
+      if (r.status === 429) { limited = true; failed[sym] = 'HTTP 429'; return; }
+      if (!r.ok) { failed[sym] = 'HTTP ' + r.status; return; }
+      const text = (await r.text()).trim();
+      if (text[0] !== '{') { failed[sym] = 'ответ не JSON'; return; }
+      bars[sym] = text;
+    } catch (e) { failed[sym] = String(e?.message || e); }
+  }));
+  const body = '{"ok":true,"limited":' + limited + ',"failed":' + JSON.stringify(failed) + ',"bars":{'
+    + Object.entries(bars).map(([sym, text]) => JSON.stringify(sym) + ':' + text).join(',') + '}}';
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...cors(origin) } });
+}
+
 export default {
   async fetch(request, env, ctx) {
     const origin = request.headers.get('Origin') ?? '';
@@ -256,6 +371,8 @@ export default {
     const url = new URL(request.url);
     // Журнал вечерней схемы живёт на своих путях и принимает PUT; котировки — только GET, как и раньше
     if (url.pathname.startsWith('/paper/')) return handlePaper(request, env, url, origin);
+    if (url.pathname === '/morning' || url.pathname.startsWith('/morning/')) return handleMorning(request, env, url, origin);
+    if (url.pathname === '/bars') return handleBars(request, env, url, origin);
     if (request.method !== 'GET') return json({ error: 'method' }, 405, origin);
 
     if (url.pathname === '/health') return json({ ok: true, ttl: TTL }, 200, origin);

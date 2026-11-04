@@ -1,0 +1,34 @@
+[Unit]
+Description=Инсайдерский радар 840 · утренний список на VPS: индекс EDGAR → формы → бары → morning.json в воркер → письмо (повтор каждые 2 минуты до 23:30 ET)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dash
+Group=dash
+WorkingDirectory=/srv/dash/repo-840
+EnvironmentFile=/usr/local/etc/insider840-morning/env
+Environment=NODE_ENV=production
+# git и Node пишут только сюда (ProtectHome и ProtectSystem=strict закрывают остальное)
+Environment=HOME=/var/lib/insider840-morning
+# Старт — таймером в 22:03 ET. Сам скрипт повторяет попытки каждые 2 минуты до 23:30 ET, пока индекса нет или шаг не удался; не собрал к 23:30 —
+# выход с ошибкой и тревога. Код лежит вне юнита (install.sh), клон сам себя не обновляет; данные — ветка data, анонимный fetch на каждый запуск.
+ExecStart=/usr/bin/node scripts/vps/morning-build.mjs --state /var/lib/insider840-morning --until 23:30 --interval 120
+# 22:03 → 23:30 ET = 1 ч 27 мин; предел страхует только от зависшего процесса
+TimeoutStartSec=6300
+SyslogIdentifier=insider840-morning
+
+StateDirectory=insider840-morning
+StateDirectoryMode=0750
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+# пик памяти сборки (compute --only-morning) — около 1,9 ГБ (замер на VPS 05.11.2026)
+MemoryHigh=3G
+MemoryMax=4G
+Nice=5
+
+# Тревога из systemd: ИМЕННО ExecStopPost, а не OnFailure (приходит и «упало», и «снова проходит»)
+ExecStopPost=-+/usr/local/sbin/dash-alert %n

@@ -12,6 +12,15 @@
 // ненулевой код выхода и уходит следующим прогоном.
 // Режимы: --dry-run (в сеть не ходит, состояние двигает), --preview (последний непустой список
 // как образец, состояние не трогает), --test (проверка связки), --any-date (не проверять свежесть).
+//
+// Письмо может уйти из двух мест: с VPS сразу после индекса EDGAR (~22:05 ET, scripts/vps/morning-build.mjs) и из ежедневной
+// сборки на GitHub (позже, полным пересчётом). Чтобы не продублировать, отправитель после доставки кладёт в воркер отметку
+// PUT /morning/letter/ДАТА (нужен PAPER_TOKEN — он только на VPS), а перед отправкой читает её (GET, без токена): отметка есть —
+// письмо за эту дату уже ушло, дата записывается отправленной без повторной отправки. VPS дополнительно видит ключи ветки data
+// (state/notify.json от GitHub). --sender vps|github (или MORNING_SENDER) говорит, кто мы. Воркер не ответил — отправляем:
+// пропущенное письмо хуже редкого дубля.
+// Если полный пересчёт на GitHub разошёлся со списком VPS (morning.crossCheck.same === false, пишет scripts/crosscheck.mjs) и письмо
+// о списке отправил VPS, уходит короткое уточнение (ключ fix|ДАТА, раз на дату).
 import { readJson, writeJson, isoToday, addDaysIso } from './lib/util.mjs';
 import { join } from 'node:path';
 
@@ -20,6 +29,9 @@ function argVal(name, def) { const i = args.indexOf(name); return i >= 0 ? args[
 const DATA = argVal('--data', 'data');
 const SITE = argVal('--site', 'site');
 const DRY = args.includes('--dry-run');
+const SENDER = argVal('--sender', process.env.MORNING_SENDER || 'github');
+const MORNING_URL = (process.env.MORNING_URL || 'https://radar840-quotes.financehub.workers.dev').replace(/\/$/, '');
+const MARKER_TOKEN = process.env.PAPER_TOKEN || '';
 const PREVIEW = args.includes('--preview');   // показать последний непустой список, не трогая состояние
 
 const SITE_URL = 'https://ml371kl.github.io/temp-zero-inode-840/';
@@ -128,6 +140,37 @@ async function send(text, markup, eventId) {
   else console.log('[notify] секреты Telegram не заданы — отправка в чат пропущена');
   await sendNexusEvent(text, eventId);
   return outcome;
+}
+
+// ---------- отметка «письмо отправлено» в воркере ----------
+// get: объект отметки { by, at, ok } | null (нет) | undefined (воркер не ответил — неизвестно, отправляем)
+async function markerGet(date) {
+  try {
+    const r = await fetch(`${MORNING_URL}/morning/letter/${date}`, { signal: AbortSignal.timeout(8000) });
+    if (r.status === 404) return null;
+    if (!r.ok) { console.error(`[notify] отметка письма: HTTP ${r.status} — считаем, что письма не было`); return undefined; }
+    return await r.json();
+  } catch (error) {
+    console.error('[notify] отметка письма недоступна:', error?.message || error);
+    return undefined;
+  }
+}
+// put: пишем только там, где есть токен приёма (VPS); три попытки. false — отметка не легла: дубль возможен, об этом в лог.
+async function markerPut(date) {
+  if (!MARKER_TOKEN) return false;
+  for (let k = 0; k < 3; k++) {
+    try {
+      const r = await fetch(`${MORNING_URL}/morning/letter/${date}`, {
+        method: 'PUT', headers: { Authorization: `Bearer ${MARKER_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ by: SENDER, at: new Date().toISOString() }), signal: AbortSignal.timeout(8000),
+      });
+      if (r.ok) return true;
+      console.error(`[notify] отметка письма не принята: HTTP ${r.status}`);
+    } catch (error) { console.error('[notify] отметка письма не отправлена:', error?.message || error); }
+    await sleep(1500);
+  }
+  console.error(`[notify] ВНИМАНИЕ: письмо за ${date} ушло, а отметки в воркере нет — ежедневная сборка на GitHub может отправить его повторно`);
+  return false;
 }
 
 // ---------- форматирование (единый стиль сообщений панелей, 29.10.2026) ----------
@@ -254,6 +297,21 @@ function emptyMessage(day, counter, cov) {
   lines.push('', counterLine(counter), '', footer());
   return lines.join('\n');
 }
+// Уточнение после полной пересборки: чем основной список отличается от того, что ушло с VPS. Строки — тикер, скор, сумма.
+function fixMessage(cc) {
+  const lines = [head('🔁', 'список уточнён'), `Подачи за ${fmtDate(cc.listFor)} · полная пересборка изменила основной список:`];
+  const d = cc.diff ?? [];
+  const show = d.slice(0, TOP_N).map(x => {
+    const tail = `<b>${esc(x.t)}</b> · ${esc(trunc(nameCase(x.name), 24))}`;
+    if (x.was === null) return `+ ${tail} · скор ${x.now}${x.val ? ' · ' + money(x.val) : ''}`;
+    if (x.now === null) return `− ${tail} убрана`;
+    return `≈ ${tail} · скор ${x.was} → ${x.now}`;
+  });
+  lines.push(...show);
+  if (d.length > TOP_N) lines.push(`и ещё ${d.length - TOP_N} — на панели`);
+  lines.push('', 'Актуальный список — на панели.', '', footer());
+  return lines.join('\n');
+}
 function morningMessage(day, counter, note = '') {
   const main = mainOf(day), rest = restOf(day);
   const lines = [
@@ -321,12 +379,35 @@ const hasLetter = d => mainOf(d).length > 0 || (d.date === listFor && emptyOk);
 const fresh = days.filter(d => hasLetter(d) && !sent.has(dayId(d))
   && (args.includes('--any-date') || today <= nextBusinessDay(d.date))).reverse();   // от старого к свежему
 saveState();
-if (!fresh.length) { console.log('[notify] новых утренних списков нет'); process.exit(0); }
+// Уточнение по crossCheck может понадобиться и без новых списков: письмо ушло с VPS раньше, а пересчёт разошёлся с ним позже
+if (!fresh.length && morning?.crossCheck?.same !== false) { console.log('[notify] новых утренних списков нет'); process.exit(0); }
 console.log(`[notify] новых утренних списков: ${fresh.length}${fresh.some(d => !mainOf(d).length) ? ' (в том числе пустой день)' : ''}`);
 
 // ---------- отправка ----------
 // eventId — «840|morning|дата подачи»: список, доставленный повторно, на хабе ляжет на прежнюю запись.
-const messages = fresh.map(d => ({ text: mainOf(d).length ? morningMessage(d, morning.counter) : emptyMessage(d, morning.counter, cov), markup: undefined, id: dayId(d), eventId: '840|' + dayId(d) }));
+const messages = fresh.map(d => ({ date: d.date, text: mainOf(d).length ? morningMessage(d, morning.counter) : emptyMessage(d, morning.counter, cov), markup: undefined, id: dayId(d), eventId: '840|' + dayId(d) }));
+
+// Отметка в воркере: письмо за дату уже отправил другой отправитель — не повторяем, дату считаем отправленной.
+// Читается и в пробном прогоне (только чтение); при ошибке воркера письмо уходит.
+const already = [];
+for (const m of [...messages]) {
+  const mk = await markerGet(m.date);
+  if (mk?.ok) {
+    console.log(`[notify] письмо за ${m.date} уже отправлено (${mk.by}, ${mk.at}) — повторно не шлём`);
+    sent.add(m.id); already.push(m.date);
+    messages.splice(messages.indexOf(m), 1);
+  }
+}
+if (already.length) saveState();
+
+// Уточнение: полный пересчёт на GitHub разошёлся со списком, о котором написал VPS
+const cc = morning?.crossCheck;
+if (cc && cc.same === false && cc.listFor && (cc.diff ?? []).length && !sent.has(`fix|${cc.listFor}`)
+  && (args.includes('--any-date') || today <= nextBusinessDay(cc.listFor)) && sent.has(dayId({ date: cc.listFor }))) {
+  const mk = await markerGet(cc.listFor);
+  if (mk?.by === 'vps' && mk.ok) messages.push({ date: null, text: fixMessage(cc), markup: undefined, id: `fix|${cc.listFor}`, eventId: `840|fix|${cc.listFor}` });
+}
+if (!messages.length) { console.log('[notify] писем к отправке нет'); process.exit(0); }
 
 if (DRY) {
   // Пробный прогон «доставляет» в консоль и двигает состояние так же, как боевой: на этом
@@ -345,7 +426,7 @@ for (const [k, m] of messages.entries()) {
   if (k) await sleep(1200);
   const outcome = await send(m.text, m.markup, m.eventId);
   if (outcome === 'fail') { failCount++; continue; }
-  if (outcome === 'sent') okCount++;
+  if (outcome === 'sent') { okCount++; if (m.date) await markerPut(m.date); }
   sent.add(m.id);
   saveState();
 }

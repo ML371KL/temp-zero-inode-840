@@ -2,7 +2,7 @@
 // недели запуска; динамические ряды строятся «до сегодня» так, чтобы классификация не менялась.
 import { strict as assert } from 'node:assert';
 import { execFileSync, execFile } from 'node:child_process';
-import { rmSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { rmSync, mkdirSync, readFileSync, writeFileSync, readdirSync, cpSync, existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -12,8 +12,12 @@ import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, acceptedAt,
 import {
   mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo,
   trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough, fetchYahooDaily, turnover20,
+  parseYahooChart, readPriceCache,
 } from './lib/prices.mjs';
-import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf } from './lib/morning.mjs';
+import { barsFrom, fetchBars, applyBars } from './lib/bars.mjs';
+import { isSecClosed } from './lib/calendar.mjs';
+import { main as morningMain, liveVerdict } from './vps/morning-build.mjs';
+import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf, compareMain } from './lib/morning.mjs';
 import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
 import { EVENING, nyWall, nyToMs, inEveningWindow, parseAtom, filingPath, buildEvent, fromWorker, validBook, entryPx, benchPx, paperTrade, summarizePaper, planQuotes, parseJournal, pickQuote } from './lib/evening.mjs';
 import { buildPaper } from './lib/paper.mjs';
@@ -26,6 +30,8 @@ import { classifyFootnotes, rowFootnoteFlags } from './lib/footnotes.mjs';
 import { loadAllTrades, issuerCategory } from './lib/universe.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+process.env.MORNING_URL = 'http://127.0.0.1:9';        // отметки писем (notify.mjs) в тестах не уходят в боевой воркер
+delete process.env.PAPER_TOKEN;
 let passed = 0;
 function ok(name, fn) {
   try { fn(); passed++; }
@@ -1879,6 +1885,379 @@ ok('notify (П14): пустое письмо — только за listFor; вы
   const d4 = freshDir('data-empty-complete');
   notify([mDay(nDay(-4), [mRow('OLD', 3e5)])], { dir: d4 });
   assert.match(notify(days, { dir: d4, extra: { listFor: nDay(-1), coverage: { status: 'complete', indexed: 9, collected: 9 } } }), /утренний список пуст/);
+});
+
+// ---------- PR-2: сборка утреннего списка на VPS, воркер (/morning, /bars), отметка письма, сверка с GitHub ----------
+const mkR2 = () => {
+  const objs = new Map();
+  return {
+    objs,
+    put: async (k, body, o) => { objs.set(k, { body, size: body.length, uploaded: new Date('2026-11-05T03:05:00Z'), customMetadata: o?.customMetadata ?? {} }); },
+    head: async k => objs.get(k) ?? null,
+    get: async k => objs.get(k) ?? null,
+    list: async ({ prefix }) => ({ objects: [...objs.entries()].filter(([k]) => k.startsWith(prefix)).map(([key, o]) => ({ key, size: o.size, uploaded: o.uploaded })) }),
+  };
+};
+// Ответ Yahoo chart из ряда [[дата, close, adj, объём]]; over — { дата: [открытие, закрытие] } для пар открытие/закрытие дня входа
+const chartOf = (series, over = {}) => ({
+  chart: { result: [{
+    meta: { gmtoffset: -18000, exchangeName: 'NYQ' },
+    timestamp: series.map(r => Math.floor(Date.parse(r[0] + 'T14:30:00Z') / 1000)),
+    indicators: {
+      quote: [{ open: series.map(r => over[r[0]]?.[0] ?? r[1]), close: series.map(r => over[r[0]]?.[1] ?? r[1]), volume: series.map(r => r[3]) }],
+      adjclose: [{ adjclose: series.map(r => over[r[0]]?.[1] ?? r[2]) }],
+    },
+    events: {},
+  }] },
+});
+const MJ = (listFor, builtAt, builder = 'vps', extra = {}) => JSON.stringify({ built: listFor, listFor, builtAt, builder, coverage: null, params: {}, counter: { main: { n: 0 } }, days: [{ date: listFor, rows: [] }], ...extra });
+
+ok('календарь SEC: федеральные праздники и их переносы, Страстная пятница — рабочий день SEC', () => {
+  for (const d of ['2026-11-11', '2026-11-26', '2026-07-03', '2026-10-12', '2026-06-19', '2026-12-25', '2026-01-01', '2026-01-19', '2026-02-16', '2026-05-25', '2026-09-07', '2027-12-31', '2026-11-07', '2026-11-08'])
+    assert.equal(isSecClosed(d), true, d);
+  for (const d of ['2026-11-04', '2026-11-05', '2026-04-03', '2026-07-02', '2026-11-12', '2027-01-04'])
+    assert.equal(isSecClosed(d), false, d);
+});
+ok('сборка на VPS: вердикт по живому контуру — индекс не вышел, разобран частично, на последней попытке идём как есть', () => {
+  const D = '2026-11-04', cov = (status, extra = {}) => ({ [D]: { status, indexed: 100, collected: 90, pending: 10, at: 'x', ...extra } });
+  assert.deepEqual(liveVerdict({ lastDay: D, coverage: cov('complete', { collected: 100, pending: 0 }) }, D, 0), { ok: true, partial: false });
+  assert.equal(liveVerdict({ lastDay: '2026-11-03' }, D, 0).ok, false, 'индекс D не разобран');
+  assert.match(liveVerdict({ lastDay: '2026-11-03' }, D, 1).why, /код 1/);
+  assert.equal(liveVerdict({ lastDay: D, coverage: cov('not-published') }, D, 0).ok, false);
+  assert.equal(liveVerdict({ lastDay: D, coverage: cov('holiday') }, D, 0).ok, false);
+  const part = liveVerdict({ lastDay: D, coverage: cov('partial') }, D, 0);
+  assert.equal(part.ok, false); assert.match(part.why, /90 из 100.*добора 10/);
+  assert.deepEqual(liveVerdict({ lastDay: D, coverage: cov('partial') }, D, 0, true), { ok: true, partial: true });
+  assert.deepEqual(liveVerdict({ lastDay: D }, D, 0), { ok: true, partial: false }, 'старое состояние без coverage — достаточно lastDay');
+});
+ok('сверка списков: состав и скор основного списка, остальные бумаги не сравниваются', () => {
+  const r = (t, score, extra = {}) => ({ t, name: t + ' Inc', score, main: score >= 2, val: 1e5, ...extra });
+  assert.deepEqual(compareMain([r('A', 3), r('B', 2), r('C', 1)], [r('A', 3), r('B', 2), r('C', 0), r('D', 1)]), { same: true, diff: [], vps: 2, github: 2 });
+  const c = compareMain([r('A', 3), r('B', 2), r('E', 2)], [r('A', 4), r('B', 2), r('F', 3, { val: 7e5 })]);
+  assert.equal(c.same, false);
+  assert.deepEqual(c.diff.map(x => [x.t, x.was, x.now]), [['A', 3, 4], ['F', null, 3], ['E', 2, null]], 'по убыванию скора; ушедшая — в конце');
+  assert.equal(compareMain([], [r('A', 2)]).diff[0].was, null);
+});
+ok('parseYahooChart: тот же разбор для текста и объекта, открытия и закрытия из одного ответа', () => {
+  const s = [['2026-10-26', 10, 10, 100], ['2026-10-27', 11, 11, 200], ['2026-10-28', 12, 12, 300]];
+  const a = parseYahooChart(chartOf(s, { '2026-10-28': [11.5, 12] })), b = parseYahooChart(JSON.stringify(chartOf(s, { '2026-10-28': [11.5, 12] })));
+  assert.deepEqual(a, b); assert.deepEqual(a.series.map(x => x[0]), ['2026-10-26', '2026-10-27', '2026-10-28']);
+  assert.deepEqual(a.ohlc.at(-1), ['2026-10-28', 11.5, 12]);
+  assert.deepEqual(parseYahooChart('не json'), { missing: true }); assert.deepEqual(parseYahooChart({ chart: { result: [] } }), { missing: true });
+});
+
+await okAsync('воркер: /morning — приём по токену, версии только новее, чтение без токена; отметка письма — первая запись остаётся', async () => {
+  const worker = (await import(pathToFileURL(join(ROOT, 'worker', 'index.js')).href)).default;
+  const R2 = mkR2(), ENV = { PAPER: R2, PAPER_TOKEN: 'sekret' };
+  const call = (method, path, { body, token, env = ENV } = {}) => worker.fetch(
+    new Request('https://w.example' + path, { method, body, headers: token ? { Authorization: 'Bearer ' + token } : {} }), env, { waitUntil() {} });
+  const T = 'sekret';
+  assert.equal((await call('GET', '/morning')).status, 404, 'списка ещё нет');
+  assert.equal((await call('PUT', '/morning', { body: MJ('2026-11-04', '2026-11-05T03:05:00Z') })).status, 401, 'без токена');
+  assert.equal((await call('PUT', '/morning', { body: MJ('2026-11-04', '2026-11-05T03:05:00Z'), token: 'wrong' })).status, 401);
+  assert.equal(R2.objs.size, 0, 'ничего не записано');
+  const put = await call('PUT', '/morning', { body: MJ('2026-11-04', '2026-11-05T03:05:00Z'), token: T });
+  assert.equal(put.status, 200); assert.equal((await put.json()).listFor, '2026-11-04');
+  const rd = await call('GET', '/morning');
+  assert.equal(rd.status, 200); assert.equal(rd.headers.get('cache-control'), 'no-store'); assert.match(rd.headers.get('last-modified'), /GMT$/);
+  assert.equal((await rd.json()).builder, 'vps');
+  // версия старее хранимой не принимается: прошлая дата, та же дата с более ранним временем сборки
+  assert.equal((await call('PUT', '/morning', { body: MJ('2026-11-03', '2026-11-06T00:00:00Z'), token: T })).status, 409);
+  const stale = await call('PUT', '/morning', { body: MJ('2026-11-04', '2026-11-05T03:04:00Z'), token: T });
+  assert.equal(stale.status, 409); assert.equal((await stale.json()).stored.builtAt, '2026-11-05T03:05:00.000Z');
+  assert.equal((await call('PUT', '/morning', { body: MJ('2026-11-04', '2026-11-05T03:25:00Z', 'github'), token: T })).status, 200, 'позже на той же дате — принимается');
+  assert.equal((await call('PUT', '/morning', { body: MJ('2026-11-05', '2026-11-06T03:05:00Z'), token: T })).status, 200, 'новая дата подачи');
+  // защита от порчи
+  for (const bad of ['не json', '[]', MJ('вчера', '2026-11-06T00:00:00Z'), MJ('2026-11-06', 'когда-то'), MJ('2026-11-06', '2026-11-06T00:00:00Z', 'ручной'), JSON.stringify({ listFor: '2026-11-06', builtAt: '2026-11-06T00:00:00Z', builder: 'vps', days: [] })])
+    assert.equal((await call('PUT', '/morning', { body: bad, token: T })).status, 400, bad.slice(0, 40));
+  assert.equal((await call('PUT', '/morning', { body: 'x'.repeat(4 * 1024 * 1024 + 1), token: T })).status, 413);
+  assert.equal((await call('PUT', '/morning', { body: MJ('2026-11-07', '2026-11-08T00:00:00Z'), token: T, env: { PAPER: R2 } })).status, 503, 'нет секрета — приём закрыт');
+  assert.equal((await call('GET', '/morning', { env: {} })).status, 503);
+  // отметка письма
+  const L = '/morning/letter/2026-11-05';
+  assert.equal((await call('GET', L)).status, 404);
+  assert.equal((await call('PUT', L, { body: JSON.stringify({ by: 'vps', at: '2026-11-05T03:06:00Z' }) })).status, 401);
+  assert.equal((await call('PUT', L, { body: JSON.stringify({ by: 'кто-то', at: '2026-11-05T03:06:00Z' }), token: T })).status, 400);
+  const m1 = await call('PUT', L, { body: JSON.stringify({ by: 'vps', at: '2026-11-05T03:06:00Z' }), token: T });
+  assert.deepEqual(await m1.json(), { ok: true, existed: false, marker: { by: 'vps', at: '2026-11-05T03:06:00.000Z', ok: true } });
+  const m2 = await call('PUT', L, { body: JSON.stringify({ by: 'github', at: '2026-11-05T03:30:00Z' }), token: T });
+  assert.equal((await m2.json()).marker.by, 'vps', 'первая запись остаётся');
+  assert.equal((await (await call('GET', L)).json()).by, 'vps');
+  assert.equal((await call('GET', '/morning/letter/сегодня')).status, 404);
+});
+await okAsync('воркер: /bars — только с токеном, до 25 тикеров, свой старт для тикера, 429 и сбои названы', async () => {
+  const worker = (await import(pathToFileURL(join(ROOT, 'worker', 'index.js')).href)).default;
+  const ENV = { PAPER: mkR2(), PAPER_TOKEN: 'sekret' };
+  const realFetch = globalThis.fetch, seen = [];
+  globalThis.fetch = async url => {
+    seen.push(String(url));
+    const sym = decodeURIComponent(/chart\/([^?]+)/.exec(String(url))[1]);
+    if (sym === 'LIM') return new Response('', { status: 429 });
+    if (sym === 'BAD') return new Response('', { status: 404 });
+    if (sym === 'HTML') return new Response('<html>captcha</html>', { status: 200 });
+    return new Response(JSON.stringify(chartOf([['2026-11-03', 10, 10, 1]])), { status: 200 });
+  };
+  try {
+    const call = (qs, token = 'sekret', env = ENV) => worker.fetch(new Request('https://w.example/bars?' + qs, { headers: token ? { Authorization: 'Bearer ' + token } : {} }), env, { waitUntil() {} });
+    assert.equal((await call('symbols=AAPL&from=2026-10-01', null)).status, 401);
+    assert.equal((await call('symbols=AAPL&from=2026-10-01', 'wrong')).status, 401);
+    assert.equal((await call('symbols=AAPL&from=2026-10-01', 'sekret', { PAPER: ENV.PAPER })).status, 503);
+    assert.equal(seen.length, 0, 'Yahoo без токена не трогаем');
+    const r = await call('symbols=' + encodeURIComponent('AAPL,BRK.B:2025-09-01,LIM,BAD,HTML,aapl') + '&from=2026-10-01');
+    const j = await r.json();
+    assert.equal(r.status, 200); assert.deepEqual(Object.keys(j.bars).sort(), ['AAPL', 'BRK.B']); assert.deepEqual(j.failed, { LIM: 'HTTP 429', BAD: 'HTTP 404', HTML: 'ответ не JSON' }, 'не-JSON от Yahoo не портит общий ответ'); assert.equal(j.limited, true);
+    const brk = seen.find(u => u.includes('BRK-B')), p1 = Number(/period1=(\d+)/.exec(brk)[1]);
+    assert.equal(p1, Date.parse('2025-09-01T00:00:00Z') / 1000, 'у BRK.B своя дата начала, символ Yahoo — с дефисом');
+    assert.equal(Number(/period1=(\d+)/.exec(seen.find(u => u.includes('/AAPL?')))[1]), Date.parse('2026-10-01T00:00:00Z') / 1000, 'у AAPL — общая');
+    assert.equal(seen.filter(u => u.includes('/AAPL?')).length, 1, 'повтор тикера в запросе не удваивает обращений');
+    assert.equal((await call('symbols=AAPL')).status, 400, 'нужна дата начала');
+    assert.equal((await call('symbols=AAPL&from=1999-01-01')).status, 400);
+    assert.equal((await call('symbols=' + Array.from({ length: 26 }, (_, i) => 'T' + i).join(',') + '&from=2026-10-01')).status, 400);
+    assert.equal((await worker.fetch(new Request('https://w.example/bars?symbols=AAPL&from=2026-10-01', { method: 'PUT', headers: { Authorization: 'Bearer sekret' } }), ENV, { waitUntil() {} })).status, 405);
+  } finally { globalThis.fetch = realFetch; }
+});
+
+ok('бары VPS: с какой даты просить, слияние в копию data (кэш, сплиты, открытия), пачки по 20', () => {
+  assert.equal(barsFrom('2026-11-03', '2026-11-04'), '2026-10-31', 'есть кэш — с перекрытием в три дня');
+  assert.equal(barsFrom(null, '2026-11-04'), addDaysIso('2026-11-04', -420), 'кэша нет — вся история для 52-недельного максимума');
+  assert.equal(barsFrom('2026-11-03', '2026-11-04', ['2026-10-20', '2026-10-28']), '2026-10-17', 'открытия: не позже первой даты подачи');
+  const dir = join(TMP, '..', '.selftest-bars');
+  rmSync(dir, { recursive: true, force: true });
+  const old = [['2026-10-26', 10, 10, 100], ['2026-10-27', 11, 11, 200]];
+  writePriceCache(dir, 'OLD', old);
+  const fresh = [...old, ['2026-10-28', 12, 12, 300], ['2026-10-29', 13, 13, 400]];
+  const splitChart = chartOf(fresh); splitChart.chart.result[0].events = { splits: { x: { date: Date.parse('2026-10-29T14:30:00Z') / 1000, numerator: 2, denominator: 1 } } };
+  const got = new Map([['OLD', parseYahooChart(chartOf(fresh))], ['NEW', parseYahooChart(splitChart)], ['IWM', parseYahooChart(chartOf(fresh, { '2026-10-28': [11.9, 12.2] }))], ['GONE', { missing: true }]]);
+  const st = applyBars(dir, got, { opensNeeds: { OLD: ['2026-10-27'] }, updated: '2026-10-29' });
+  assert.deepEqual(st, { merged: 3, fresh: 2, opens: 2, missing: ['GONE'] });
+  assert.deepEqual(readPriceCache(dir, 'OLD').map(r => r[0]), ['2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29']);
+  assert.equal(readPriceCache(dir, 'NEW').length, 4, 'бумага без кэша получила ряд');
+  assert.deepEqual(readJson(join(dir, 'prices', '_splits.json')).NEW, [['2026-10-29', 2]]);
+  const store = readOpens(dir);
+  assert.equal(opensOf(store, 'OLD', '2026-10-28')?.[0], 12, 'первый торговый день после подачи 27.10');
+  assert.equal(opensOf(store, 'OLD', '2026-10-29'), null, 'остальные дни не копим');
+  assert.ok(opensOf(store, 'IWM', '2026-10-28') && opensOf(store, 'IWM', '2026-10-29'), 'у бенчмарка — каждый день');
+  rmSync(dir, { recursive: true, force: true });
+});
+await okAsync('бары VPS: запрос к воркеру пачками, токен в заголовке, 429 останавливает остальные пачки, сбой пачки не роняет прочие', async () => {
+  const calls = [];
+  const mk = plan => async (url, init) => {
+    calls.push({ url: String(url), auth: init.headers.Authorization });
+    const step = plan[calls.length - 1] ?? 'ok';
+    if (step === 'http500') return new Response('', { status: 500 });
+    const syms = decodeURIComponent(/symbols=([^&]+)/.exec(String(url))[1]).split(',').map(x => x.split(':')[0]);
+    if (step === 'limit') return new Response(JSON.stringify({ ok: true, bars: {}, failed: Object.fromEntries(syms.map(s => [s, 'HTTP 429'])), limited: true }), { status: 200 });
+    return new Response(JSON.stringify({ ok: true, bars: Object.fromEntries(syms.map(s => [s, chartOf([['2026-11-03', 10, 10, 1]])])), failed: {}, limited: false }), { status: 200 });
+  };
+  const items = Array.from({ length: 45 }, (_, i) => ({ sym: 'T' + i, from: '2026-10-01' }));
+  const noSleep = () => Promise.resolve();
+  let r = await fetchBars('https://w.example', 'tok', items, { fetchImpl: mk([]), sleep: noSleep });
+  assert.equal(calls.length, 3, '45 тикеров = 3 пачки по 20, 20 и 5'); assert.equal(r.got.size, 45); assert.equal(calls[0].auth, 'Bearer tok');
+  assert.match(decodeURIComponent(calls[0].url), /symbols=T0:2026-10-01,T1:2026-10-01/);
+  calls.length = 0;
+  r = await fetchBars('https://w.example', 'tok', items, { fetchImpl: mk(['ok', 'limit']), sleep: noSleep });
+  assert.equal(calls.length, 2, 'после 429 третья пачка не уходит'); assert.equal(r.limited, true); assert.equal(r.got.size, 20); assert.equal(Object.keys(r.failed).length, 20);
+  calls.length = 0;
+  r = await fetchBars('https://w.example', 'tok', items, { fetchImpl: mk(['http500', 'ok', 'ok']), sleep: noSleep });
+  assert.equal(r.got.size, 25); assert.equal(Object.keys(r.failed).length, 20); assert.match(r.failed.T0, /HTTP 500/); assert.equal(r.limited, false);
+});
+
+// --- сборка на VPS целиком против подставного воркера: копия данных фикстуры, у LIVA/SPY/IWM срезаны бары D0, всё докачивается ---
+function fakeWorker({ charts = {}, morning = null, markers = {} } = {}) {
+  const calls = { morningPuts: [], markerPuts: [], bars: [], paper: 0 };
+  const state = { morning, markers: { ...markers } };
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', c => { raw += c; });
+    req.on('end', () => {
+      const u = new URL(req.url, 'http://x'), auth = req.headers.authorization ?? null;
+      const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      const lm = /^\/morning\/letter\/(\d{4}-\d{2}-\d{2})$/.exec(u.pathname);
+      if (lm && req.method === 'GET') return state.markers[lm[1]] ? send(200, state.markers[lm[1]]) : send(404, { error: 'нет' });
+      if (lm && req.method === 'PUT') {
+        calls.markerPuts.push({ date: lm[1], auth, body: JSON.parse(raw) });
+        if (!state.markers[lm[1]]) state.markers[lm[1]] = { ...JSON.parse(raw), ok: true };
+        return send(200, { ok: true });
+      }
+      if (u.pathname === '/morning' && req.method === 'GET') return state.morning ? send(200, state.morning) : send(404, { error: 'нет' });
+      if (u.pathname === '/morning' && req.method === 'PUT') {
+        if (auth !== 'Bearer tok') return send(401, { error: 'нужен токен' });
+        calls.morningPuts.push(raw); state.morning = JSON.parse(raw); return send(200, { ok: true, listFor: state.morning.listFor });
+      }
+      if (u.pathname === '/bars') {
+        if (auth !== 'Bearer tok') return send(401, { error: 'нужен токен' });
+        const bars = {}, failed = {};
+        for (const part of (u.searchParams.get('symbols') ?? '').split(',')) {
+          const [sym, from] = part.split(':');
+          calls.bars.push({ sym, from });
+          if (charts[sym]) bars[sym] = charts[sym](from); else failed[sym] = 'HTTP 404';
+        }
+        return send(200, { ok: true, bars, failed, limited: false });
+      }
+      if (u.pathname === '/paper/index') { calls.paper++; return send(200, { files: [] }); }
+      send(404, { error: 'not found' });
+    });
+  });
+  return new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve({
+    calls, state, base: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(r => server.close(r)),
+  })));
+}
+
+await okAsync('сборка на VPS: бары D0 и открытия докачиваются через воркер, morning.json совпадает с полным пересчётом, список уходит в воркер', async () => {
+  const work = join(TMP, '..', '.selftest-vps');
+  rmSync(work, { recursive: true, force: true });
+  const data = join(work, 'repo');
+  for (const d of ['trades', 'reference', 'prices', 'state']) cpSync(join(TMP, d), join(data, d), { recursive: true });
+  rmSync(join(data, 'prices', '_opens.json.gz'), { force: true });
+  const d0 = bizDays('2015-01-01', today).filter(d => d <= recentF).at(-1);
+  for (const sym of ['SPY', 'IWM', 'LIVA']) writePriceCache(data, sym, readPriceCache(data, sym).filter(r => r[0] < d0));
+  // что вернёт Yahoo через воркер: полные ряды из фикстуры и пары открытие/закрытие дня входа
+  const over = { LIVA: { [d1L]: [50, 51] }, IWM: { [d1L]: [100, 100.5] }, SPY: { [d1L]: [100, 101] } };
+  const src = { LIVA: livaSeries, IWM: bizDays('2015-01-01', today).map(d => [d, 100, 100, 1e6]), SPY: bizDays('2015-01-01', today).map(d => [d, 100, 100, 1e6]) };
+  const charts = Object.fromEntries(Object.entries(src).map(([sym, s]) => [sym, from => chartOf(s.filter(r => r[0] >= from), over[sym])]));
+  const api = await fakeWorker({ charts });
+  try {
+    const env = { PAPER_URL: api.base, PAPER_TOKEN: 'tok' };
+    const argv = ['--state', work, '--data', data, '--site', join(work, 'site'), '--date', recentF, '--no-sync', '--no-live', '--no-index-check', '--once', '--interval', '1'];
+    const code = await morningMain(argv, env);
+    assert.equal(code, 0);
+    // запросы к воркеру: бенчмарки и бумага; у LIVA бар D0 отсутствовал — её просили не с нуля, а с перекрытием
+    const asked = new Set(api.calls.bars.map(b => b.sym));
+    assert.ok(asked.has('IWM') && asked.has('SPY') && asked.has('LIVA'), [...asked].join());
+    assert.equal(api.calls.morningPuts.length, 1);
+    const sent = JSON.parse(api.calls.morningPuts[0]);
+    assert.equal(sent.builder, 'vps'); assert.equal(sent.listFor, recentF);
+    const row = sent.days.find(d => d.date === recentF).rows[0], ref = R('morning.json').days.find(d => d.date === recentF).rows[0];
+    for (const k of ['t', 'val', 'mx', 'score', 'main', 'dv', 'px', 'cost', 'tags', 'o', 'c', 'ex', 'exS'])
+      assert.deepEqual(row[k], ref[k], 'поле ' + k + ' должно совпасть с полным пересчётом');
+    assert.ok(existsSync(join(work, 'done', `${recentF}.json`)), 'день отмечен собранным');
+    // повторный запуск того же дня ничего не делает
+    assert.equal(await morningMain(argv, env), 0); assert.equal(api.calls.morningPuts.length, 1);
+  } finally { await api.close(); rmSync(work, { recursive: true, force: true }); }
+});
+await okAsync('сборка на VPS: воркер недоступен — попытка не удалась с причиной, день не отмечен собранным', async () => {
+  const work = join(TMP, '..', '.selftest-vps2');
+  rmSync(work, { recursive: true, force: true });
+  const data = join(work, 'repo');
+  for (const d of ['trades', 'reference', 'prices', 'state']) cpSync(join(TMP, d), join(data, d), { recursive: true });
+  const d0 = bizDays('2015-01-01', today).filter(d => d <= recentF).at(-1);
+  writePriceCache(data, 'SPY', readPriceCache(data, 'SPY').filter(r => r[0] < d0));
+  const api = await fakeWorker({ charts: {} });                       // бары не отдаёт: Yahoo не знает бенчмарков
+  try {
+    const code = await morningMain(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', recentF, '--no-sync', '--no-live', '--no-index-check', '--once'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+    assert.equal(code, 1); assert.equal(api.calls.morningPuts.length, 0); assert.ok(!existsSync(join(work, 'done', `${recentF}.json`)));
+  } finally { await api.close(); rmSync(work, { recursive: true, force: true }); }
+});
+
+// --- письмо: отметка в воркере, уточнение, сверка ---
+function notifyW(dir, { tg, worker, args = [], env = {} }) {
+  return new Promise(resolve => execFile(process.execPath,
+    ['--import', pathToFileURL(REDIRECT).href, ...NOTIFY_ARGS(dir), ...args],
+    { encoding: 'utf8', env: { ...process.env, FAKE_TG_BASE: tg, TELEGRAM_BOT_TOKEN: 'TEST', TELEGRAM_CHAT_ID: '1', NEXUS_EVENTS_URL: tg + '/nexus', NEXUS_INGEST_TOKEN: 'TEST', MORNING_URL: worker, ...env } },
+    (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: stdout + stderr })));
+}
+await okAsync('notify: отметка в воркере — письмо за дату уходит один раз на двоих отправителей', async () => {
+  const d = nDay(-1);
+  const wk = await fakeWorker(), tg = await fakeApis([]);
+  try {
+    // VPS: токен есть -> после доставки кладёт отметку
+    const dirV = seededDir('data-mk-vps');
+    writeMorning([mDay(d, [mRow('AAA', 3e5)])]);
+    const r1 = await notifyW(dirV, { tg: tg.base, worker: wk.base, args: ['--sender', 'vps'], env: { PAPER_TOKEN: 'tok' } });
+    assert.equal(r1.code, 0, r1.out); assert.equal(tg.calls.tg.length, 1);
+    assert.equal(wk.calls.markerPuts.length, 1); assert.equal(wk.calls.markerPuts[0].date, d);
+    assert.equal(wk.calls.markerPuts[0].body.by, 'vps'); assert.equal(wk.calls.markerPuts[0].auth, 'Bearer tok');
+    // GitHub позже, чистое состояние: отметка есть — письма нет, дата записана отправленной
+    const dirG = seededDir('data-mk-gh');
+    writeMorning([mDay(d, [mRow('AAA', 3e5)])]);
+    const r2 = await notifyW(dirG, { tg: tg.base, worker: wk.base });
+    assert.equal(r2.code, 0, r2.out); assert.equal(tg.calls.tg.length, 1, 'второго письма нет'); assert.match(r2.out, /уже отправлено \(vps/);
+    assert.ok(sentOf(dirG).includes(`morning|${d}`)); assert.equal(wk.calls.markerPuts.length, 1, 'у GitHub токена нет — отметку не пишет');
+    // повтор VPS на чистом состоянии (повторный запуск юнита): тоже без дубля
+    const dirV2 = seededDir('data-mk-vps2');
+    writeMorning([mDay(d, [mRow('AAA', 3e5)])]);
+    const r3 = await notifyW(dirV2, { tg: tg.base, worker: wk.base, args: ['--sender', 'vps'], env: { PAPER_TOKEN: 'tok' } });
+    assert.equal(tg.calls.tg.length, 1);
+    // GitHub, когда отметки нет: письмо уходит, отметка не пишется (токена нет)
+    const wk2 = await fakeWorker();
+    try {
+      const dirG2 = seededDir('data-mk-gh2');
+      writeMorning([mDay(d, [mRow('AAA', 3e5)])]);
+      const r4 = await notifyW(dirG2, { tg: tg.base, worker: wk2.base });
+      assert.equal(r4.code, 0, r4.out); assert.equal(tg.calls.tg.length, 2); assert.equal(wk2.calls.markerPuts.length, 0);
+    } finally { await wk2.close(); }
+    // воркер недоступен: пропущенное письмо хуже редкого дубля — уходит
+    const dirD = seededDir('data-mk-down');
+    writeMorning([mDay(d, [mRow('AAA', 3e5)])]);
+    const r5 = await notifyW(dirD, { tg: tg.base, worker: 'http://127.0.0.1:9' });
+    assert.equal(r5.code, 0, r5.out); assert.equal(tg.calls.tg.length, 3);
+  } finally { await wk.close(); await tg.close(); }
+});
+await okAsync('notify: уточнение, когда полный пересчёт разошёлся со списком, отправленным с VPS; раз на дату', async () => {
+  const d = nDay(-1);
+  const cc = { listFor: d, vpsBuiltAt: 'x', same: false, vps: 2, github: 2, diff: [
+    { t: 'NEWB', name: 'NEWB HOLDINGS INC', was: null, now: 3, val: 7e5 }, { t: 'UPPA', name: 'UPPA CORP', was: 2, now: 3, val: 2e5 }, { t: 'GONE', name: 'GONE INC', was: 2, now: null, val: 1e5 },
+  ] };
+  const wk = await fakeWorker({ markers: { [d]: { by: 'vps', at: '2026-11-05T03:05:00Z', ok: true } } }), tg = await fakeApis([]);
+  try {
+    const dir = seededDir('data-fix');
+    writeJson(join(dir, 'state', 'notify.json'), { version: 4, sentMorning: [`morning|${d}`] });
+    writeMorning([mDay(d, [mRow('UPPA', 2e5, { score: 3 })])], mCounter, { crossCheck: cc });
+    const r1 = await notifyW(dir, { tg: tg.base, worker: wk.base });
+    assert.equal(r1.code, 0, r1.out); assert.equal(tg.calls.tg.length, 1);
+    const text = tg.calls.tg[0].body.text;
+    assert.equal(text.split('\n')[0], '🔁 <b>Инсайдерский радар · список уточнён</b>');
+    assert.match(text, new RegExp(`\\+ <b>NEWB</b> · Newb Holdings Inc · скор 3 · \\$700${NB}тыс\\.`));
+    assert.match(text, /≈ <b>UPPA<\/b> · Uppa Corp · скор 2 → 3/); assert.match(text, /− <b>GONE<\/b> · Gone Inc убрана/);
+    assert.deepEqual(tg.calls.nexus.map(b => b.eventId), [`840|fix|${d}`]);
+    assert.ok(sentOf(dir).includes(`fix|${d}`));
+    const r2 = await notifyW(dir, { tg: tg.base, worker: wk.base });
+    assert.equal(tg.calls.tg.length, 1, 'второго уточнения нет');
+    // письмо отправил GitHub (отметки VPS нет) — уточнять нечего; совпавшие списки — тоже
+    const wk2 = await fakeWorker({ markers: { [d]: { by: 'github', at: '2026-11-05T03:30:00Z', ok: true } } });
+    try {
+      const dir2 = seededDir('data-fix2');
+      writeJson(join(dir2, 'state', 'notify.json'), { version: 4, sentMorning: [`morning|${d}`] });
+      writeMorning([mDay(d, [mRow('UPPA', 2e5, { score: 3 })])], mCounter, { crossCheck: cc });
+      await notifyW(dir2, { tg: tg.base, worker: wk2.base });
+      writeMorning([mDay(d, [mRow('UPPA', 2e5, { score: 3 })])], mCounter, { crossCheck: { ...cc, same: true, diff: [] } });
+      await notifyW(dir, { tg: tg.base, worker: wk.base, args: ['--any-date'] });
+      assert.equal(tg.calls.tg.length, 1);
+    } finally { await wk2.close(); }
+  } finally { await wk.close(); await tg.close(); }
+});
+await okAsync('crosscheck.mjs: пишет crossCheck в morning.json по списку VPS за ту же дату; без списка, за другую дату или при недоступном воркере молчит', async () => {
+  const d = nDay(-1);
+  const row = (t, score) => ({ t, name: t, score, main: score >= 2, val: 1e5 });
+  const mj = (rows, extra = {}) => JSON.stringify({ built: d, listFor: d, builtAt: '2026-11-05T03:05:00.000Z', builder: 'vps', params: {}, counter: { main: { n: 0 } }, days: [{ date: d, rows }], ...extra });
+  const site = join(NTMP, 'site-cc');
+  const run = base => new Promise(resolve => execFile(process.execPath, [join(ROOT, 'scripts', 'crosscheck.mjs'), '--site', site], { encoding: 'utf8', env: { ...process.env, MORNING_URL: base } }, (err, so, se) => resolve({ code: err ? 1 : 0, out: so + se })));
+  const mine = rows => writeJson(join(site, 'data', 'morning.json'), { ...JSON.parse(mj(rows)), builder: 'github', builtAt: '2026-11-05T04:25:00.000Z' });
+  mkdirSync(join(site, 'data'), { recursive: true });
+  // нет списка VPS
+  let wk = await fakeWorker();
+  try {
+    mine([row('A', 3)]);
+    const r0 = await run(wk.base); assert.equal(r0.code, 0); assert.match(r0.out, /списка VPS нет/); assert.equal(readJson(join(site, 'data', 'morning.json')).crossCheck, undefined);
+  } finally { await wk.close(); }
+  // списки совпали
+  wk = await fakeWorker({ morning: JSON.parse(mj([row('A', 3), row('B', 1)])) });
+  try {
+    mine([row('A', 3), row('B', 0)]);
+    const r1 = await run(wk.base); assert.match(r1.out, /списки совпали/);
+    assert.deepEqual(readJson(join(site, 'data', 'morning.json')).crossCheck, { listFor: d, vpsBuiltAt: '2026-11-05T03:05:00.000Z', same: true, vps: 1, github: 1, diff: [] });
+    // расхождение
+    mine([row('A', 3), row('C', 2)]);
+    const r2 = await run(wk.base); assert.match(r2.out, /РАСХОЖДЕНИЕ/);
+    const cc = readJson(join(site, 'data', 'morning.json')).crossCheck;
+    assert.equal(cc.same, false); assert.deepEqual(cc.diff.map(x => [x.t, x.was, x.now]), [['C', null, 2]]);
+  } finally { await wk.close(); }
+  // у VPS список за другую дату
+  wk = await fakeWorker({ morning: { ...JSON.parse(mj([row('A', 3)])), listFor: addDaysIso(d, -1) } });
+  try { mine([row('A', 3)]); assert.match((await run(wk.base)).out, /не за /); } finally { await wk.close(); }
+  // воркер недоступен
+  mine([row('A', 3)]);
+  const r3 = await run('http://127.0.0.1:9'); assert.equal(r3.code, 0); assert.match(r3.out, /недоступен/);
 });
 
 rmSync(NTMP, { recursive: true, force: true });

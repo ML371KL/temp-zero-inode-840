@@ -39,6 +39,10 @@ const COUNTER_FROM = argVal('--counter-from', MORNING.liveFrom);
 const COUNTER_DUMP = argVal('--counter-dump', null);
 // Кто собрал файл: 'github' (ежедневная сборка) или 'vps' (сборка после индекса EDGAR). Пишется в morning.json.
 const BUILDER = argVal('--builder', process.env.MORNING_BUILDER || 'github');
+// Сборка утреннего списка на VPS: считаются только цены тикеров последних дней подачи, записывается один morning.json и
+// процесс завершается (без ленты, бэктеста и портфелей). --plan файл.json — что докачать до сборки (бары D0, открытия D+1).
+const ONLY_MORNING = args.includes('--only-morning');
+const PLAN = argVal('--plan', null);
 
 const today = isoToday();
 const HORIZONS = { 3: 63, 6: 126, 12: 252, 24: 504 };  // месяцы -> торговые дни
@@ -258,7 +262,11 @@ const quality = { reassigned: 0, reassignedTickers: new Set(), noEntry: 0, unkno
 const panel = new Panel();
 panel.add('SPY', monthlyFromDaily(spy), true);
 if (iwm?.length) panel.add('IWM', monthlyFromDaily(iwm), true);
+// Тикеры, чьи цены нужны утреннему списку и счётчику: покупки последних дней подачи (с запасом на окно вечерней схемы)
+const leanFrom = [COUNTER_FROM, addDaysIso(today, -45)].reduce((a, b) => (a < b ? a : b));
+const leanTickers = ONLY_MORNING ? new Set(buys.filter(r => r.fdate >= leanFrom).map(r => r.T)) : null;
 for (const [t, rows] of byTicker) {
+  if (leanTickers && !leanTickers.has(t)) continue;
   const s = series(t);
   const n = s?.length ?? 0;
   // Различаем «ряда нет вовсе» и «ряд короткий». Раньше короткий ряд (только что
@@ -532,6 +540,31 @@ W('morning.json', {
   ...(paperOut ? { paper: paperOut } : {}),
 });
 if (COUNTER_DUMP) writeJson(COUNTER_DUMP, counterTrades);
+// План докачки для сборки на VPS: у каких тикеров дня listFor нет бара D0 (и с какой даты качать) и каким строкам прошедших
+// дней не хватает открытия/закрытия дня входа. Пусто — докачивать нечего.
+if (PLAN) {
+  const d0 = listFor ? d0Of(listFor) : null;
+  const bars = {}, opens = {};
+  if (listFor && d0) {
+    for (const r of buys) {
+      if (r.fdate !== listFor || !(r.val >= MORNING.minVal) || isNonCommon(r.sec)) continue;
+      const s = series(r.T);
+      const last = s?.length ? s[s.length - 1][0] : null;
+      if (!s?.some(x => x[0] === d0)) bars[r.T] = { last };   // нужен именно бар D0 (кэш мог уйти и дальше него)
+    }
+  }
+  for (const day of morningDays) {
+    if (!day.done) continue;
+    for (const row of day.rows) if (row.skip === 'noopen' || row.skip === 'noclose') (opens[row.t] ??= []).push(day.date);
+  }
+  // opensPending: день listFor уже «прошёл» (его D+1 в хранилище открытий есть) и в нём есть бумаги без бара D0 — их открытия станут видны только после
+  // докачки баров (второй проход плана). В боевой сборке день listFor ещё не прошёл, и второго прохода нет.
+  writeJson(PLAN, { listFor, d0, bars, opens, opensPending: !!(morningDays[0]?.done && morningDays[0]?.unpriced?.length) });
+}
+if (ONLY_MORNING) {
+  console.log(`[compute] --only-morning: список за ${listFor}, бумаг от $10 млн ${morningDays[0]?.rows.length ?? 0}, без цены на D0 ${morningDays[0]?.unpriced?.length ?? 0}`);
+  process.exit(0);
+}
 
 // ---------- Всплеск покупок ----------
 // Число разных эмитентов с прошедшими гейты покупками от $10 тыс. по месяцам подачи. Только
