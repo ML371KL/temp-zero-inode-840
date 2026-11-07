@@ -1,0 +1,30 @@
+{
+ "schema": 3,
+ "parserRev": 2,
+ "from": "2026-10-01",
+ "lastDay": "2026-11-07",
+ "updated": "2026-11-07",
+ "coverage": {
+  "2026-11-04": {
+   "indexed": 603,
+   "collected": 603,
+   "at": "2026-11-05T03:27:31Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-05": {
+   "indexed": 443,
+   "collected": 443,
+   "at": "2026-11-06T03:27:13Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-06": {
+   "indexed": 515,
+   "collected": 515,
+   "at": "2026-11-07T03:35:21Z",
+   "status": "complete",
+   "pending": 0
+  }
+ }
+}
