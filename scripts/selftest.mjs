@@ -18,7 +18,7 @@ import { barsFrom, fetchBars, applyBars } from './lib/bars.mjs';
 import { isSecClosed, isMarketClosed } from './lib/calendar.mjs';
 import { main as morningMain, liveVerdict, reconcileStage, d0Verdict } from './vps/morning-build.mjs';
 import { parseFeedJournal, loadFeed, pruneFeed, feedFile, reconcile, mergeFeedRows } from './lib/feed.mjs';
-import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf, compareMain } from './lib/morning.mjs';
+import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf, compareMain, prevDays } from './lib/morning.mjs';
 import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
 import { EVENING, nyWall, nyToMs, inEveningWindow, parseAtom, filingPath, buildEvent, fromWorker, validBook, entryPx, benchPx, paperTrade, summarizePaper, planQuotes, parseJournal, pickQuote } from './lib/evening.mjs';
 import { buildPaper } from './lib/paper.mjs';
@@ -1221,6 +1221,56 @@ ok('compute: утренний список, счётчик D+1 и всплеск
   assert.ok(b.asOf < isoToday().slice(0, 7), 'текущим считается последний ЗАВЕРШЁННЫЙ месяц');
 });
 
+// --- повтор (prev) сквозным прогоном: полная сборка и сборка на VPS (--only-morning) на одних данных дают одно и то же поле ---
+ok('compute: prev в строках morning.json — прошлый день подачи эмитента с покупкой от $10 тыс., прошедшей гейты; полная сборка = --only-morning', () => {
+  const P = join(TMP, '..', '.selftest-prev');
+  rmSync(P, { recursive: true, force: true });
+  mkdirSync(join(P, 'state'), { recursive: true });
+  for (const b of ['SPY', 'IWM']) writePriceCache(P, b, bizDays('2023-01-02', today).map(d => [d, 100, 100, 1e6]));
+  for (const t of ['PRVA', 'PRVB', 'PRVC']) writePriceCache(P, t, bizDays('2024-01-02', today).map(d => [d, 20, 20, 1e6]));   // $20 млн в день
+  writeJson(join(P, 'reference', 'tickers.json'), {
+    444: { ticker: 'PRVA', exchange: 'NYSE', name: 'Prev A' }, 555: { ticker: 'PRVB', exchange: 'Nasdaq', name: 'Prev B' },
+    666: { ticker: 'PRVC', exchange: 'NYSE', name: 'Prev C' },
+  });
+  const FA = bizDays('2024-01-02', addDaysIso(today, -20)).at(-1), FB = bizDays('2024-01-02', addDaysIso(today, -6)).at(-1);
+  const t = { 444: 'PRVA', 555: 'PRVB', 666: 'PRVC' };
+  const buy = (acc, cik, fdate, owners, val, extra = {}) => T({ acc, cik, t: t[cik], fdate, tdate: addDaysIso(fdate, -1), owners, code: 'P', sh: val / 20, px: 20, val, own: 1e5, ...extra });
+  writeJsonGz(join(P, 'trades', 'live.json.gz'), {
+    v: SHARD_VERSION,
+    trades: [
+      buy('P1', 444, addDaysIso(FA, -10), dir, 20000),                 // прошлое событие PRVA: $20 тыс., прошло гейты
+      buy('P2', 444, addDaysIso(FA, -3), ceo, 50000, { fn: { b5: 1 } }), // плановая — гейт отсеивает, не считается
+      buy('P3', 444, addDaysIso(FA, -2), ceo, 5000),                   // меньше $10 тыс. — не считается
+      buy('P4', 444, FA, ceo, 150000),
+      buy('P5', 444, FB, ceo, 150000),
+      buy('P6', 555, addDaysIso(FB, -400), dir, 30000),
+      buy('P7', 555, addDaysIso(FB, -366), dir, 30000),                // 366 дней — вне окна
+      buy('P8', 555, FB, ceo, 150000),
+      buy('P9', 666, addDaysIso(FA, -365), dir, 30000),                // ровно 365 дней — в окне
+      buy('P10', 666, FA, ceo, 150000),
+    ],
+    amend: [],
+  });
+  const run = (site, extra) => execFileSync(process.execPath, [join(ROOT, 'scripts', 'compute.mjs'), '--data', P, '--site', join(P, site), '--counter-from', addDaysIso(today, -30), ...extra], { stdio: 'pipe' });
+  try {
+    run('full', []); run('lean', ['--only-morning', '--builder', 'vps']);
+    const rowsOf = site => {
+      const m = readJson(join(P, site, 'data', 'morning.json'));
+      return Object.fromEntries(m.days.flatMap(d => d.rows.map(r => [`${d.date}|${r.t}`, r])));
+    };
+    const full = rowsOf('full'), lean = rowsOf('lean');
+    assert.equal(full[`${FA}|PRVA`].prev, Math.round((Date.parse(FA) - Date.parse(addDaysIso(FA, -10))) / 864e5), 'плановая и мелкая покупки ближе не считаются');
+    assert.equal(full[`${FA}|PRVA`].prev, 10);
+    assert.equal(full[`${FB}|PRVA`].prev, Math.round((Date.parse(FB) - Date.parse(FA)) / 864e5));
+    assert.equal(full[`${FB}|PRVB`].prev, null, 'прошлая покупка старше 365 дней — null');
+    assert.equal(full[`${FA}|PRVC`].prev, 365);
+    assert.equal(full[`${FA}|PRVA`].main, true); assert.equal(full[`${FB}|PRVB`].score, 2, 'отбор и скор от prev не зависят');
+    assert.ok(Object.keys(full).length >= 4);
+    assert.deepEqual(Object.keys(lean).sort(), Object.keys(full).sort(), 'сборка на VPS видит те же строки');
+    for (const k of Object.keys(full)) assert.equal(lean[k].prev, full[k].prev, 'prev ' + k + ': --only-morning против полной сборки');
+  } finally { rmSync(P, { recursive: true, force: true }); }
+});
+
 // ---------- уведомления ----------
 // Единица письма — ДАТА ПОДАЧИ: одно утреннее сообщение на дату, и только если главный список
 // (оборот от $30 млн в день) не пуст. Проверяем сквозным прогоном скрипта на синтетическом
@@ -1794,6 +1844,23 @@ ok('утренний список (П11): границы цены и оборо�
   assert.deepEqual(r.unpriced.sort(), ['NOADV', 'NOPX']);
   assert.deepEqual(buildDayFull([]), { rows: [], unpriced: [] });
 });
+ok('повтор (prev): дни до прошлого дня подачи эмитента с покупкой, прошедшей гейты; окно 365 дней; в строку списка — как есть', () => {
+  const ds = ['2025-11-09', '2025-11-10', '2026-10-20', '2026-10-27', '2026-10-27', '2026-11-05'];
+  assert.equal(prevDays(ds, '2026-11-09'), 4, 'ближайший прошлый день подачи');
+  assert.equal(prevDays(ds, '2026-11-05'), 9, 'тот же день подачи не считается — только раньше');
+  assert.equal(prevDays(ds, '2026-10-28'), 1, 'повторяющиеся даты не мешают');
+  assert.equal(prevDays(ds, '2026-10-20'), 344);
+  assert.equal(prevDays(['2025-11-09'], '2026-11-09'), 365, 'ровно 365 дней — ещё в окне');
+  assert.equal(prevDays(['2025-11-09'], '2026-11-10'), null, '366 дней — вне окна');
+  assert.equal(prevDays(ds, '2025-11-09'), null, 'раньше первого дня — null');
+  assert.equal(prevDays([], '2026-11-09'), null); assert.equal(prevDays(undefined, '2026-11-09'), null);
+  const base = { name: 'X', who: ['A'], role: 'C', officer: true, common: true, val: 2e5, dd: null, adv: 4e7, px: 20, drop: null };
+  const r = buildDayFull([{ ...base, cik: 1, t: 'REP', prev: 4 }, { ...base, cik: 1, t: 'REP', val: 3e4, prev: 4 }, { ...base, cik: 2, t: 'NEW', prev: null }, { ...base, cik: 3, t: 'OLD' }]).rows;
+  const by = t => r.find(x => x.t === t);
+  assert.equal(by('REP').prev, 4); assert.equal(by('NEW').prev, null);
+  assert.ok(!('prev' in by('OLD')), 'нет поля во входе (старые вызовы, синтетика) — нет и в строке');
+  assert.deepEqual(r.map(x => x.t), buildDayFull([{ ...base, cik: 1, t: 'REP' }, { ...base, cik: 1, t: 'REP', val: 3e4 }, { ...base, cik: 2, t: 'NEW' }, { ...base, cik: 3, t: 'OLD' }]).rows.map(x => x.t), 'prev не меняет ни состав, ни порядок');
+});
 ok('утренний список (П11): скор совпадает с эталоном проверки (r14_rank.py) на 400 случайных событиях', () => {
   let seed = 20261104;
   const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
@@ -2144,7 +2211,7 @@ await okAsync('сборка на VPS: бары D0 и открытия докач
     const sent = JSON.parse(api.calls.morningPuts[0]);
     assert.equal(sent.builder, 'vps'); assert.equal(sent.listFor, recentF);
     const row = sent.days.find(d => d.date === recentF).rows[0], ref = R('morning.json').days.find(d => d.date === recentF).rows[0];
-    for (const k of ['t', 'val', 'mx', 'score', 'main', 'dv', 'px', 'cost', 'tags', 'o', 'c', 'ex', 'exS'])
+    for (const k of ['t', 'val', 'mx', 'score', 'main', 'dv', 'px', 'cost', 'tags', 'o', 'c', 'ex', 'exS', 'prev'])
       assert.deepEqual(row[k], ref[k], 'поле ' + k + ' должно совпасть с полным пересчётом');
     assert.ok(existsSync(join(work, 'done', `${recentF}.json`)), 'день отмечен собранным');
     // повторный запуск того же дня ничего не делает
