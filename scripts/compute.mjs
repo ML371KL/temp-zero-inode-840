@@ -23,7 +23,7 @@ import { applyGates, isPlanned, isNonCommon, DROP_LABELS } from './lib/gates.mjs
 import { buildOwnerGroups, isPersonOwner, isFundOnly, topRole, dOwnOf } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './lib/routine.mjs';
 import { readOpens, opensOf, nextTradingDay } from './lib/opens.mjs';
-import { MORNING, BREADTH, buildDayFull, tradeResult, summarize, breadth } from './lib/morning.mjs';
+import { MORNING, BREADTH, buildDayFull, tradeResult, summarize, breadth, prevDays } from './lib/morning.mjs';
 import { readPaperJournal, buildPaper } from './lib/paper.mjs';
 import { listDayOf } from './lib/livecal.mjs';
 import { join } from 'node:path';
@@ -266,7 +266,15 @@ panel.add('SPY', monthlyFromDaily(spy), true);
 if (iwm?.length) panel.add('IWM', monthlyFromDaily(iwm), true);
 // Тикеры, чьи цены нужны утреннему списку и счётчику: покупки последних дней подачи (с запасом на окно вечерней схемы)
 const leanFrom = [COUNTER_FROM, addDaysIso(today, -45)].reduce((a, b) => (a < b ? a : b));
-const leanTickers = ONLY_MORNING ? new Set(buys.filter(r => r.fdate >= leanFrom).map(r => r.T)) : null;
+// и бумаги прошлогодних покупок тех же эмитентов: поле prev (повтор) смотрит, прошли ли они гейты, а у строки без ряда ценовые гейты
+// не срабатывают — у эмитента, сменившего тикер, prev разошёлся бы с полной сборкой
+const leanTickers = ONLY_MORNING ? (() => {
+  const recent = buys.filter(r => r.fdate >= leanFrom);
+  const set = new Set(recent.map(r => r.T)), ciks = new Set(recent.map(r => r.cik));
+  const from = addDaysIso(leanFrom, -MORNING.prevMax);
+  for (const r of buys) if (r.fdate >= from && ciks.has(r.cik)) set.add(r.T);
+  return set;
+})() : null;
 for (const [t, rows] of byTicker) {
   if (leanTickers && !leanTickers.has(t)) continue;
   const s = series(t);
@@ -463,6 +471,14 @@ const dayCand = new Map();
 const paperJournal = readPaperJournal(join(DATA, 'paper'));
 const paperFrom = [...paperJournal.events.values()].reduce((m, e) => (m === null || e.fdate < m ? e.fdate : m), null);
 const DAY_CUT = [COUNTER_FROM, addDaysIso(today, -30), paperFrom ?? '9999'].reduce((a, b) => (a < b ? a : b));
+// Повтор (prev, scripts/lib/morning.mjs, prevDays): дни подачи каждого эмитента, в которые была покупка от $10 тыс., прошедшая гейты
+// (не-обыкновенные бумаги гейты отсеивают сами). По всей истории, а не с DAY_CUT: окно prev — год. buys упорядочены по дате подачи.
+const eventDays = new Map();
+for (const r of buys) {
+  if (!r._gate.ok || !(r.val >= MORNING.minVal)) continue;
+  const a = eventDays.get(r.cik) ?? eventDays.set(r.cik, []).get(r.cik);
+  if (a.at(-1) !== r.fdate) a.push(r.fdate);
+}
 for (const r of buys) {
   if (r.fdate < DAY_CUT) continue;
   (dayCand.get(r.fdate) ?? dayCand.set(r.fdate, []).get(r.fdate)).push({
@@ -470,6 +486,7 @@ for (const r of buys) {
     role: r._role, officer: r._officer, common: !isNonCommon(r.sec),
     val: r.val, dd: r._dd, adv: r._adv20 ?? null, px: r._px0 ?? null, at: r.at ?? null,
     drop: r._gate.ok ? null : (r._gate.drop ?? 'x'),
+    prev: prevDays(eventDays.get(r.cik), r.fdate),
   });
 }
 const allFdates = [...new Set(buys.map(r => r.fdate))].sort();
