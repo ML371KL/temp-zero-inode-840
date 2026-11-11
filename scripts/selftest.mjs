@@ -8,7 +8,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { secDate, parseTsv, addDaysIso, isoToday, readJson, writeJson, writeJsonGz, readJsonGz, isIsoDate } from './lib/util.mjs';
 import { zipCreate, zipExtract } from './lib/zip.mjs';
-import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, acceptedAt, acceptedAtSec, SHARD_VERSION } from './lib/edgar.mjs';
+import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, acceptedAt, SHARD_VERSION } from './lib/edgar.mjs';
 import {
   mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo,
   trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough, fetchYahooDaily, turnover20,
@@ -17,11 +17,10 @@ import {
 import { barsFrom, fetchBars, applyBars } from './lib/bars.mjs';
 import { isSecClosed, isMarketClosed } from './lib/calendar.mjs';
 import { main as morningMain, liveVerdict, reconcileStage, d0Verdict } from './vps/morning-build.mjs';
-import { parseFeedJournal, loadFeed, pruneFeed, feedFile, reconcile, mergeFeedRows } from './lib/feed.mjs';
+import { parseFeedJournal, loadFeed, pruneFeed, feedFile, reconcile, mergeFeedRows, parseAtom, filingPath } from './lib/feed.mjs';
 import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf, compareMain, prevDays } from './lib/morning.mjs';
 import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
-import { EVENING, nyWall, nyToMs, inEveningWindow, parseAtom, filingPath, buildEvent, fromWorker, validBook, entryPx, benchPx, paperTrade, summarizePaper, planQuotes, parseJournal, pickQuote } from './lib/evening.mjs';
-import { buildPaper } from './lib/paper.mjs';
+import { nyWall, nyToMs } from './lib/nytime.mjs';
 import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
 import { Panel, monthlyFromDaily, portfolioSeries, factorAlpha, factorSeries, vsBenchmark, neweyWestT, universeSeries, pairedDiff, turnover } from './lib/portfolio.mjs';
 import { applyGates, isPlanned, isNonCommon, isImplausible } from './lib/gates.mjs';
@@ -899,20 +898,16 @@ ok('открытия: отбор дней входа из одного отве�
   rmSync(od, { recursive: true, force: true });
 });
 
-// ---------- вечерняя схема на бумаге ----------
-ok('вечерняя схема: время по Нью-Йорку, окно приёма 16:00–20:00, секунды в шапке формы', () => {
+// ---------- время по Нью-Йорку и лента getcurrent (лента на весь день, сборка на VPS) ----------
+ok('время по Нью-Йорку: переход на зимнее время, путь полного текста формы', () => {
   assert.equal(nyToMs('2026-07-01T17:00:00'), Date.parse('2026-07-01T21:00:00Z'), 'летом UTC−4');
   assert.equal(nyToMs('2026-11-04T17:00:00'), Date.parse('2026-11-04T22:00:00Z'), 'зимой UTC−5');
+  assert.equal(nyToMs('2026-11-04T17:00'), Date.parse('2026-11-04T22:00:00Z'), 'секунды необязательны');
   assert.equal(nyWall(Date.parse('2026-11-04T22:21:35Z')), '2026-11-04T17:21:35');
   assert.equal(nyToMs('мусор'), null);
-  assert.equal(inEveningWindow('2026-11-04T16:00'), true); assert.equal(inEveningWindow('2026-11-04T19:59'), true);
-  assert.equal(inEveningWindow('2026-11-04T15:59'), false); assert.equal(inEveningWindow('2026-11-04T20:00'), false);
-  assert.equal(inEveningWindow(null), false);
-  assert.equal(acceptedAtSec('<ACCEPTANCE-DATETIME>20261103172135'), '2026-11-03T17:21:35');
-  assert.equal(acceptedAtSec('<ACCEPTANCE-DATETIME>20261103176135'), null);
   assert.equal(filingPath(123, '0001-26-000001'.replace('0001', '0000000001')), 'edgar/data/123/000000000126000001/0000000001-26-000001.txt');
 });
-ok('вечерняя схема: лента getcurrent — формы без повторов, поправки и чужие типы различимы', () => {
+ok('лента getcurrent: формы без повторов, поправки и чужие типы различимы', () => {
   const xml = '<feed><entry><title>4 - Smith (0001) (Reporting)</title><link rel="alternate" href="https://www.sec.gov/Archives/edgar/data/111/000112345626000001/0001123456-26-000001-index.htm"/>'
     + '<updated>2026-11-04T17:21:35-05:00</updated><category term="4"/><id>urn:tag:sec.gov,2008:accession-number=0001123456-26-000001</id></entry>'
     + '<entry><title>4 - Issuer</title><link href="https://www.sec.gov/Archives/edgar/data/222/000112345626000001/0001123456-26-000001-index.htm"/><updated>2026-11-04T17:21:35-05:00</updated><category term="4"/><id>urn:tag:sec.gov,2008:accession-number=0001123456-26-000001</id></entry>'
@@ -923,93 +918,6 @@ ok('вечерняя схема: лента getcurrent — формы без п�
   assert.equal(nyWall(Date.parse(e[0].updated)), '2026-11-04T17:21:35');
   assert.deepEqual(parseAtom(''), []);
 });
-ok('вечерняя схема: событие — покупка P обыкновенных акций от $10 тыс. в окне приёма', () => {
-  const row = (extra = {}) => ({ code: 'P', t: 'TST', cik: 5, val: 6000, ...extra });
-  const ev = buildEvent([row(), row({ val: 7000 }), row({ code: 'S', val: 9e6 })], { acc: 'A1', at: '2026-11-04T17:21:35', fdate: '2026-11-04' });
-  assert.deepEqual({ ...ev }, { k: 'event', id: 'A1', acc: 'A1', t: 'TST', cik: 5, fdate: '2026-11-04', at: '2026-11-04T17:21:35', val: 13000, n: 2 }, 'продажа не считается, суммы покупок складываются');
-  assert.equal(buildEvent([row({ val: 9999 })], { acc: 'A2', at: '2026-11-04T17:21:35', fdate: 'x' }), null, 'меньше $10 тыс.');
-  assert.equal(buildEvent([row()], { acc: 'A3', at: '2026-11-04T15:50:00', fdate: 'x' }), null, 'принята в торги');
-  assert.equal(buildEvent([row({ val: 5e4 })], { acc: 'A4', at: '2026-11-04T17:21:35', fdate: 'x', isCommon: () => false }), null, 'не обыкновенная бумага');
-  assert.equal(buildEvent([row({ code: 'S' })], { acc: 'A5', at: '2026-11-04T17:21:35', fdate: 'x' }), null, 'нет покупки');
-});
-ok('вечерняя схема: цена покупки — ask честной книги, иначе последняя сделка плюс оценка спреда', () => {
-  // Yahoo вне сессии: AAPL bid 323.80 / ask 337.35 при цене 337 — разрыв 4%: книга негодна
-  const junk = fromWorker({ b: 323.8, a: 337.35, p: 331.9, t: 1, pp: 337.05, pt: 1793797534, st: 'POST' });
-  assert.equal(validBook(junk), false);
-  const e1 = entryPx(junk, 1793797600);
-  assert.equal(e1.est, true); assert.ok(Math.abs(e1.px - 337.05 * 1.002) < 1e-9, 'последняя сделка × (1 + оценка спреда)');
-  assert.equal(validBook({ bid: 10, ask: 10.02 }), true);
-  assert.deepEqual(entryPx({ bid: 10, ask: 10.02, last: 10.01 }), { px: 10.02, est: false });
-  assert.equal(validBook({ bid: 0, ask: 10 }), false, 'нулевая сторона — «нет данных»'); assert.equal(validBook({ bid: 10.1, ask: 10 }), false, 'перевёрнутая книга');
-  assert.equal(entryPx({ bid: 0, ask: 0 }), null, 'ни книги, ни сделки — цены нет');
-  const stale = entryPx({ last: 10, lastT: 1000 }, 5000);
-  assert.equal(stale.est, true); assert.equal(stale.stale, true, 'сделка старше 10 минут помечена');
-  assert.equal(benchPx({ bid: 98.95, ask: 99.05, last: 99.5 }), 99, 'эталон — середина честной книги'); assert.equal(benchPx({ last: 99.5 }), 99.5);
-  assert.deepEqual(fromWorker({ b: 0, a: null, p: 5 }).bid, null);
-  assert.equal(fromWorker({ p: 5, t: 7, st: 'POST' }).lastT, 7, 'нет вечерней цены — берём последнюю регулярную');
-});
-ok('вечерняя схема: бумажная сделка — к IWM за то же окно, продажа на закрытии и на открытии D+1', () => {
-  const qs = { 5: { bid: 9.99, ask: 10 }, 15: { bid: 9.99, ask: 10 }, 30: { bid: 9.99, ask: 10 } };
-  const bs = { 5: { last: 200 }, 15: { last: 200 }, 30: { last: 200 } };
-  const t = paperTrade(qs, bs, { o: 10.5, c: 10.8 }, { o: 201, c: 201.6 });
-  // закрытие: +8,0% минус IWM 200 -> 201,6 (+0,8%) = +7,2%; открытие: +5,0% минус IWM 200 -> 201 (+0,5%) = +4,5%
-  assert.equal(t.e[5].close, 0.072); assert.equal(t.e[30].open, 0.045);
-  assert.equal(t.cur, 0.0256, 'текущая схема: 10,5 -> 10,8 (+2,86%) минус IWM 201 -> 201,6 (+0,30%)');
-  assert.equal(t.est, 0);
-  assert.equal(paperTrade({ ...qs, 15: null }, bs, { o: 10.5, c: 10.8 }, { o: 201, c: 201.6 }), null, 'нет котировки на 15 минут — события нет в общем наборе');
-  assert.equal(paperTrade(qs, bs, { o: 10.5, c: 10.8 }, null), null);
-  const sm = summarizePaper([
-    { day: 'a', cur: 0.01, e: { 5: { close: 0.02, open: 0.01 }, 15: { close: 0.02, open: 0.01 }, 30: { close: 0.02, open: 0.01 } }, cost: 0.001 },
-    { day: 'b', cur: -0.01, e: { 5: { close: 0.04, open: 0.03 }, 15: { close: 0.04, open: 0.03 }, 30: { close: 0.04, open: 0.03 } }, cost: 0.002 },
-  ]);
-  assert.equal(sm.n, 2); assert.equal(sm.days, 2);
-  assert.equal(sm.cur.mean, -0.0015, 'текущая: после издержек своего уровня каждой сделки: (0,009 − 0,012) / 2'); assert.equal(sm.cur.gross, 0);
-  assert.equal(sm.e[5].close.gross, 0.03); assert.equal(sm.e[5].close.mean, 0.0292, 'вечерняя: общие издержки на круг ' + EVENING.cost);
-  assert.equal(sm.e[5].close.win, 1); assert.equal(sm.e[5].open.cumNet, 0.0384);
-  assert.deepEqual(summarizePaper([]), { n: 0, days: 0 });
-});
-ok('вечерняя схема: журнал и план котировок — по сроку, без повторов, перезапуск ничего не дублирует', () => {
-  const j = parseJournal([
-    JSON.stringify({ k: 'event', id: 'A', t: 'TST', at: '2026-10-01T17:00:00', found: '2026-10-01T21:01:00Z' }),
-    JSON.stringify({ k: 'q', id: 'A', m: 0, sym: 'TST', got: 'x' }),
-    JSON.stringify({ k: 'q', id: 'A', m: 0, sym: 'IWM', got: 'x' }),
-    '{"k":"q","id":"A","m":5,"sy',                                       // оборванная запись
-    '', JSON.stringify({ k: 'run' }),
-  ].join('\n'));
-  assert.equal(j.events.size, 1); assert.equal(j.quotes.size, 2);
-  const ev = [...j.events.values()];
-  const now = Date.parse('2026-10-01T21:16:00Z');                         // 17:16 ET: приём 17:00 -> сроки +5 и +15 наступили, +30 — нет
-  const have = new Set(['A|0']);
-  assert.deepEqual(planQuotes(ev, have, now).map(x => x.m), [5, 15]);
-  assert.deepEqual(planQuotes(ev, new Set(['A|0', 'A|5']), now).map(x => x.m), [15]);
-  assert.deepEqual(planQuotes(ev, new Set(['A|0', 'A|5', 'A|15']), now), []);
-  assert.deepEqual(planQuotes(ev, new Set(), Date.parse('2026-10-01T21:00:30Z')), [], 'до обнаружения и до сроков — ничего');
-  // лучшая котировка: честная книга важнее, затем источник nasdaq
-  const best = pickQuote([{ src: 'worker', got: '2', last: 1 }, { src: 'worker', got: '1', bid: 10, ask: 10.01 }, { src: 'nasdaq', got: '3', bid: 5, ask: 9 }]);
-  assert.equal(best.ask, 10.01, 'у worker честная книга, у nasdaq разрыв шире 1%');
-  assert.equal(pickQuote([]), null);
-});
-ok('вечерняя схема: сборка — только события со списком, закрытым D+1 и полным набором котировок', () => {
-  const qj = [];
-  const add = (id, sym, ms, q) => ms.forEach(m => qj.push(JSON.stringify({ k: 'q', id, m, sym, got: 'x', late: 3, ...q })));
-  const evs = ['A', 'B', 'C', 'D', 'E'].map((id, i) => JSON.stringify({ k: 'event', id, acc: id, t: 'T' + id, fdate: '2026-11-0' + (i < 4 ? 2 : 3), at: `2026-11-0${i < 4 ? 2 : 3}T17:0${i}`, val: 5e4 }));
-  evs.push(JSON.stringify({ k: 'event', id: 'A2', acc: 'A2', t: 'TA', fdate: '2026-11-02', at: '2026-11-02T17:30', val: 7e4 }));   // вторая форма той же бумаги в тот же день
-  const good = { bid: 10, ask: 10.01 }, bench = { bid: 200, ask: 200.1 };
-  for (const id of ['A', 'B', 'D', 'E']) { add(id, 'T' + id, [5, 15, 30], good); add(id, 'IWM', [5, 15, 30], bench); }
-  add('C', 'TC', [5, 15], good); add('C', 'IWM', [5, 15, 30], bench);       // у C нет котировки на 30 минут
-  const journal = parseJournal([...evs, ...qj].join('\n'));
-  const rows = { 'TA': { main: true, cost: 0.001 }, 'TB': { main: false, cost: 0.0015 }, 'TC': { main: true, cost: 0.001 }, 'TE': { main: true, cost: 0.001 } };   // у D строки в списке нет
-  const out = buildPaper(journal, {
-    minPx: 5,
-    rowOf: (fd, t) => rows[t] ?? null,
-    d1Of: (fd, t) => (t === 'TE' ? null : { day: '2026-11-04', o: 10.2, c: 10.5, pc: 10.1, io: 201, ic: 201.6 }),    // у E D+1 ещё не закрыт
-  });
-  assert.equal(out.cov.events, 6); assert.equal(out.cov.dup, 1, 'вторая форма A в тот же день не даёт второй сделки'); assert.equal(out.cov.listed, 4); assert.equal(out.cov.closed, 3); assert.equal(out.cov.complete, 2);
-  assert.equal(out.main.n, 1, 'основной список: только A'); assert.equal(out.all.n, 2, 'все: A и B; C без котировки на 30 минут не входит');
-  assert.equal(out.from, '2026-11-02'); assert.deepEqual(out.late, { p50: 3, p90: 3 });
-  assert.equal(buildPaper(parseJournal(''), { rowOf: () => null, d1Of: () => null }), null, 'нет журнала — нет блока');
-});
-
 // ---------- сквозной прогон compute ----------
 const TMP = join(ROOT, '.selftest-tmp');
 rmSync(TMP, { recursive: true, force: true });
@@ -1134,7 +1042,7 @@ ok('loadAllTrades: разные классы акций в одной подач
 // Открытия утреннего списка: день входа L1 — первый рабочий день после подачи. IWM: открытие 100,
 // закрытие 100.5 (+0.5%); LIVA: открытие 50, закрытие 51 (+2%), значит к IWM +1.5%.
 const d1L = bizDays(addDaysIso(recentF, 1), addDaysIso(recentF, 7))[0];
-// Журнал вечерней схемы (ветка paper): событие по форме L1 и котировки через 5/15/30 минут — по LIVA и IWM
+// Журнал закрытой вечерней схемы остаётся на ветке data (data/paper/log): сборка его больше не читает, раздела paper в morning.json нет
 {
   const q = (m, sym, extra) => JSON.stringify({ k: 'q', id: 'L1', m, sym, got: '2026-01-01T00:00:00Z', late: 4, src: 'worker', ...extra });
   const lines = [JSON.stringify({ k: 'event', id: 'L1', acc: 'L1', t: 'LIVA', cik: 222, fdate: recentF, at: `${recentF}T17:21`, val: 275000, n: 1, found: '2026-01-01T00:00:00Z' })];
@@ -1183,17 +1091,9 @@ ok('compute: лента, признак набора, карточка тике�
   assert.ok(tick.weekly.length > 50);
 });
 
-ok('compute: вечерняя схема на бумаге — события журнала дают сделки по общему набору', () => {
-  const pp = R('morning.json').paper;
-  assert.ok(pp, 'блок paper в morning.json');
-  assert.equal(pp.from, recentF); assert.equal(pp.cov.events, 1); assert.equal(pp.cov.listed, 1); assert.equal(pp.cov.complete, 1);
-  assert.equal(pp.main.n, 1); assert.equal(pp.all.n, 1);
-  // покупка по ask 49 -> закрытие D+1 51 (+4,08%) минус IWM от середины 99 до закрытия 100,5 (+1,52%) = +2,57% до издержек
-  assert.ok(Math.abs(pp.main.e[5].close.gross - 0.0257) < 0.0002, 'e5 close gross=' + pp.main.e[5].close.gross);
-  assert.ok(Math.abs(pp.main.e[30].open.gross - ((50 / 49 - 1) - (100 / 99 - 1))) < 0.0002, 'открытие D+1: ' + pp.main.e[30].open.gross);
-  assert.equal(pp.main.cur.gross, 0.015, 'текущая схема на тех же событиях: +2% минус IWM +0,5%');
-  assert.equal(pp.cov.estShare, 0, 'у всех моментов честный bid/ask');
-  assert.equal(pp.cost, EVENING.cost);
+ok('compute: старый журнал вечерней схемы в данных не даёт раздела paper', () => {
+  assert.ok(existsSync(join(TMP, 'paper', 'log', '2026-01-01.jsonl')), 'журнал в данных есть');
+  assert.equal('paper' in R('morning.json'), false);
 });
 ok('compute: утренний список, счётчик D+1 и всплеск', () => {
   const m = R('morning.json');
@@ -1706,83 +1606,6 @@ await okAsync('воркер: журнал вечерней схемы в R2 — 
   assert.equal((await call('PUT', '/quotes?symbols=AAA', { body: '' })).status, 405);
 });
 
-// ---------- вечерний сборщик: сквозной прогон против подставных SEC и воркера ----------
-await okAsync('сборщик: форма в вечернем окне -> событие и котировки по бумаге и IWM; повторный запуск ничего не дублирует', async () => {
-  const day = '2026-10-01';
-  const form = id => FORM4_XML.replace('<SEC-DOCUMENT>\n', `<SEC-DOCUMENT>${id}.txt : 20261001\n<SEC-HEADER>${id}.hdr.sgml : 20261001\n<ACCEPTANCE-DATETIME>20261001172135\nACCESSION NUMBER:\t${id}\n</SEC-HEADER>\n`);
-  const atom = `<feed>
-<entry><title>4 - Smith (0001) (Reporting)</title><link href="https://www.sec.gov/Archives/edgar/data/111222/000100000026000001/0001000000-26-000001-index.htm"/><updated>${day}T17:21:35-04:00</updated><category term="4"/><id>urn:tag:sec.gov,2008:accession-number=0001000000-26-000001</id></entry>
-<entry><title>4 - Early (0002) (Reporting)</title><link href="https://www.sec.gov/Archives/edgar/data/333/000100000026000002/0001000000-26-000002-index.htm"/><updated>${day}T10:00:00-04:00</updated><category term="4"/><id>urn:tag:sec.gov,2008:accession-number=0001000000-26-000002</id></entry>
-<entry><title>424B2 - Bank</title><link href="https://www.sec.gov/Archives/edgar/data/444/000100000026000003/0001000000-26-000003-index.htm"/><updated>${day}T17:25:00-04:00</updated><category term="424B2"/><id>urn:tag:sec.gov,2008:accession-number=0001000000-26-000003</id></entry>
-</feed>`;
-  const hits = { feed: 0, filings: [], quotes: [], puts: [], failPut: false };
-  const server = createServer((req, res) => {
-    if (req.url.startsWith('/cgi-bin/browse-edgar')) { hits.feed++; res.writeHead(200, { 'content-type': 'application/atom+xml' }); res.end(atom); }
-    else if (req.url.startsWith('/Archives/edgar/data/')) {
-      hits.filings.push(req.url);
-      res.writeHead(200); res.end(form('0001000000-26-000001'));
-    } else if (req.method === 'PUT' && req.url.startsWith('/paper/log/')) {
-      let raw = '';
-      req.on('data', c => { raw += c; });
-      req.on('end', () => { hits.puts.push({ url: req.url, auth: req.headers.authorization, body: raw }); res.writeHead(hits.failPut ? 500 : 200, { 'content-type': 'application/json' }); res.end(hits.failPut ? '{"error":"сбой"}' : '{"ok":true}'); });
-      return;
-    } else if (req.url.startsWith('/quotes')) {
-      hits.quotes.push(req.url);
-      const q = { TST: { p: 9.9, t: 1, st: 'POST', b: 9.5, a: 9.6, bs: 200, as: 100, pp: 9.55, pt: 1793830000 }, IWM: { p: 200, t: 1, st: 'POST', b: 0, a: 0, pp: 200.5, pt: 1793830000 } };
-      res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ at: 1793830100, n: 2, src: 'quote', quotes: q }));
-    } else { res.writeHead(404); res.end(); }
-  });
-  await new Promise(r => server.listen(0, '127.0.0.1', r));
-  const base = `http://127.0.0.1:${server.address().port}`;
-  const preload = join(NTMP, 'sec-redirect.mjs');
-  writeFileSync(preload, ["const base = process.env.FAKE_SEC_BASE;", "const real = globalThis.fetch;",
-    "globalThis.fetch = (url, init) => real(String(url).replace('https://www.sec.gov', base), init);"].join('\n'));
-  const dir = join(NTMP, 'paper-run');
-  const run = () => new Promise(resolve => execFile(process.execPath,
-    ['--import', pathToFileURL(preload).href, join(ROOT, 'scripts', 'evening', 'collector.mjs'), '--dir', dir, '--once'],
-    { encoding: 'utf8', env: { ...process.env, FAKE_SEC_BASE: base, QUOTES_URL: base + '/quotes', PAPER_URL: base, PAPER_TOKEN: 'tok' } },
-    (err, stdout, stderr) => resolve({ code: err ? (err.code ?? 1) : 0, out: stdout + stderr })));
-  try {
-    const r1 = await run();
-    assert.equal(r1.code, 0, r1.out);
-    const files = readdirSync(join(dir, 'log'));
-    assert.equal(files.length, 1);
-    const j = parseJournal(readFileSync(join(dir, 'log', files[0]), 'utf8'));
-    assert.equal(j.events.size, 1, 'вечерняя форма одна: ранняя и чужого типа отброшены');
-    const ev = j.events.get('0001000000-26-000001');
-    assert.equal(ev.t, 'TST'); assert.equal(ev.at, `${day}T17:21:35`); assert.equal(ev.fdate, day);
-    assert.equal(hits.filings.length, 1, 'полный текст скачан только для формы в окне');
-    // сроки +5, +15, +30 прошли (дата в прошлом) — все четыре момента сняты, по бумаге и по IWM
-    for (const m of [0, 5, 15, 30]) {
-      const q = j.quotes.get(`${ev.id}|${m}|TST`)?.[0], b = j.quotes.get(`${ev.id}|${m}|IWM`)?.[0];
-      assert.ok(q && b, `момент ${m}`);
-      assert.equal(q.src, 'worker'); assert.equal(q.ask, 9.6); assert.equal(q.bid, 9.5); assert.equal(q.last, 9.55);
-      assert.equal(b.bid, undefined, 'нулевая сторона у Yahoo не попадает в журнал как число');
-      assert.ok(q.late >= 0 && q.due && q.got);
-    }
-    assert.equal(hits.quotes.length, 1, 'все моменты и IWM — одним запросом к воркеру');
-    assert.match(hits.quotes[0], /symbols=TST%2CIWM|symbols=IWM%2CTST/);
-    const before = readFileSync(join(dir, 'log', files[0]), 'utf8').split('\n').filter(Boolean).length;
-    const r2 = await run();
-    assert.equal(r2.code, 0, r2.out);
-    const after = parseJournal(readFileSync(join(dir, 'log', files[0]), 'utf8'));
-    assert.equal(after.events.size, 1); assert.equal([...after.quotes.values()].flat().length, 8, 'после перезапуска котировки не дублируются');
-    assert.equal(readFileSync(join(dir, 'log', files[0]), 'utf8').split('\n').filter(Boolean).length, before + 2, 'добавились только служебные строки: запуск и статистика');
-    // отправка журнала в воркер: целиком, с токеном, на путь с датой файла; на каждый запуск (файл вырос) — одна отправка
-    assert.equal(hits.puts.length, 2);
-    assert.equal(hits.puts[0].url, '/paper/log/' + files[0]); assert.equal(hits.puts[0].auth, 'Bearer tok');
-    assert.equal(hits.puts[1].body, readFileSync(join(dir, 'log', files[0]), 'utf8'), 'уходит весь журнал, а не только прирост');
-    // сбой воркера: код выхода ненулевой (тревога), журнал остаётся на диске и уйдёт при следующей отправке
-    hits.failPut = true;
-    const r3 = await run();
-    assert.notEqual(r3.code, 0); assert.match(r3.out, /HTTP 500/);
-    hits.failPut = false;
-    const n3 = hits.puts.length;
-    const r4 = await run();
-    assert.equal(r4.code, 0, r4.out); assert.equal(hits.puts.length, n3 + 1, 'недоставленное ушло при следующем запуске');
-  } finally { await new Promise(r => server.close(r)); }
-});
-
 // ---------- П11/П14 (ревизия данных 04.11.2026): определения отбора как в проверенной стратегии, поля для сторожа ----------
 ok('turnover20: медиана close×volume за 20 баров, заканчивающихся днём подачи; меньше 10 баров — оборота нет', () => {
   const bar = (k, c, v) => ['2026-10-' + String(k).padStart(2, '0'), c, c, v];
@@ -2147,7 +1970,7 @@ await okAsync('бары VPS: запрос к воркеру пачками, то
 
 // --- сборка на VPS целиком против подставного воркера: копия данных фикстуры, у LIVA/SPY/IWM срезаны бары D0, всё докачивается ---
 function fakeWorker({ charts = {}, morning = null, markers = {} } = {}) {
-  const calls = { morningPuts: [], markerPuts: [], bars: [], paper: 0 };
+  const calls = { morningPuts: [], markerPuts: [], bars: [] };
   const state = { morning, markers: { ...markers } };
   const server = createServer((req, res) => {
     let raw = '';
@@ -2177,7 +2000,6 @@ function fakeWorker({ charts = {}, morning = null, markers = {} } = {}) {
         }
         return send(200, { ok: true, bars, failed, limited: false });
       }
-      if (u.pathname === '/paper/index') { calls.paper++; return send(200, { files: [] }); }
       send(404, { error: 'not found' });
     });
   });

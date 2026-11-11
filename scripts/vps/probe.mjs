@@ -4,7 +4,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, statfsSync, accessSync, constants } from 'node:fs';
 import { addDaysIso } from '../lib/util.mjs';
-import { nyWall } from '../lib/evening.mjs';
+import { nyWall } from '../lib/nytime.mjs';
 import { isSecClosed } from '../lib/calendar.mjs';
 import { indexAvailable, parseArgs } from './morning-build.mjs';
 import { parseYahooChart } from '../lib/prices.mjs';

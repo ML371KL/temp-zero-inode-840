@@ -4,15 +4,15 @@
 //
 //   node scripts/vps/feed-collector.mjs [--dir /var/lib/insider840-feed] [--from 06:00] [--until 22:00] [--interval 45] [--once] [--dry-run]
 //
-// Ограничения: SEC — только politeFetch с SEC_UA проекта, не чаще 2,5 запроса в секунду (вечерний сборщик работает рядом и берёт свои 5:
-// вместе в пределах 10 в секунду, которые SEC разрешает с адреса); лента — до 300 записей на такт (три страницы), глубже не идём:
+// Ограничения: SEC — только politeFetch с SEC_UA проекта, не чаще 2,5 запроса в секунду (запас до 10 в секунду, которые SEC разрешает
+// с адреса: в 22:03 рядом работает сборка списка); лента — до 300 записей на такт (три страницы), глубже не идём:
 // если все три страницы целиком новые, это «разрыв» (gap) и он виден в журнале — индекс подберёт пропущенное.
 // Перезапуск безопасен: замеченные и разобранные подачи читаются из журнала дня. Сбой такта не роняет сборщик; 30 подряд — выход с ошибкой.
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { politeFetch, SEC_UA } from '../lib/util.mjs';
 import { parseForm4Txt, acceptedAt, edgarBase } from '../lib/edgar.mjs';
-import { nyWall, nyToMs, parseAtom, filingPath } from '../lib/evening.mjs';
-import { FEED, feedFile, parseFeedJournal, pruneFeed } from '../lib/feed.mjs';
+import { nyWall, nyToMs } from '../lib/nytime.mjs';
+import { FEED, feedFile, parseFeedJournal, pruneFeed, parseAtom, filingPath } from '../lib/feed.mjs';
 
 const args = process.argv.slice(2);
 const argVal = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d; };

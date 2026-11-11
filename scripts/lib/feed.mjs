@@ -85,3 +85,25 @@ export function mergeFeedRows(shard, forms, accs) {
   shard.trades = [...byKey.values()];
   return added;
 }
+
+// ---------- лента EDGAR getcurrent (atom) ----------
+// -> [{ acc, cik, form, updated, filed }] по одному на форму: одна форма встречается в ленте несколько раз
+// (эмитент и каждый инсайдер). updated — время из ленты, но ИСТИНА — <ACCEPTANCE-DATETIME> в самой форме.
+export function parseAtom(xml) {
+  const out = [], seen = new Set();
+  for (const m of String(xml ?? '').matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
+    const e = m[1];
+    const acc = /accession-number=(\d{10}-\d{2}-\d{6})/.exec(e)?.[1] ?? /\/(\d{10}-\d{2}-\d{6})-index\.htm/.exec(e)?.[1];
+    const href = /<link[^>]*href="([^"]+)"/.exec(e)?.[1] ?? '';
+    const cik = /\/data\/(\d+)\//.exec(href)?.[1];
+    const form = /<category[^>]*term="([^"]+)"/.exec(e)?.[1] ?? /<title>\s*([^\s<]+)/.exec(e)?.[1] ?? null;
+    if (!acc || !cik || seen.has(acc)) continue;
+    seen.add(acc);
+    // «Filed:» — дата подачи по правилам SEC (та же, что в дневном индексе); в ленте она лежит в экранированном описании записи
+    const filed = /Filed:(?:&lt;\/b&gt;|<\/b>)?\s*(\d{4}-\d{2}-\d{2})/.exec(e)?.[1] ?? null;
+    out.push({ acc, cik: Number(cik), form, updated: /<updated>([^<]+)<\/updated>/.exec(e)?.[1] ?? null, filed });
+  }
+  return out;
+}
+// Путь полного .txt формы под Archives/ (fetchFiling добавляет https://www.sec.gov/Archives/)
+export const filingPath = (cik, acc) => `edgar/data/${cik}/${acc.replace(/-/g, '')}/${acc}.txt`;

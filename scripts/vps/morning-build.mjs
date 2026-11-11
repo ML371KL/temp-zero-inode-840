@@ -9,23 +9,22 @@
 //   1. индекс EDGAR за день D опубликован (form.ГГГГММДД.idx)          — нет: ждём; D — праздник SEC: выходим без тревоги
 //   2. ветка data (анонимный shallow-fetch открытого репозитория)      — в $STATE/repo, каждый раз чистое дерево
 //   3. scripts/live.mjs: формы дня D                                   — SEC с VPS, ~0,2 с на форму
-//   4. журнал вечерней схемы из воркера (необязательно)                 — как в daily.yml
-//   5. бары SPY и IWM за D и открытия дня входа                         — через воркер /bars (Yahoo с адреса VPS не трогаем)
-//   6. compute --only-morning --plan: у каких бумаг дня нет бара D0     — докачка через воркер /bars (бумаги без кэша — со всей историей)
-//   7. compute --only-morning --builder vps                             — morning.json (листинг, счётчик, вечерняя схема)
-//   8. PUT воркеру /morning                                             — панель берёт файл оттуда, если он свежее страницы
-//   9. письмо (если в env есть TELEGRAM_*)                              — scripts/notify.mjs --sender vps; дубль исключает отметка в воркере
+//   4. бары SPY и IWM за D и открытия дня входа                         — через воркер /bars (Yahoo с адреса VPS не трогаем)
+//   5. compute --only-morning --plan: у каких бумаг дня нет бара D0     — докачка через воркер /bars (бумаги без кэша — со всей историей)
+//   6. compute --only-morning --builder vps                             — morning.json (листинг, счётчик)
+//   7. PUT воркеру /morning                                             — панель берёт файл оттуда, если он свежее страницы
+//   8. письмо (если в env есть TELEGRAM_*)                              — scripts/notify.mjs --sender vps; дубль исключает отметка в воркере
 //  Лента на весь день (feed-collector.mjs, отдельный юнит): после шага 3 индекс сверяется с лентой — подачи, которые лента видела, а индекс нет,
 //  добавляются в список (coverage.feed); нет индекса до последней попытки — список по ленте с пометкой source: "feed" и ошибкой выхода (тревога).
 // В ветку data VPS ничего не пишет. Код берётся из клона репозитория (обновляет только install.sh).
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readJson, writeJson, readJsonGz, writeJsonGz, addDaysIso, SEC_UA } from '../lib/util.mjs';
 import { fetchDayIndex, uniqueFilings, edgarBase, SHARD_VERSION } from '../lib/edgar.mjs';
 import { FEED, loadFeed, reconcile, mergeFeedRows } from '../lib/feed.mjs';
-import { nyWall, nyToMs } from '../lib/evening.mjs';
+import { nyWall, nyToMs } from '../lib/nytime.mjs';
 import { isSecClosed, isMarketClosed } from '../lib/calendar.mjs';
 import { fetchBars, applyBars, barsFrom } from '../lib/bars.mjs';
 import { OPENS_BENCH, readOpens, opensOf } from '../lib/opens.mjs';
@@ -99,19 +98,6 @@ async function syncData(opts) {
   await git(['clean', '-fdq'], { cwd: opts.data, env });
   await git(['gc', '--auto', '-q'], { cwd: opts.data, env });
   return true;
-}
-
-async function fetchPaper(opts) {
-  try {
-    const dir = join(opts.data, 'paper', 'log');
-    mkdirSync(dir, { recursive: true });
-    const ix = await (await fetch(`${opts.workerUrl}/paper/index`, { signal: AbortSignal.timeout(20000) })).json();
-    for (const f of ix.files ?? []) {
-      const r = await fetch(`${opts.workerUrl}/paper/log/${f.name}`, { signal: AbortSignal.timeout(30000) });
-      if (r.ok) writeFileSync(join(dir, f.name), await r.text());
-    }
-    log(`журнал вечерней схемы: ${(ix.files ?? []).length} файлов`);
-  } catch (e) { log('журнал вечерней схемы недоступен (необязательно):', e.message); }
 }
 
 // Итог шага live.mjs для дня day: state/live.json (lastDay, coverage[day] от сборщика подач) и код выхода. Индекс разобран не до day или не
@@ -209,7 +195,6 @@ export async function attempt(opts, day, ctx) {
     } catch (e) { log('лента на весь день: сверка не удалась (не критично):', e.message); }
     st.feed = true;
   }
-  if (!st.paper) { await fetchPaper(opts); st.paper = true; }
 
   // Бары бенчмарков: по ним определяются D0 и день входа. Нужны, пока нет бара за D у SPY или открытий за D в хранилище.
   if (!st.bench) {

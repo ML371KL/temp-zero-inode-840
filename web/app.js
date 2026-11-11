@@ -418,43 +418,9 @@ function dayNote(day, rows, liveOn = false) {
   return `торги ${fmtDate(day.entry)}: среднее ${fmtPct(avg('ex'), 2)} к IWM, ${fmtPct(avg('exS'), 2)} к S&P, в плюсе ${up} из ${res.length}`;
 }
 
-// Вечерняя схема на бумаге против текущей. Формы, принятые EDGAR с 16:00 до 20:00 по Нью-Йорку, «покупаются» по ask
-// через 5, 15 и 30 минут после времени приёма и «продаются» на открытии или закрытии D+1; рядом — текущая схема
-// (открытие → закрытие D+1) на тех же событиях. Копится на бумаге 2–3 месяца (журнал с VPS, ветка paper), прежде чем
-// строить настоящий контур. Всё считает сборка (scripts/lib/paper.mjs); страница только раскладывает.
-function renderPaper() {
-  const box = $('#m-paper'), pp = state.morning?.paper;
-  if (!pp) { box.hidden = true; return; }
-  box.hidden = false;
-  const s = mView === 'main' ? pp.main : pp.all;
-  const stake = pp.stake ?? 1e4;
-  const cov = pp.cov ?? {};
-  const head = '<div class="paper-head"><b>Вечерняя схема на бумаге против текущей</b> · с ' + esc(fmtDate(pp.from))
-    + ' · ' + (mView === 'main' ? 'основной список' : 'все от $10 млн')
-    + ' · к IWM, после издержек вечерней схемы ' + pctPlain(pp.cost, 2) + ' на круг, текущей — по уровню оборота'
-    + (pp.main || pp.all ? ' · ' + plural(((mView === 'main' ? pp.main : pp.all)?.n) ?? 0, 'сделка', 'сделки', 'сделок') + ' на одном наборе событий' : '') + '</div>';
-  const covTxt = 'Событий ' + cov.events + ' · в списках ' + cov.listed + ' · D+1 закрыт ' + cov.closed + ' · полный набор котировок ' + cov.complete
-    + (cov.estShare ? ' · цена по оценке спреда в ' + Math.round(cov.estShare * 100) + '% моментов' : '');
-  if (!s?.n) {
-    box.innerHTML = head + '<div class="strip-empty">Первые результаты — когда закроется D+1 у событий с полным набором котировок. ' + esc(covTxt) + '</div>';
-    return;
-  }
-  const row = (lab, m, hint, cur) => '<tr' + (cur ? ' class="cur"' : '') + '><td class="lab" title="' + esc(hint) + '">' + esc(lab) + '</td>'
-    + '<td class="' + cls(m.mean) + '" title="До издержек ' + fmtPct(m.gross, 2) + '">' + fmtPct(m.mean, 2) + '</td>'
-    + '<td class="' + cls(m.median) + '">' + fmtPct(m.median, 2) + '</td><td>' + Math.round(m.win * 100) + '%</td>'
-    + '<td class="' + cls(m.cumNet) + '">' + sgnMoney(m.cumNet * stake) + '</td></tr>';
-  let rows = row('Сейчас: открытие → закрытие', s.cur, 'Текущая схема на тех же событиях: покупка на открытии D+1, продажа на закрытии', true);
-  for (const m of Object.keys(s.e)) rows += row('+' + m + ' мин → закрытие D+1', s.e[m].close, 'Покупка по ask через ' + m + ' минут после приёма формы, продажа на закрытии D+1', false);
-  for (const m of Object.keys(s.e)) rows += row('+' + m + ' мин → открытие D+1', s.e[m].open, 'Покупка по ask через ' + m + ' минут после приёма формы, продажа на открытии D+1: сколько ночного скачка взято', false);
-  box.innerHTML = head + '<table class="strip-t paper-t"><tr><th></th><th title="Доходность к IWM за то же окно после издержек">среднее</th><th>медиана</th><th>в плюсе</th>'
-    + '<th title="Итог всех сделок после издержек при $' + (stake / 1000) + ' тыс. в каждой: не доходность портфеля">на ' + esc(fmtMoney(stake)) + ' в сделке</th></tr>' + rows + '</table>'
-    + '<div class="paper-foot">' + esc(covTxt) + '. Сравнение — на одном наборе событий: только с полным набором котировок.</div>';
-}
-
 function renderMorning() {
   renderCounter();
   renderSurge();
-  renderPaper();
   const days = state.morning.days;
   // Выбор даты: десять последних дат подачи, число бумаг выбранного списка в подписи
   $('#m-day').innerHTML = days.map(d => `<option value="${esc(d.date)}"${d.date === mDay ? ' selected' : ''}>${esc(fmtDate(d.date))} · ${viewRows(d).length}</option>`).join('');

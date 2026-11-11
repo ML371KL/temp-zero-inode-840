@@ -24,7 +24,6 @@ import { buildOwnerGroups, isPersonOwner, isFundOnly, topRole, dOwnOf } from './
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './lib/routine.mjs';
 import { readOpens, opensOf, nextTradingDay } from './lib/opens.mjs';
 import { MORNING, BREADTH, buildDayFull, tradeResult, summarize, breadth, prevDays } from './lib/morning.mjs';
-import { readPaperJournal, buildPaper } from './lib/paper.mjs';
 import { listDayOf } from './lib/livecal.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -264,7 +263,7 @@ const quality = { reassigned: 0, reassignedTickers: new Set(), noEntry: 0, unkno
 const panel = new Panel();
 panel.add('SPY', monthlyFromDaily(spy), true);
 if (iwm?.length) panel.add('IWM', monthlyFromDaily(iwm), true);
-// Тикеры, чьи цены нужны утреннему списку и счётчику: покупки последних дней подачи (с запасом на окно вечерней схемы)
+// Тикеры, чьи цены нужны утреннему списку и счётчику: покупки последних дней подачи (с запасом в 45 дней)
 const leanFrom = [COUNTER_FROM, addDaysIso(today, -45)].reduce((a, b) => (a < b ? a : b));
 // и бумаги прошлогодних покупок тех же эмитентов: поле prev (повтор) смотрит, прошли ли они гейты, а у строки без ряда ценовые гейты
 // не срабатывают — у эмитента, сменившего тикер, prev разошёлся бы с полной сборкой
@@ -467,10 +466,7 @@ W('feed.json', feedRows);
 const opensStore = readOpens(DATA);
 const dayCand = new Map();
 // Строки-кандидаты нужны только для последних дней и для счётчика: старше — не копим в памяти
-// Журнал вечерней схемы (ветка paper) читаем до этого: события копятся месяцами, и строки их дней подачи нужны сборке
-const paperJournal = readPaperJournal(join(DATA, 'paper'));
-const paperFrom = [...paperJournal.events.values()].reduce((m, e) => (m === null || e.fdate < m ? e.fdate : m), null);
-const DAY_CUT = [COUNTER_FROM, addDaysIso(today, -30), paperFrom ?? '9999'].reduce((a, b) => (a < b ? a : b));
+const DAY_CUT = [COUNTER_FROM, addDaysIso(today, -30)].reduce((a, b) => (a < b ? a : b));
 // Повтор (prev, scripts/lib/morning.mjs, prevDays): дни подачи каждого эмитента, в которые была покупка от $10 тыс., прошедшая гейты
 // (не-обыкновенные бумаги гейты отсеивают сами). По всей истории, а не с DAY_CUT: окно prev — год. buys упорядочены по дате подачи.
 const eventDays = new Map();
@@ -540,27 +536,12 @@ const counterOut = {
   all: { ...summarize(counterTrades.all), skips: counterSkips.all },
 };
 const morningDays = dayDates.slice(-MORNING.daysShown).reverse().map(dayWithResults);
-// Вечерняя схема на бумаге: события из журнала сборщика на VPS, результаты — по событиям, чей D+1 закрыт
-// (scripts/lib/paper.mjs, scripts/lib/evening.mjs). Нет журнала — нет блока.
-const dayMemo = new Map();
-const dayOnce = fd => dayMemo.get(fd) ?? dayMemo.set(fd, dayWithResults(fd)).get(fd);
-const paperOut = buildPaper(paperJournal, {
-  minPx: MORNING.minPx,
-  rowOf: (fd, t) => dayOnce(fd).rows.find(r => r.t === t) ?? null,
-  d1Of: (fd, t) => {
-    const e = nextTradingDay(opensStore, fd);
-    if (!e || e >= today) return null;
-    const a = opensOf(opensStore, t, e), b = opensOf(opensStore, 'IWM', e);
-    return a && b ? { day: e, o: a[0], c: a[1], pc: a[2], io: b[0], ic: b[1] } : null;
-  },
-});
 W('morning.json', {
   built: today, pricesAsOf: spy?.length ? spy[spy.length - 1][0] : null,
   // Для сторожа: за какую дату подачи список, когда и кем собран, как покрыт индекс (null — поля покрытия в live.json ещё нет)
   listFor, builtAt: new Date().toISOString(), builder: BUILDER, source: SOURCE, coverage,
   params: { minVal: MORNING.minVal, minPx: MORNING.minPx, dvMin: MORNING.dvMin, dvCost: MORNING.dvCost, scoreMin: MORNING.scoreMin, costHi: MORNING.costHi, costLo: MORNING.costLo, stake: MORNING.stake },
   counter: counterOut, days: morningDays,
-  ...(paperOut ? { paper: paperOut } : {}),
 });
 if (COUNTER_DUMP) writeJson(COUNTER_DUMP, counterTrades);
 // План докачки для сборки на VPS: у каких тикеров дня listFor нет бара D0 (и с какой даты качать) и каким строкам прошедших
@@ -1019,7 +1000,6 @@ console.log(`[compute] ремонт рядов: пересчитано по сп
   const lastDay = morningDays[0];
   console.log(`[compute] утренний список ${lastDay?.date ?? '—'}: ${lastDay?.rows.length ?? 0} бумаг от $10 млн, в основном списке (скор ≥${MORNING.scoreMin}) ${lastDay?.rows.filter(x => x.main).length ?? 0}`);
   console.log(`[compute] счётчик с ${COUNTER_FROM}: основной — ${fmtSum(counterOut.main)}; все от $10 млн — ${fmtSum(counterOut.all)}`);
-  if (paperOut) console.log(`[compute] вечерняя схема на бумаге: событий ${paperOut.cov.events}, в списках ${paperOut.cov.listed}, D+1 закрыт ${paperOut.cov.closed}, полный набор котировок ${paperOut.cov.complete}; основной список ${paperOut.main.n} сделок`);
   console.log(`[compute] всплеск покупок: ${breadthOut ? `на ${breadthOut.asOf} B3=${breadthOut.b3}, z=${breadthOut.z}, ${breadthOut.surge ? 'ВСПЛЕСК' : 'нет'}` : 'н/д'}`);
 }
 if (workingSet) {
