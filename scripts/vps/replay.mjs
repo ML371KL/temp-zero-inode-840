@@ -68,7 +68,6 @@ const server = createServer((req, res) => {
     for (const part of (u.searchParams.get('symbols') ?? '').split(',')) { const [sym, from] = part.split(':'); const c = chartFor(sym, from); if (c) bars[sym] = c; else failed[sym] = 'HTTP 404'; }
     return send(200, { ok: true, bars, failed, limited: false });
   }
-  if (u.pathname === '/paper/index') return send(200, { files: [] });
   if (u.pathname === '/morning') { req.resume(); req.on('end', () => send(200, { ok: true })); return; }
   send(404, {});
 });

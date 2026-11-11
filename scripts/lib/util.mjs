@@ -8,8 +8,8 @@ export const SEC_UA = 'InsiderRadar/1.0 (rodionkalmykov@gmail.com)';
 export const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
 const hostState = new Map(); // host -> { nextAt }
-// SEC разрешает 10 запросов в секунду с адреса. Процесс держит ~7; на VPS вечерний сборщик и лента работают одновременно и
-// делят адрес, поэтому их юниты задают SEC_INTERVAL_MS (вечерний — 250 мс = 4 в секунду, вместе с лентой ≤ 6,5).
+// SEC разрешает 10 запросов в секунду с адреса. Процесс держит ~7; если на одном адресе одновременно работают несколько сборщиков,
+// их юниты задают SEC_INTERVAL_MS, чтобы вместе остаться в пределах лимита.
 const SEC_INTERVAL = Number(process.env.SEC_INTERVAL_MS) > 0 ? Number(process.env.SEC_INTERVAL_MS) : 140;
 const HOST_INTERVAL_MS = {
   'www.sec.gov': SEC_INTERVAL,          // по умолчанию ~7 req/s
@@ -23,7 +23,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function throttle(url, intervalMs = null) {
   const host = new URL(url).host;
-  // intervalMs — свой минимум между запросами к хосту (вечерний сборщик держится не чаще 5 запросов в секунду к SEC)
+  // intervalMs — свой минимум между запросами к хосту (лента на весь день держится не чаще 2,5 запроса в секунду к SEC)
   const interval = Math.max(intervalMs ?? 0, HOST_INTERVAL_MS[host] ?? 300);
   const st = hostState.get(host) ?? { nextAt: 0 };
   const now = Date.now();

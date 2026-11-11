@@ -2,7 +2,7 @@
 # Установка сборки утреннего списка 840 на VPS. Запускать от root (sudo) из клона репозитория:
 #   sudo bash ops/insider840-morning/install.sh
 # Идемпотентно: повторный запуск ничего не ломает. Таймер не включает, пока в env нет PAPER_TOKEN, и говорит об этом.
-# Шаблон — обычный для панелей: пользователь dash, код /srv/dash/repo-840 (тот же клон, что у вечернего сборщика), env в /usr/local/etc,
+# Шаблон — обычный для панелей: пользователь dash, код /srv/dash/repo-840 (тот же клон, что у ленты insider840-feed), env в /usr/local/etc,
 # состояние /var/lib. Код обновляется ТОЛЬКО этим скриптом (git pull --ff-only); сам юнит клон не трогает.
 # Ключей git и доступа к GitHub на запись не нужно: ветка data читается анонимно, список уходит в воркер по токену.
 set -euo pipefail
@@ -34,7 +34,7 @@ say "env: $ETC/env"
 install -d -m 0750 -o root -g dash "$ETC"
 if [ ! -f "$ETC/env" ]; then
   install -m 0640 -o root -g dash "$SRC/env.example" "$ETC/env"
-  echo "создан из env.example — впишите PAPER_TOKEN (тот же, что у вечернего сборщика); TELEGRAM_* — если письмо должно уходить с VPS"
+  echo "создан из env.example — впишите PAPER_TOKEN (секрет воркера radar840-quotes); TELEGRAM_* — если письмо должно уходить с VPS"
 else
   echo "уже есть, не трогаю"
 fi
