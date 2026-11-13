@@ -1,5 +1,6 @@
 // Инсайдерский радар — логика интерфейса. ES-модуль, без зависимостей.
 import { PriceChart, fmtPrice, fmtInt, fmtMoney, fmtPct, fmtDate } from './charts.js';
+import { staleState } from './stale.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -100,25 +101,16 @@ addEventListener('hashchange', route);
 
 // Баннер устаревания рисуется на клиенте намеренно: если сломался сборочный цикл,
 // он же и не сможет сообщить о своей поломке — а страница покажет это при любом сбое.
+// Пропущенный день — рабочий день SEC после liveLastDay, чей срок (09:00 по Нью-Йорку следующего дня)
+// уже прошёл; баннер — с одного такого дня. Счёт — web/stale.js, его проверяет самотест.
 function checkStale() {
   const last = state.meta?.liveLastDay;
-  if (!last) return;
-  // Считаем ПРОПУЩЕННЫЕ рабочие дни: строго между последним обработанным и сегодня.
-  // Сегодняшний день не в счёт — его индекс выходит только вечером (22:02 ET).
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const d = new Date(last + 'T00:00:00Z');
-  let gap = 0;
-  d.setUTCDate(d.getUTCDate() + 1);
-  while (d.toISOString().slice(0, 10) < todayIso) {
-    const dow = d.getUTCDay();
-    if (dow !== 0 && dow !== 6) gap++;
-    d.setUTCDate(d.getUTCDate() + 1);
-  }
-  if (gap < 2) return;   // 0 — норма, 1 — праздник или прогон ещё не отработал
+  const { missed, show } = staleState(last, Date.now());
+  if (!show) return;
   const bar = document.createElement('div');
   bar.className = 'stale-bar';
   bar.innerHTML = `⚠ Данные EDGAR устарели: последний обработанный день — <b>${esc(last)}</b> ` +
-    `(пропущено рабочих дней: ${gap}). Обновление не отработало — проверьте ` +
+    `(пропущено рабочих дней: ${missed}). Обновление не отработало — проверьте ` +
     `<a href="https://github.com/ML371KL/temp-zero-inode-840/actions" target="_blank" rel="noopener">журнал сборок</a>.`;
   document.body.prepend(bar);
 }

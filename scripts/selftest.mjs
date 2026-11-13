@@ -16,6 +16,9 @@ import {
 } from './lib/prices.mjs';
 import { barsFrom, fetchBars, applyBars } from './lib/bars.mjs';
 import { isSecClosed, isMarketClosed } from './lib/calendar.mjs';
+import * as buildCalendar from './lib/calendar.mjs';
+import * as webCalendar from '../web/calendar.js';
+import { missedSecDays, staleState, DEADLINE_NY_HOUR, STALE_MIN_MISSED } from '../web/stale.js';
 import { main as morningMain, liveVerdict, reconcileStage, d0Verdict } from './vps/morning-build.mjs';
 import { parseFeedJournal, loadFeed, pruneFeed, feedFile, reconcile, mergeFeedRows, parseAtom, filingPath } from './lib/feed.mjs';
 import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf, compareMain, prevDays } from './lib/morning.mjs';
@@ -1827,6 +1830,141 @@ ok('календарь биржи: Страстная пятница закры�
   for (const d of ['2026-11-11', '2026-10-12', '2026-11-04', '2021-12-31', '2026-04-02', '2026-04-06'])
     assert.equal(isMarketClosed(d), false, d);
   assert.equal(isSecClosed('2026-04-03'), false, 'SEC в Страстную пятницу работает');
+});
+
+// ---------- плашка «Данные EDGAR устарели» (web/stale.js) ----------
+// Момент — UTC; срок дня D — 09:00 по Нью-Йорку дня D+1 (14:00 UTC зимой, 13:00 UTC летом). Пара [момент, пропущено]:
+// плашка видна с одного пропущенного дня.
+const Z = s => Date.parse(s + 'Z');
+function expectStale(last, cases) {
+  for (const [at, missed] of cases)
+    assert.deepEqual(staleState(last, Z(at)), { missed, show: missed >= 1 }, `liveLastDay ${last}, ${at} UTC`);
+}
+ok('плашка EDGAR: 12.11.2026 после Дня ветеранов — вечером пропусков нет, к 09:00 ET без ночной сборки — один', () => {
+  assert.equal(STALE_MIN_MISSED, 1);
+  expectStale('2026-11-10', [
+    ['2026-11-12T14:00', 0],   // утро 12.11: 11.11 SEC закрыта
+    ['2026-11-13T01:36', 0],   // показ владельцу, 20:36 ET 12.11: индекс 12.11 ещё не вышел (старое правило — 2)
+    ['2026-11-13T13:59', 0],
+    ['2026-11-13T14:00', 1],   // 09:00 ET 13.11, а 12.11 не обработан: поломка ночной сборки видна к утру
+  ]);
+  expectStale('2026-11-12', [['2026-11-13T14:00', 0], ['2026-11-14T13:59', 0], ['2026-11-14T14:00', 1]]);
+});
+ok('плашка EDGAR: обычная неделя — выходные и понедельник без пропусков, вторник 09:00 ET без понедельника — один', () => {
+  expectStale('2026-11-13', [   // пятница
+    ['2026-11-14T03:00', 0], ['2026-11-14T14:00', 0], ['2026-11-15T14:00', 0],
+    ['2026-11-16T13:59', 0], ['2026-11-16T14:00', 0], ['2026-11-17T01:00', 0],
+    ['2026-11-17T13:59', 0], ['2026-11-17T14:00', 1],
+  ]);
+  // Живой контур двигает liveLastDay и на выходные (lib/livecal.mjs): субботний прогон ставит субботу, воскресный — воскресенье
+  expectStale('2026-11-14', [['2026-11-14T03:45', 0], ['2026-11-17T13:59', 0], ['2026-11-17T14:00', 1]]);
+  expectStale('2026-11-15', [['2026-11-17T13:59', 0], ['2026-11-17T14:00', 1]]);
+  expectStale('2026-11-16', [['2026-11-17T14:00', 0], ['2026-11-18T13:59', 0], ['2026-11-18T14:00', 1]]);
+});
+ok('плашка EDGAR: День благодарения, Рождество и Новый год — вечер и утро после праздника при исправной сборке без пропусков', () => {
+  // Чт 26.11.2026: прогоны 26.11 и 27.11 (03:25 UTC) стоят на 25.11 — индекс 27.11 выходит только вечером 27.11
+  expectStale('2026-11-25', [
+    ['2026-11-26T14:00', 0], ['2026-11-27T14:00', 0],
+    ['2026-11-28T00:30', 0],   // вечер пятницы, 19:30 ET (старое правило — 2)
+    ['2026-11-28T03:30', 0], ['2026-11-28T13:59', 0],
+    ['2026-11-28T14:00', 1],   // суббота 09:00 ET, пятница не обработана — поломка
+  ]);
+  expectStale('2026-11-28', [['2026-11-28T14:00', 0], ['2026-11-30T14:00', 0], ['2026-12-01T01:00', 0]]);
+  // Пт 25.12.2026: и при liveLastDay = 24.12 (прогоны выходных не прошли), и при 27.12 (прошли)
+  expectStale('2026-12-24', [
+    ['2026-12-25T14:00', 0], ['2026-12-26T14:00', 0], ['2026-12-28T14:00', 0],
+    ['2026-12-29T01:00', 0],   // вечер понедельника 28.12
+    ['2026-12-29T13:59', 0], ['2026-12-29T14:00', 1],
+  ]);
+  expectStale('2026-12-27', [['2026-12-29T01:00', 0], ['2026-12-29T13:59', 0]]);
+  // Пт 01.01.2027
+  expectStale('2026-12-31', [
+    ['2027-01-01T14:00', 0], ['2027-01-02T14:00', 0], ['2027-01-04T14:00', 0],
+    ['2027-01-05T01:00', 0], ['2027-01-05T13:59', 0], ['2027-01-05T14:00', 1],
+  ]);
+  expectStale('2027-01-03', [['2027-01-05T01:00', 0], ['2027-01-05T13:59', 0]]);
+});
+ok('плашка EDGAR: праздник, перенесённый с выходного, — не пропуск (04.07.2026 → пт 03.07; в 2027 — пт 24.12 и пт 31.12)', () => {
+  expectStale('2026-07-02', [
+    ['2026-07-03T13:00', 0], ['2026-07-04T13:00', 0], ['2026-07-06T13:00', 0],
+    ['2026-07-07T01:00', 0], ['2026-07-07T12:59', 0], ['2026-07-07T13:00', 1],
+  ]);
+  expectStale('2027-12-23', [['2027-12-25T14:00', 0], ['2027-12-27T14:00', 0], ['2027-12-28T14:00', 1]]);
+  expectStale('2027-12-30', [['2028-01-01T14:00', 0], ['2028-01-03T14:00', 0], ['2028-01-04T13:59', 0], ['2028-01-04T14:00', 1]]);
+});
+ok('плашка EDGAR: Страстная пятница — рабочий день SEC (биржа закрыта, индекс выходит)', () => {
+  expectStale('2026-04-02', [['2026-04-03T14:00', 0], ['2026-04-04T12:59', 0], ['2026-04-04T13:00', 1]]);
+  expectStale('2026-04-03', [['2026-04-04T13:00', 0]]);
+});
+ok('плашка EDGAR: срок 09:00 по Нью-Йорку — 13:00 UTC летом и 14:00 UTC зимой, в том числе вокруг переходов 2026 и 2027', () => {
+  assert.equal(DEADLINE_NY_HOUR, 9);
+  expectStale('2026-07-10', [['2026-07-14T12:59', 0], ['2026-07-14T13:00', 1]]);   // лето: пн 13.07 не обработан
+  expectStale('2026-01-09', [['2026-01-13T13:59', 0], ['2026-01-13T14:00', 1]]);   // зима
+  // Переход всегда в воскресенье, а срок в воскресенье бывает только у субботы — не рабочего дня SEC. Поэтому проверяются
+  // ближайшие сроки — суббота до перехода (по старому сдвигу) и вторник после (по новому) — и сам день перехода по часам
+  for (const [sun, satBefore, satAt, tueBefore, tueAt] of [
+    ['2026-03-08', '13:59', '14:00', '12:59', '13:00'], ['2026-11-01', '12:59', '13:00', '13:59', '14:00'],
+    ['2027-03-14', '13:59', '14:00', '12:59', '13:00'], ['2027-11-07', '12:59', '13:00', '13:59', '14:00'],
+  ]) {
+    const thu = addDaysIso(sun, -3), fri = addDaysIso(sun, -2), sat = addDaysIso(sun, -1), tue = addDaysIso(sun, 2);
+    expectStale(thu, [[`${sat}T${satBefore}`, 0], [`${sat}T${satAt}`, 1]]);
+    expectStale(fri, [[`${tue}T${tueBefore}`, 0], [`${tue}T${tueAt}`, 1]]);
+    for (let h = 0; h < 24; h++) for (const mm of ['00', '59']) expectStale(thu, [[`${sun}T${String(h).padStart(2, '0')}:${mm}`, 1]]);
+  }
+});
+ok('плашка EDGAR: долгая поломка — пропусков столько, сколько рабочих дней SEC с истёкшим сроком (перебор 2026–2027 по часам)', () => {
+  expectStale('2026-11-04', [['2026-11-13T13:59', 4], ['2026-11-13T14:00', 5]]);   // 05, 06, 09, 10, 12.11; 11.11 SEC закрыта
+  // Независимый счёт: срок дня — через nyToMs сборки (lib/nytime.mjs), календарь — через lib/calendar.mjs
+  const due = new Map(), shut = new Map();
+  for (let d = '2025-12-01'; d <= '2028-01-10'; d = addDaysIso(d, 1)) { due.set(d, nyToMs(`${addDaysIso(d, 1)}T09:00`)); shut.set(d, isSecClosed(d)); }
+  const ref = (last, ms) => { let n = 0; for (let d = addDaysIso(last, 1); due.get(d) <= ms; d = addDaysIso(d, 1)) if (!shut.get(d)) n++; return n; };
+  for (let h = Date.UTC(2026, 0, 1); h < Date.UTC(2028, 0, 1); h += 3600e3) {
+    for (const ms of [h - 60e3, h]) {
+      const day = new Date(ms).toISOString().slice(0, 10);
+      for (const k of [1, 3, 9]) {
+        const last = addDaysIso(day, -k);
+        assert.equal(missedSecDays(last, ms), ref(last, ms), `liveLastDay ${last}, ${new Date(ms).toISOString()}`);
+      }
+    }
+  }
+});
+ok('плашка EDGAR: нет liveLastDay или он битый — плашки нет и ошибок нет', () => {
+  for (const last of [undefined, null, '', 'abc', '2026-13-45', '2026-02-30', '2026-11-10T00:00', 20261110, {}])
+    assert.deepEqual(staleState(last, Z('2026-11-13T14:00')), { missed: 0, show: false }, String(last));
+  for (const now of [NaN, undefined, null, '2026-11-13', 1e20, Infinity])
+    assert.deepEqual(staleState('2026-11-04', now), { missed: 0, show: false }, String(now));
+  expectStale('2026-11-14', [['2026-11-14T03:45', 0]]);   // liveLastDay впереди даты Нью-Йорка (суббота с 22:45 ET пятницы)
+});
+ok('плашка EDGAR: часы зрителя в другой зоне на счёт не влияют', () => {
+  const probes = [['2026-11-10', '2026-11-13T01:36'], ['2026-11-10', '2026-11-13T14:00'], ['2026-11-25', '2026-11-28T00:30'],
+    ['2026-03-05', '2026-03-08T07:00'], ['2026-03-06', '2026-03-10T13:00'], ['2026-10-29', '2026-11-01T05:30'], ['2026-11-13', '2026-11-17T04:30']];
+  const want = probes.map(([l, t]) => missedSecDays(l, Z(t)));
+  const code = `import { missedSecDays } from ${JSON.stringify(pathToFileURL(join(ROOT, 'web', 'stale.js')).href)};
+    const p = ${JSON.stringify(probes)};
+    process.stdout.write(JSON.stringify({ off: new Date(Date.UTC(2026, 10, 13)).getTimezoneOffset(), got: p.map(([l, t]) => missedSecDays(l, Date.parse(t + 'Z'))) }));`;
+  for (const [TZ, off] of [['Asia/Tokyo', -540], ['Pacific/Pago_Pago', 660]]) {
+    const out = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', code], { env: { ...process.env, TZ }, encoding: 'utf8' }));
+    assert.equal(out.off, off, `зона ${TZ} не применилась — проверка ничего не доказывает`);
+    assert.deepEqual(out.got, want, TZ);
+  }
+});
+ok('плашка EDGAR: календарь страницы — тот же модуль, что у сборки; страница грузит только файлы из web/', () => {
+  for (const k of ['isSecClosed', 'secHolidays', 'isMarketClosed', 'nyseHolidays']) {
+    assert.equal(typeof webCalendar[k], 'function', k);
+    assert.equal(buildCalendar[k], webCalendar[k], `${k}: у сборки и страницы разные календари`);
+  }
+  // На страницу попадает только web/* (daily.yml, «Сборка сайта»): импорт из-за её пределов в браузере дал бы 404 и пустую страницу
+  assert.match(readFileSync(join(ROOT, '.github', 'workflows', 'daily.yml'), 'utf8'), /run: cp web\/\* site\//);
+  const files = readdirSync(join(ROOT, 'web')).filter(f => f.endsWith('.js'));
+  for (const f of files) {
+    for (const m of readFileSync(join(ROOT, 'web', f), 'utf8').matchAll(/^\s*import\s[^;]*?from\s+['"]([^'"]+)['"]/gm)) {
+      assert.match(m[1], /^\.\/[\w.-]+\.js$/, `web/${f}: импорт «${m[1]}» не из web/`);
+      assert.ok(files.includes(m[1].slice(2)), `web/${f}: нет файла ${m[1]}`);
+    }
+  }
+  const app = readFileSync(join(ROOT, 'web', 'app.js'), 'utf8');
+  assert.match(app, /staleState\(last, Date\.now\(\)\)/, 'плашка в web/app.js считает не через web/stale.js');
+  assert.match(app, /пропущено рабочих дней: \$\{missed\}/);
 });
 ok('сборка на VPS: D0 списка обязан быть днём подачи, если биржа торговала; без бара SPY за D — повтор, на последней попытке идём с предупреждением', () => {
   assert.deepEqual(d0Verdict({ d0: '2026-11-04' }, '2026-11-04'), { ok: true });
