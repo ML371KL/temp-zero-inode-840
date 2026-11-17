@@ -62,11 +62,32 @@ export function matchOi(oiRows, panelRows, { day, listed = () => true, p = OI } 
     const rs = byAcc.get(acc), tol = Math.max(1, p.shTol * qty);
     return Math.abs(rs.reduce((s, r) => s + r.sh, 0) - qty) <= tol || rs.some(r => Math.abs(r.sh - qty) <= tol);
   };
-  const res = { day, oi: rows.length, found: 0, byAcc: 0, byName: 0, missing: [], alerts: [] };
+  // refiled — подача источника с известным номером, которой у панели нет, но та же покупка найдена в другой подаче (повторная
+  // подача, отдельные формы совместных подателей): не тревога, но видно в файле. partial — подача у панели есть, а акций в ней
+  // меньше, чем у источника: разбор потерял часть строк формы; недостача от порога в биржевой бумаге — тревога наравне с пропуском.
+  const res = { day, oi: rows.length, found: 0, byAcc: 0, byName: 0, missing: [], alerts: [], refiled: [], partial: [] };
+  const oiQty = new Map(), checked = new Set();
+  for (const o of rows) if (o.acc) oiQty.set(o.acc, (oiQty.get(o.acc) ?? 0) + o.qty);
   for (const o of rows) {
-    if (o.acc && byAcc.has(o.acc)) { res.found++; res.byAcc++; continue; }
-    if ([...(byT.get(normT(o.t)) ?? [])].some(a => fits(a, o.qty))) { res.found++; continue; }
-    if ([...(byName.get(normName(o.insider)) ?? [])].some(a => fits(a, o.qty))) { res.found++; res.byName++; continue; }
+    if (o.acc && byAcc.has(o.acc)) {
+      res.found++; res.byAcc++;
+      if (!checked.has(o.acc)) {
+        checked.add(o.acc);
+        const want = oiQty.get(o.acc), have = byAcc.get(o.acc).reduce((s, r) => s + r.sh, 0), short = want - have;
+        if (short > Math.max(1, p.shTol * want)) {
+          const part = { t: o.t, acc: o.acc, issuer: o.issuer, insider: o.insider, tdate: o.tdate, filed: o.filed, qty: want, panelQty: have, px: o.px, val: Math.round(short * (o.px || 0)), listed: !!listed(o.t), partial: true };
+          res.partial.push(part);
+          if (part.val >= p.minVal && part.listed) res.alerts.push(part);
+        }
+      }
+      continue;
+    }
+    const by = [...(byT.get(normT(o.t)) ?? [])].some(a => fits(a, o.qty)) ? 'ticker' : [...(byName.get(normName(o.insider)) ?? [])].some(a => fits(a, o.qty)) ? 'name' : null;
+    if (by) {
+      res.found++; if (by === 'name') res.byName++;
+      if (o.acc) res.refiled.push({ t: o.t, acc: o.acc, insider: o.insider, qty: o.qty, val: o.val, by });
+      continue;
+    }
     const miss = { t: o.t, acc: o.acc, issuer: o.issuer, insider: o.insider, title: o.title, tdate: o.tdate, filed: o.filed, qty: o.qty, px: o.px, val: o.val, listed: !!listed(o.t) };
     res.missing.push(miss);
     if (miss.val >= p.minVal && miss.listed) res.alerts.push(miss);

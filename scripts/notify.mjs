@@ -347,7 +347,7 @@ function oiLine(day) {
   const a = oiAlerts(day);
   if (!a.length) return null;
   return `Сверка со сторонним разбором: в данных панели нет покупок, которые видит OpenInsider (от ${money(oiCheck.minVal ?? 1e5)}), — `
-    + a.slice(0, 4).map(x => `<b>${esc(x.t)}</b> ${money(x.val)}`).join(', ') + (a.length > 4 ? ` и ещё ${a.length - 4}` : '') + '. Список мог выйти неполным.';
+    + a.slice(0, 4).map(x => `<b>${esc(x.t)}</b> ${money(x.val)}${x.partial ? ' (часть формы)' : ''}`).join(', ') + (a.length > 4 ? ` и ещё ${a.length - 4}` : '') + '. Список мог выйти неполным.';
 }
 // То же отдельным сообщением — когда письмо за этот день уже ушло (с сервера или прошлым прогоном), а сверка нашла пропуск позже
 function oiMessage(day) {

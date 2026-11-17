@@ -29,9 +29,10 @@ async function page(url) {
   throw last;
 }
 
+let day = null;
 try {
   const morning = readJson(join(SITE, 'data', 'morning.json'), null);
-  const day = morning?.listFor;
+  day = morning?.listFor;
   if (!day) { console.log('[oicheck] нет morning.json с listFor — пропуск'); process.exit(0); }
   // Покупки панели с подачей day — все строки, до гейтов: сверяется сбор и разбор, а не отбор
   const ref = readJson(join(DATA, 'reference', 'tickers.json'), {});
@@ -52,10 +53,14 @@ try {
   // праздники — тревогой это не считается в любом случае.
   if (!rows.length) { writeJson(out, { listFor: day, at: now(), source: 'openinsider', ok: false, error: 'в ответе нет строк таблицы' }); console.log(`[oicheck] ${day}: в ответе источника нет строк таблицы — сверки нет`); process.exit(0); }
   const res = matchOi(rows, panel, { day, listed: t => listedSet.has(String(t).toUpperCase().replace(/[^A-Z0-9]/g, '')) });
+  // Страница с таблицей, но без единой покупки за день, когда у панели их несколько, — не «сверено, пропусков нет», а несверенный день
+  const panelAccs = new Set(panel.map(r => r.acc)).size;
+  if (!res.oi && panelAccs >= 5) { writeJson(out, { listFor: day, at: now(), source: 'openinsider', ok: false, error: `у источника нет покупок за день, у панели подач с покупками ${panelAccs}` }); console.log(`[oicheck] ${day}: у источника нет покупок за день — сверка не состоялась`); process.exit(0); }
   writeJson(out, { listFor: day, at: now(), source: 'openinsider', ok: true, minVal: OI.minVal, panel: new Set(panel.map(r => r.acc)).size, oi: res.oi, found: res.found, byAcc: res.byAcc, byName: res.byName,
-    missing: res.missing.slice(0, 50), alerts: res.alerts.slice(0, 20) });
+    missing: res.missing.slice(0, 50), alerts: res.alerts.slice(0, 20), partial: res.partial.slice(0, 20), refiled: res.refiled.slice(0, 20) });
   console.log(`[oicheck] ${day}: покупок у стороннего разбора ${res.oi}, найдено у панели ${res.found} (по номеру подачи ${res.byAcc}${res.byName ? `, по имени лица ${res.byName}` : ''}), нет у панели ${res.missing.length}`
     + (res.alerts.length ? `; ПРОПУСК от $${OI.minVal / 1e3} тыс. в биржевых бумагах: ${res.alerts.map(a => `${a.t} $${Math.round(a.val)}`).join(', ')}` : ''));
 } catch (e) {
   console.log(`[oicheck] сверка не удалась (сборку не останавливает): ${e.stack ?? e}`);
+  try { writeJson(out, { listFor: day, at: now(), source: 'openinsider', ok: false, error: `сверка не удалась: ${String(e.message ?? e).slice(0, 120)}` }); } catch { /* файл не записался — письмо просто не увидит сверки */ }
 }

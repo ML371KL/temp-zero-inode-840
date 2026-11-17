@@ -4150,13 +4150,19 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       { acc: '0000000005-26-000001', filed: `${D} 16:32:00`, tdate: '2026-11-10', t: 'OTCX', insider: 'Otc Buyer', px: 1, qty: 500000, val: 500000 },                    // внебиржевая бумага
       { acc: '0000000006-26-000001', filed: '2026-11-11 16:32:00', tdate: '2026-11-10', t: 'YEST', insider: 'Other Day', px: 10, qty: 50000, val: 500000 },              // другой день подачи
       { acc: '0000000007-26-000001', filed: `${D} 16:33:00`, tdate: '2026-11-10', t: 'SALE', insider: 'Seller', px: 10, qty: 50000, val: 500000, kind: 'S - Sale' },     // не покупка
+      { acc: '0000000012-26-000001', filed: `${D} 16:40:00`, tdate: '2026-11-10', t: 'PART', insider: 'Half Parsed', px: 20, qty: 50000, val: 1000000 },                 // подача у панели есть, но акций в ней впятеро меньше
+      { acc: '0000000013-26-000001', filed: `${D} 16:41:00`, tdate: '2026-11-10', t: 'TINY', insider: 'Tiny Gap', px: 5, qty: 10000, val: 50000 },                       // недостача есть, но меньше порога
     ]));
     const panel = [P('0000899140-26-001276', 'COHR', 5000, 'Anderson James Robert'), P('0000000009-26-000009', 'DUPF', 10000, 'SMITH JOHN'), P('0000000010-26-000010', 'BH-A', 628, 'BIGLARI SARDAR'),
+      P('0000000012-26-000001', 'PART', 10000, 'Half Parsed'), P('0000000013-26-000001', 'TINY', 9000, 'Tiny Gap'),
       P('0000000011-26-000011', 'ONLY', 7000, 'Panel Only')];        // покупка, которой нет у источника (компании развития бизнеса, фонды), — не тревога
     const res = matchOi(oi, panel, { day: D, listed: t => t !== 'OTCX' });
-    assert.deepEqual([res.oi, res.found, res.byAcc, res.byName], [6, 3, 1, 1]);
+    assert.deepEqual([res.oi, res.found, res.byAcc, res.byName], [8, 5, 3, 1]);
     assert.deepEqual(res.missing.map(m => m.t), ['MISS', 'OTCX', 'SMAL']);
-    assert.deepEqual(res.alerts.map(m => [m.t, m.val, m.insider]), [['MISS', 1500000, 'Lost Buyer']]);
+    assert.deepEqual(res.alerts.map(m => [m.t, m.val, m.insider, !!m.partial]), [['MISS', 1500000, 'Lost Buyer', false], ['PART', 800000, 'Half Parsed', true]],
+      'тревога — и пропуск подачи, и подача, из которой разбор взял только часть акций (недостача от $100 тыс.)');
+    assert.deepEqual(res.partial.map(m => [m.t, m.qty, m.panelQty, m.val]), [['PART', 50000, 10000, 800000], ['TINY', 10000, 9000, 5000]]);
+    assert.deepEqual(res.refiled.map(m => [m.t, m.by]), [['DUPF', 'ticker'], ['BH', 'name']], 'номер подачи известен, у панели его нет, покупка найдена в другой подаче — в файле это видно');
     assert.equal(matchOi(oi, [], { day: '2026-11-13' }).oi, 0, 'строки другого дня не сверяются');
   });
 
