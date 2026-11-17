@@ -255,10 +255,11 @@ async function handlePaper(request, env, url, origin) {
 // более старая (по listFor, затем по builtAt) не принимается (409) — запоздавший повтор не откатит список.
 // /morning/letter/ГГГГ-ММ-ДД — отметка «письмо за этот день отправлено» (кем и когда). GitHub читает её перед своей рассылкой,
 // чтобы не продублировать письмо VPS; пишет её отправитель после того, как Telegram принял сообщение. Первая запись остаётся.
+// /morning/letter/ГГГГ-ММ-ДД-health-<статус> — та же отметка для сообщения о смене статуса «здоровья сигнала» (D+1 смены и новый статус).
 const MORNING_KEY = 'morning/latest.json';
 const MORNING_MAX_BYTES = 4 * 1024 * 1024;               // файл — десятки килобайт; больше — ошибка отправителя
 const LETTER_MAX_BYTES = 1024;
-const LETTER = /^\/morning\/letter\/(\d{4}-\d{2}-\d{2})$/;
+const LETTER = /^\/morning\/letter\/(\d{4}-\d{2}-\d{2}(?:-health-(?:normal|watch|alarm|nodata))?)$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 function checkMorning(text) {
   let m;
