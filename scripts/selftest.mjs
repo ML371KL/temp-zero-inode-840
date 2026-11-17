@@ -3916,6 +3916,58 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.deepEqual(compareMain([r('A', 2, 1e5)], [r('A', 3, 2e6)]).diff[0], { t: 'A', name: 'A', was: 2, now: 3, val: 2e6 }, 'изменился скор — запись прежнего вида');
     assert.equal(mxDiffers({ val: 5 }, { val: 5 }), false, 'у старых строк без mx сравнивается сумма'); assert.equal(MX_TOL, 0.01);
   });
+
+  await okAsync('B2б: ночная сборка берёт из журнала ленты формы, разобранные тем же разбором и скачанные целиком; остальные качает — строки те же', async () => {
+    const base = join(ROOT, '.selftest-feedfirst');
+    rmSync(base, { recursive: true, force: true });
+    const D = '2026-11-06', accs = [21, 22, 23, 24].map(accB), sym = { [accs[0]]: 'AAA', [accs[1]]: 'BBB', [accs[2]]: 'CCC', [accs[3]]: 'DDD' };
+    const index = ['Form Type   Company Name   CIK   Date Filed   File Name', '-'.repeat(80), ...accs.map(a => idxLineB('ISSUER ' + sym[a], 555000, D, pathB(555000, a)))].join('\n');
+    const hits = [];
+    const srv = createServer((req, res) => {
+      const url = decodeURIComponent(req.url);
+      if (/form\.20261106\.idx$/.test(url)) { res.writeHead(200); res.end(index); return; }
+      if (/daily-index/.test(url)) { res.writeHead(403, { 'content-type': 'application/xml' }); res.end(S3B); return; }
+      const m = /(\d{10}-\d{2}-\d{6})\.txt$/.exec(url);
+      if (m) { hits.push(m[1]); res.writeHead(200); res.end(formB(m[1], sym[m[1]])); return; }
+      res.writeHead(404); res.end();
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const prep = name => {
+      const L = join(base, name);
+      mkdirSync(join(L, 'state'), { recursive: true });
+      writeJson(join(L, 'state', 'live.json'), { schema: SHARD_VERSION, from: '2026-11-02', lastDay: '2026-11-05', parserRev: PARSER_REV });
+      writeJson(join(L, 'state', 'backfill.json'), { done: ['2026q3'] });
+      writeJsonGz(join(L, 'trades', 'live.json.gz'), { v: SHARD_VERSION, trades: [], amend: [] });
+      return L;
+    };
+    const run = (L, extra = []) => runScript('live.mjs', ['--data', L, '--today', '2026-11-07', '--retries', '0', '--reread-budget-min', '0', ...extra], { EDGAR_BASE: `http://127.0.0.1:${srv.address().port}` });
+    const rowsOf = L => readJsonGz(join(L, 'trades', 'live.json.gz')).trades.slice().sort((a, b) => (a.acc < b.acc ? -1 : 1));
+    try {
+      // эталон: все четыре формы скачаны
+      const full = prep('full');
+      assert.equal((await run(full)).code, 0);
+      assert.deepEqual(hits.slice().sort(), accs);
+      // журнал ленты: A — тем же разбором и целиком; B — другой ревизией разбора; C — файл оборван; D — числится за другой день
+      const feedDir = join(base, 'feed'); mkdirSync(feedDir, { recursive: true });
+      const rec = (a, extra = {}) => { const p = parseForm4Txt(formB(a, sym[a]), a, D); return { k: 'form', acc: a, filed: D, at: `${D}T17:15`, rev: PARSER_REV, end: true, trades: p.trades, amend: p.amend, ...extra }; };
+      writeFileSync(feedFile(feedDir, D), [rec(accs[0]), rec(accs[1], { rev: PARSER_REV - 1 }), rec(accs[2], { end: false }), rec(accs[3], { filed: '2026-11-05' })].map(x => JSON.stringify(x)).join('\n') + '\n');
+      hits.length = 0;
+      const fed = prep('fed');
+      const r = await run(fed, ['--feed-dir', feedDir]);
+      assert.equal(r.code, 0, r.out);
+      assert.deepEqual(hits.slice().sort(), accs.slice(1), 'форма из журнала ленты не качается; три остальные — качаются');
+      const c = readJson(join(fed, 'state', 'live.json')).coverage[D];
+      assert.deepEqual([c.status, c.indexed, c.collected, c.fromFeed], ['complete', 4, 4, 1]);
+      assert.deepEqual(rowsOf(fed), rowsOf(full), 'шард тот же, что при скачивании всех форм');
+      assert.match(r.out, /из журнала ленты 1, скачано 3/);
+      // старый журнал без полей rev и end (записи до правки) первым источником не служит
+      writeFileSync(feedFile(feedDir, D), JSON.stringify({ k: 'form', acc: accs[0], filed: D, trades: [], amend: [] }) + '\n');
+      hits.length = 0;
+      const old = prep('old');
+      await run(old, ['--feed-dir', feedDir]);
+      assert.deepEqual(hits.slice().sort(), accs); assert.deepEqual(rowsOf(old), rowsOf(full));
+    } finally { await new Promise(r => srv.close(r)); rmSync(base, { recursive: true, force: true }); }
+  });
 }
 
 rmSync(TMP, { recursive: true, force: true });

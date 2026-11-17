@@ -221,7 +221,8 @@ export async function attempt(opts, day, ctx) {
     log(`формы дня ${day} (live.mjs)…`);
     // Фоновое перечитывание окна (рост PARSER_REV) здесь не нужно: копия data каждый прогон свежая, прогресс всё равно пропадёт,
     // а список ждёт. Окно перечитывают прогоны на GitHub без нового дня.
-    const code = await node('scripts/live.mjs', ['--data', opts.data, '--time-budget-min', '25', '--reread-budget-min', '0'], { env });
+    // --feed-dir: формы, уже разобранные лентой тем же разбором, берутся из её журнала, качаются только недостающие
+    const code = await node('scripts/live.mjs', ['--data', opts.data, '--time-budget-min', '25', '--reread-budget-min', '0', ...(opts.noFeed ? [] : ['--feed-dir', opts.feedDir])], { env });
     // Подачи индекса, которые не скачались, — из журнала ленты (там они уже разобраны)
     if (!opts.noFeed) {
       try { const n = feedFillPending(opts, day); if (n) log(`из журнала ленты взято ${n} подач индекса, которые не удалось скачать`); }

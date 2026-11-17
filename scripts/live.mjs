@@ -15,6 +15,7 @@
 import { readJson, writeJson, readJsonGz, writeJsonGz, isoToday, addDaysIso, isIsoDate, politeFetch } from './lib/util.mjs';
 import { fetchDayIndex, fetchFiling, parseForm4Txt, uniqueFilings, secKey, edgarBase, SHARD_VERSION, PARSER_REV } from './lib/edgar.mjs';
 import { fpiFormsPath, emptyFpiForms, absorbFpiForms, parseFpiIdx, fillQuartersFor, fullIndexUrl, fullIndexText } from './lib/fpi.mjs';
+import { loadFeed } from './lib/feed.mjs';
 import { isWeekend, nextWeekday, missingIndexVerdict, shouldProbeNext, coverageEntry, pruneCoverage, firstUncoveredDay, windowStart } from './lib/livecal.mjs';
 import { join } from 'node:path';
 
@@ -80,8 +81,8 @@ const amendByAcc = new Map(shard.amend.map(a => [a.acc, a]));
 // replace нужен там, где подачу перечитывают ради исправленного парсера: иначе старая строка с прежним
 // ключом (например, с датой «2026-06-16-05:00») осталась бы рядом с новой.
 let added = 0;
-function ingest(txt, acc, fdate, { replace = false } = {}) {
-  const parsed = parseForm4Txt(txt, acc, fdate);
+const ingest = (txt, acc, fdate, opts) => ingestParsed(parseForm4Txt(txt, acc, fdate), acc, opts);
+function ingestParsed(parsed, acc, { replace = false } = {}) {
   if (replace) {
     for (const k of keysByAcc.get(acc) ?? []) byKey.delete(k);
     keysByAcc.delete(acc);
@@ -98,6 +99,20 @@ function ingest(txt, acc, fdate, { replace = false } = {}) {
   for (const a of parsed.amend) if (replace || !amendByAcc.has(a.acc)) amendByAcc.set(a.acc, a);
   return parsed.trades.length;
 }
+
+// Журнал ленты формы 4 как первый источник форм дня (только ночная сборка на сервере: --feed-dir). Лента весь день качает и
+// разбирает подачи тем же parseForm4Txt и к 22:03 держит 99,9% форм дня; качать каждую заново — 1,6–7,5 минуты из 3–9 минут сборки
+// (аудит форм 17.11.2026, «Скорость»). Из журнала берётся только форма, разобранная ЭТОЙ ревизией разбора (rev), скачанная целиком
+// (end) и поданная в день индекса; всё остальное качается, как раньше. Строки те же, что дал бы свой разбор: список сервера обязан
+// совпадать с полным пересчётом.
+const FEED_DIR = argVal('--feed-dir', null);
+const feedCache = new Map();
+function feedForms(day) {
+  if (!FEED_DIR) return null;
+  if (!feedCache.has(day)) feedCache.set(day, loadFeed(FEED_DIR, day).forms);
+  return feedCache.get(day);
+}
+const feedUsable = (f, day) => !!f && f.rev === PARSER_REV && f.end === true && f.filed === day && Array.isArray(f.trades);
 
 // Простой пул: fn по элементам, не больше n одновременно; stop() — прекратить выдачу новых.
 async function pool(items, n, fn, stop = () => false) {
@@ -295,10 +310,19 @@ async function run() {
     for (const e of entries) (paths.get(e.acc) ?? paths.set(e.acc, []).get(e.acc)).push(e.path);
     const filings = uniqueFilings(entries);
     const prevPending = pending[day] ?? {};
-    let collected = 0, gone = 0, budgetHit = false;
+    let collected = 0, gone = 0, budgetHit = false, fromFeed = 0;
     const noFile = [];          // подачи свежего дня с ответом «нет файла»: повтор в конце прохода
+    const feed = feedForms(day);
     for (const f of filings) {
       const ps = paths.get(f.acc);
+      const ff = feed?.get(f.acc);
+      if (feedUsable(ff, day)) {
+        // уже разобрана лентой тем же разбором — не качаем
+        ingestParsed({ trades: ff.trades.map(r => ({ ...r, fdate: day })), amend: ff.amend ?? [] }, f.acc);
+        collected++; fromFeed++;
+        if (pending[day]) delete pending[day][f.acc];
+        continue;
+      }
       if (budgetHit || overBudget() || secBlocked) {
         // Бюджет кончился или SEC режет запросы посреди дня: остаток не теряется — уходит в добор следующего прогона
         if (!budgetHit && !secBlocked) console.log(`[live] бюджет времени исчерпан на ${day} (${filingsDone} подач) — остаток дня в добор`);
@@ -323,12 +347,12 @@ async function run() {
       }
       console.log(`[live] ${day}: «нет файла» по ${noFile.length} подачам индекса — повтор в конце прохода вернул ${back}, в доборе ${noFile.length - back}`);
     }
-    coverage[day] = { indexed: filings.length, collected, ...(gone ? { gone } : {}), at: nowIso(), ...(secBlocked ? { error: 'лимит SEC' } : {}) };
+    coverage[day] = { indexed: filings.length, collected, ...(gone ? { gone } : {}), ...(fromFeed ? { fromFeed } : {}), at: nowIso(), ...(secBlocked ? { error: 'лимит SEC' } : {}) };
     settle(day);
     lastCompleted = day;
     daysDone++;
     if (daysDone % 5 === 0) save();
-    console.log(`[live] ${day}: ${filings.length} подач (${entries.length} строк индекса), собрано ${collected}, ждут ${pendingCount(day)}, всего строк ${byKey.size}`);
+    console.log(`[live] ${day}: ${filings.length} подач (${entries.length} строк индекса), собрано ${collected}${fromFeed ? ` (из журнала ленты ${fromFeed}, скачано ${collected - fromFeed})` : ''}, ждут ${pendingCount(day)}, всего строк ${byKey.size}`);
     if (budgetHit) break outer;
     day = addDaysIso(day, 1);
   }
