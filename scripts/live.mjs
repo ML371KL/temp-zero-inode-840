@@ -14,7 +14,7 @@
 // скачать (сеть, 5xx, лимит SEC), не теряется: она ложится в state.pending и добирается следующими прогонами.
 import { readJson, writeJson, readJsonGz, writeJsonGz, isoToday, addDaysIso, isIsoDate, politeFetch } from './lib/util.mjs';
 import { fetchDayIndex, fetchFiling, parseForm4Txt, uniqueFilings, secKey, edgarBase, SHARD_VERSION, PARSER_REV } from './lib/edgar.mjs';
-import { fpiFormsPath, emptyFpiForms, absorbFpiForms, parseFpiIdx, fillQuartersFor, fullIndexUrl, fullIndexText } from './lib/fpi.mjs';
+import { FPI, fpiFormsPath, emptyFpiForms, absorbFpiForms, parseFpiIdx, fillQuartersFor, fullIndexUrl, fullIndexText } from './lib/fpi.mjs';
 import { isWeekend, nextWeekday, missingIndexVerdict, shouldProbeNext, coverageEntry, pruneCoverage, firstUncoveredDay, windowStart } from './lib/livecal.mjs';
 import { join } from 'node:path';
 
@@ -67,7 +67,10 @@ if (shard.trades.length !== before) console.log(`[live] вычищено ${befor
 
 // Кто подаёт отчёты иностранного частного эмитента (20-F, 40-F, 6-K): строки того же дневного индекса, из которого берутся формы 4
 const fpiPath = fpiFormsPath(DATA);
-const fpiRef = readJson(fpiPath, emptyFpiForms());
+// Битый файл справочника (оборванная запись) сбор форм не останавливает: справочник начинается заново
+let fpiRef;
+try { fpiRef = readJson(fpiPath, emptyFpiForms()); }
+catch (e) { console.log(`[live] справочник отчётов иностранных эмитентов не читается (${e.message}) — начинаю заново`); fpiRef = emptyFpiForms(); }
 let fpiDirty = false;
 
 const rowKey = r => `${r.acc}|${r.code}|${r.tdate}|${secKey(r.sec)}`;
@@ -173,6 +176,9 @@ async function fillFpiForms() {
       const { body } = await politeFetch(fullIndexUrl(edgarBase(), y, q), { retries: RETRIES, timeoutMs: 120000 });
       if (!body) { console.log(`[live] справочник отчётов иностранных эмитентов: полного индекса ${key} нет — повтор в следующем прогоне`); continue; }
       const rows = parseFpiIdx(fullIndexText(body));
+      // Прошедший квартал почти без строк — это не индекс (страница-заглушка с кодом 200): наполненным его считать нельзя, иначе
+      // пометка «по отчётам» тихо осталась бы почти пустой. У текущего квартала в его первые дни строк законно мало.
+      if (key !== want.at(-1).key && rows.length < FPI.fillMinRows) { console.log(`[live] справочник отчётов иностранных эмитентов: в полном индексе ${key} всего ${rows.length} строк отчётов — похоже, это не индекс; повтор в следующем прогоне`); continue; }
       absorbFpiForms(fpiRef, rows, rows.reduce((m, x) => (x.date > m ? x.date : m), ''));
       (fpiRef.filled ??= []).push(key);
       fpiDirty = true;
@@ -209,8 +215,6 @@ function save() {
 }
 
 async function run() {
-  if (FPI_FILL && !fpiRef.fillDone) await fillFpiForms();
-
   // ---------- 1. добор отложенных подач прошлых прогонов ----------
   let picked = 0, still = 0;
   for (const d of Object.keys(pending).sort()) {
@@ -311,6 +315,10 @@ async function run() {
     if (budgetHit) break outer;
     day = addDaysIso(day, 1);
   }
+
+  // Начальное наполнение справочника отчётов — после форм дня: при медленной SEC пять квартальных индексов не должны съесть
+  // бюджет, отведённый новому дню (остаток доберётся следующим прогоном)
+  if (FPI_FILL && !fpiRef.fillDone) await fillFpiForms();
 
   // ---------- 4. фоновое перечитывание после исправления парсера ----------
   // PARSER_REV растёт, когда меняется разбор уже собранных строк (сноски, даты). Окно [from, lastDay]

@@ -3327,6 +3327,27 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     rmSync(d, { recursive: true, force: true });
   });
 
+  ok('A5 (ревью): поправка, добавившая подателя с меньшим номером, находит исходную форму по общему подателю; чужие исходные формы не объединяются', () => {
+    const fund = { cik: 946770, name: 'FUND LP', rel: 'T', title: '' }, dir1 = { cik: 1500001, name: 'DOE JOHN', rel: 'D', title: '' }, dir2 = { cik: 1500002, name: 'ROE JANE', rel: 'D', title: '' };
+    const row = (acc, o, extra = {}) => ({ acc, form: '4', fdate: '2018-03-15', tdate: '2018-03-13', cik: 1283699, t: 'TMUS', owners: o, code: 'P', sh: 200000, px: 66.5, val: 13300000,
+      own: 5e6, di: 'I', ownD: null, shD: null, b5: 0, orig: null, sec: 'Common Stock', fn: {}, ...extra });
+    const d = join(TMP, '..', '.selftest-amendkey2');
+    const load = rows => { rmSync(d, { recursive: true, force: true }); writeJsonGz(join(d, 'trades', '2018.json.gz'), { v: SHARD_VERSION, amend: [], trades: rows }); return loadAllTrades(d); };
+    // исходную форму подал один директор, в поправке к нему добавлен фонд с меньшим CIK: наименьший номер у двух подач разный
+    let r = load([row('TM-1', [dir1]), row('TM-2', [fund, dir1], { form: '4/A', fdate: '2018-03-19', orig: '2018-03-15' }), row('TM-3', [dir2], { sh: 5000, px: 66.4, val: 332000 })]);
+    assert.equal(r.trades.length, 2, 'поправка встала на место исходной формы, покупка другого директора — своя строка');
+    const g = r.trades.find(x => x.acc === 'TM-2');
+    assert.equal(g.fdate, '2018-03-15', 'дата раскрытия — день первой подачи'); assert.equal(g.famend, '2018-03-19');
+    assert.deepEqual([r.stats.replacedByAmendment, r.stats.rejoinedAmendments], [1, 1]);
+    // две исходные формы разных директоров, поправка называет обоих: к которой она относится, неизвестно — ничего не трогаем
+    r = load([row('TM-1', [dir1]), row('TM-3', [dir2], { sh: 5000, px: 66.4, val: 332000 }), row('TM-4', [fund, dir1, dir2], { form: '4/A', fdate: '2018-03-19', orig: '2018-03-15' })]);
+    assert.equal(r.trades.length, 3); assert.equal(r.stats.rejoinedAmendments, 0);
+    // общих подателей нет — поправка остаётся первым раскрытием со своей датой
+    r = load([row('TM-1', [dir1]), row('TM-5', [fund], { form: '4/A', fdate: '2018-03-19', orig: '2018-03-15' })]);
+    assert.equal(r.trades.length, 2); assert.equal(r.trades.find(x => x.acc === 'TM-5').fdate, '2018-03-19');
+    rmSync(d, { recursive: true, force: true });
+  });
+
   ok('A6: «Preference Shares» — не обыкновенные акции', () => {
     assert.equal(isNonCommon('Series A Preference Shares'), true);
     assert.equal(isNonCommon('7.00% Cumulative Preference Shares'), true);
@@ -3411,15 +3432,17 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   });
 
   ok('A1: вердикт — новый податель с отчётами иностранного эмитента или с давним листингом; старый податель, новый листинг и преемник не помечаются', () => {
-    const refs = { first: new Map([[100, '2016-01-05'], [200, '2026-03-12'], [300, '2026-02-26'], [400, '2026-03-18'], [500, '2026-05-08'], [600, '2026-07-01']]),
-      forms: new Set([100, 200, 300, 700]), formsAsOf: '2026-11-16', warn: [] };
+    const refs = { first: new Map([[100, '2016-01-05'], [200, '2026-03-12'], [300, '2026-02-26'], [310, '2025-12-17'], [320, '2026-01-15'], [400, '2026-03-18'], [500, '2026-05-08'], [600, '2026-07-01']]),
+      forms: new Set([100, 200, 300, 310, 700]), formsAsOf: '2026-11-16', warn: [] };
     const ranges = { LONGA: [[1, '1998-06-19', '2026-11-16']], DOLE: [[1, '2009-10-23', '2013-11-01'], [1, '2021-07-30', '2026-11-16']], NVRI: [[1, '1987-11-05', '2026-05-29'], [1, '2026-05-27', '2026-11-16']],
       ITG: [[1, '1994-05-04', '2026-07-01'], [1, '2026-07-01', '2026-11-16']], NEWL: [[1, '2026-06-10', '2026-11-16']], GONE: [[1, '2001-01-02', '2019-12-20']] };
     const before = fpi.tickersBeforeLaw([{ t: 'nvri', cik: 45876, fdate: '2025-12-09' }, { t: 'ITG', cik: 9, fdate: '2019-02-01' }, { t: 'DOLE', cik: 400, fdate: '2026-04-01' }]);
     const v = (cik, ticker, bar0 = '2014-01-02', fdate = '2026-11-12') => fpi.fpiVerdict({ cik, ticker, fdate, bar0 }, refs, { ranges, before });
     assert.equal(v(100, 'LONGA'), null, 'формы были до закона — эмитент в измеренной выборке, хотя и подаёт 6-K');
     assert.equal(v(200, 'PAM'), 'forms', 'PAM: первая форма 12.03.2026 — после принятия правил 27.02, до вступления закона в силу 18.03');
-    assert.equal(v(300, 'X'), null, 'первая форма 26.02.2026 — до принятия правил');
+    assert.equal(v(300, 'X'), 'forms', 'первая форма 26.02.2026 — после подписания закона 18.12.2025, отчёты иностранного эмитента подаёт (ранняя подача: FTS, SKM, PAC)');
+    assert.equal(v(310, 'X'), null, 'первая форма до подписания закона — эмитент в измеренной выборке');
+    assert.equal(v(320, 'LONGA'), null, 'отчётов иностранного эмитента нет, первая форма 15.01.2026 — до принятия правил: ушедший из статуса иностранного эмитента не помечается');
     assert.equal(v(700, 'NEWL', '2026-06-10'), 'forms', 'эмитента нет в квартальных файлах, отчёты иностранного эмитента подаёт — новый иностранный листинг');
     assert.equal(v(400, 'DOLE', '2021-07-30'), 'listed', 'местные формы отчётности, но листинг давний и форм до закона не было');
     assert.equal(v(500, 'NVRI'), null, 'тот же тикер стоял в формах прежнего регистранта — смена CIK, не новый податель');
@@ -3434,7 +3457,19 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.equal(fpi.fpiVerdict({ cik: 200, ticker: 'PAM', fdate: '2026-11-12', bar0: '2014-01-02' }, { first: null, forms: refs.forms }, { ranges, before }), null, 'нет справочника первой формы — пометок нет');
     assert.equal(fpi.fpiVerdict({ cik: 200, ticker: 'LONGA', fdate: '2026-11-12', bar0: '2014-01-02' }, { first: refs.first, forms: null }, { ranges, before }), 'listed', 'нет справочника отчётов — только давний листинг');
     assert.equal(fpi.fpiStaleWarning(refs, '2026-11-18'), null); assert.match(fpi.fpiStaleWarning(refs, '2026-12-01'), /устарел/);
-    assert.equal(FPI.lawFrom, '2026-02-27');
+    assert.equal(FPI.lawFrom, '2026-02-27'); assert.equal(FPI.lawSigned, '2025-12-18');
+  });
+
+  ok('A1 (ревью): битый файл справочника — как отсутствующий: сборка не падает, пометок нет, предупреждение', () => {
+    const L = join(ROOT, '.selftest-fpibroken');
+    rmSync(L, { recursive: true, force: true }); mkdirSync(join(L, 'reference'), { recursive: true });
+    writeFileSync(fpi.firstFormPath(L), '{"v":1,"quarters":["2016q1"],"first":{"100":"2016-0');
+    writeFileSync(fpi.fpiFormsPath(L), '{"v":1,"asOf":"2026-11-16","fillDone":true,"ciks":{"14693');
+    const refs = fpi.loadFpiRefs(L);
+    assert.equal(refs.first, null); assert.equal(refs.forms, null);
+    assert.equal(refs.warn.filter(w => /не читается/.test(w)).length, 2, refs.warn.join(' | '));
+    assert.equal(fpi.fpiVerdict({ cik: 200, ticker: 'PAM', fdate: '2026-11-12', bar0: '2014-01-02' }, refs, {}), null);
+    rmSync(L, { recursive: true, force: true });
   });
 
   await okAsync('A1: список — событие иностранного эмитента вне основного списка только с дня fpiFrom; скор и порядок прежние, раньше строка не меняется', async () => {
@@ -3484,13 +3519,22 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     const line = (form, name, cik, date, p) => `${form.padEnd(17)}${name.padEnd(62)}${String(cik).padEnd(12)}${date}    ${p}`;
     const dayIdx = ['Form Type   Company Name   CIK   Date Filed   File Name', '-'.repeat(80), line('4', 'TEST ISSUER', 555000, '20260908', path),
       line('6-K', 'Pampa Energia S.A.', 1469395, '20260908', 'edgar/data/1469395/0001292814-26-004001.txt')].join('\n');
-    const fullIdx = q => gzipSync(['Description: Master Index', '', line('20-F', 'AMDOCS LTD', 1062579, `2026-0${q}-15`, 'edgar/data/1062579/0001062579-26-000031.txt'), line('10-K', 'Alpha Corp', 111, `2026-0${q}-16`, 'edgar/data/111/x.txt')].join('\n'));
+    // в настоящем квартальном индексе тысячи строк отчётов иностранных эмитентов: квартал с меньшим числом — не индекс
+    const filler = q => Array.from({ length: FPI.fillMinRows }, (_, i) => line('6-K', 'AMDOCS LTD', 1062579, `2026-0${q}-01`, `edgar/data/1062579/f${i}.txt`));
+    const fullIdx = q => gzipSync(['Description: Master Index', '', ...filler(q), line('20-F', 'AMDOCS LTD', 1062579, `2026-0${q}-15`, 'edgar/data/1062579/0001062579-26-000031.txt'), line('10-K', 'Alpha Corp', 111, `2026-0${q}-16`, 'edgar/data/111/x.txt')].join('\n'));
+    let stub = '2025q4';                                            // этот квартал сначала отдаётся страницей-заглушкой с кодом 200
     const body = `<SEC-DOCUMENT>\n<ACCEPTANCE-DATETIME>20260908171500\n<XML>\n<ownershipDocument><documentType>4</documentType><issuer><issuerCik>555000</issuerCik><issuerTradingSymbol>TSTA</issuerTradingSymbol></issuer><reportingOwner><reportingOwnerId><rptOwnerCik>8</rptOwnerCik><rptOwnerName>Roe Jane</rptOwnerName></reportingOwnerId><reportingOwnerRelationship><isDirector>1</isDirector></reportingOwnerRelationship></reportingOwner><nonDerivativeTable></nonDerivativeTable></ownershipDocument>\n</XML>`;
-    const hits = { full: [] };
+    const hits = { full: [], seq: [] };
     const srv = createServer((req, res) => {
       const url = decodeURIComponent(req.url);
       const fm = /full-index\/(\d{4})\/QTR(\d)\/form\.gz$/.exec(url);
-      if (fm) { hits.full.push(`${fm[1]}q${fm[2]}`); res.writeHead(200, { 'content-type': 'application/x-gzip' }); res.end(fullIdx(fm[2])); return; }
+      if (fm) {
+        const key = `${fm[1]}q${fm[2]}`;
+        hits.full.push(key); hits.seq.push('full');
+        if (key === stub) { res.writeHead(200, { 'content-type': 'text/html' }); res.end('<html>Service temporarily unavailable</html>'); return; }
+        res.writeHead(200, { 'content-type': 'application/x-gzip' }); res.end(fullIdx(fm[2])); return;
+      }
+      if (/daily-index/.test(url)) hits.seq.push('day');
       if (/form\.20260908\.idx$/.test(url)) { res.writeHead(200); res.end(dayIdx); return; }
       if (/daily-index/.test(url)) { res.writeHead(403); res.end('<Error><Code>AccessDenied</Code></Error>'); return; }
       if (url.endsWith(acc + '.txt')) { res.writeHead(200); res.end(body); return; }
@@ -3509,16 +3553,30 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       assert.deepEqual(ref.ciks, { 1469395: '2026-09-08' }); assert.equal(ref.asOf, '2026-09-08'); assert.equal(ref.fillDone, false);
       assert.deepEqual(hits.full, [], 'без флага (ночная сборка на сервере) полные индексы не качаются');
       assert.equal(fpi.loadFpiRefs(L).forms, null, 'до конца начального наполнения сборка пометку по отчётам не ставит');
+      hits.seq.length = 0;
       const r2 = await run(['--fpi-fill']);
       assert.equal(r2.code, 0, r2.out);
       ref = readJson(fpi.fpiFormsPath(L));
       assert.deepEqual(hits.full, ['2025q3', '2025q4', '2026q1', '2026q2', '2026q3'], 'пять кварталов, от старого к новому');
+      assert.ok(hits.seq.indexOf('day') >= 0 && hits.seq.indexOf('day') < hits.seq.indexOf('full'), 'наполнение идёт после сбора форм дня, а не перед ним: ' + hits.seq.join(','));
+      assert.equal(ref.fillDone, false, 'квартал, вместо индекса которого пришла страница-заглушка, наполненным не считается');
+      assert.deepEqual(ref.filled, ['2025q3', '2026q1', '2026q2', '2026q3']); assert.match(r2.out, /похоже, это не индекс/);
+      assert.equal(fpi.loadFpiRefs(L).forms, null, 'пометки «по отчётам» нет, пока справочник не наполнен целиком');
+      stub = null;
+      const r3 = await run(['--fpi-fill']);
+      assert.equal(r3.code, 0, r3.out);
+      ref = readJson(fpi.fpiFormsPath(L));
+      assert.deepEqual(hits.full.slice(5), ['2025q4'], 'следующий прогон докачивает только недостающий квартал');
       assert.equal(ref.fillDone, true); assert.equal(ref.ciks[1062579], '2026-04-15', 'самая поздняя подача отчёта'); assert.equal(ref.ciks[1469395], '2026-09-08'); assert.equal(ref.ciks[111], undefined, '10-K — не отчёт иностранного эмитента');
       assert.equal(ref.asOf, '2026-09-08');
       const refs = fpi.loadFpiRefs(L);
       assert.deepEqual([...refs.forms].sort(), [1062579, 1469395]); assert.equal(refs.first, null); assert.match(refs.warn.join(' '), /нет справочника первой формы/);
       await run(['--fpi-fill']);
-      assert.equal(hits.full.length, 5, 'наполненный справочник заново не качается');
+      assert.equal(hits.full.length, 6, 'наполненный справочник заново не качается');
+      // битый файл справочника сбор форм не останавливает
+      writeFileSync(fpi.fpiFormsPath(L), '{"v":1,"asOf":"2026-09-08","ciks":{"14693');
+      const r4 = await run([]);
+      assert.equal(r4.code, 0, r4.out); assert.match(r4.out, /не читается/);
     } finally { await new Promise(r => srv.close(r)); rmSync(L, { recursive: true, force: true }); }
   });
 

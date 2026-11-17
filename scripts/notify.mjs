@@ -258,7 +258,8 @@ const state = readJson(statePath, {});
 const mainOf = day => (day?.rows ?? []).filter(x => x.main);
 // Вне основного списка: бумаги со скором 0–1 и, отдельно, иностранные эмитенты (строка с fpi: true — scripts/lib/fpi.mjs)
 const restOf = day => (day?.rows ?? []).filter(x => !x.main && !x.fpi);
-const fpiOf = day => (day?.rows ?? []).filter(x => x.fpi);
+// Иностранные эмитенты, которых правило взяло бы в основной список (скор не ниже порога): бумага со скором 0–1 вне списка и так
+const fpiOf = day => (day?.rows ?? []).filter(x => x.fpi && x.score >= (morning?.params?.scoreMin ?? 2));
 const days = (morning?.days ?? []);                       // от свежего дня к старому
 
 // Следующий рабочий день после даты подачи (праздники не знаем): до его конца утренний список ещё

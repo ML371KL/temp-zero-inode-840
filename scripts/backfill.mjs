@@ -70,7 +70,10 @@ function readShard(y) {
 // пока его нет в списке quarters: при первой сборке и при перечитывании кварталов он строится попутно, а если файл справочника
 // пропал, кварталы скачиваются заново только ради него (шарды сделок при этом не трогаются).
 const ffPath = firstFormPath(DATA);
-const ff = readJson(ffPath, { v: 1, quarters: [], first: {} });
+// Битый файл справочника — как отсутствующий: строится заново
+let ff;
+try { ff = readJson(ffPath, { v: 1, quarters: [], first: {} }); }
+catch (e) { console.log(`[backfill] справочник первой формы не читается (${e.message}) — строю заново`); ff = { v: 1, quarters: [], first: {} }; }
 
 let processed = 0;
 for (const q of wanted) {

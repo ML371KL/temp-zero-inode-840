@@ -120,6 +120,7 @@ for (const r of trades) (byTicker.get(r.T) ?? byTicker.set(r.T, []).get(r.T)).pu
 // Вердикт нужен только покупкам с начала хранилища открытий: с него копится отдельная группа счётчика.
 const fpiRefs = loadFpiRefs(DATA);
 const fpiBefore = fpiRefs.first ? tickersBeforeLaw(tradesAll) : null;
+if (fpiRefs.first && !symRanges) fpiRefs.warn.push('реестра символов нет: признак «давний листинг» не работает, пометка только по отчётам');
 for (const w of fpiRefs.warn) console.log(`[compute] иностранные эмитенты: ${w}`);
 const bar0Of = new Map();   // тикер -> дата первого бара ряда цен (давность листинга)
 const fpiMemo = new Map();
