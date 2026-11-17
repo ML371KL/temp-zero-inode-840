@@ -722,7 +722,8 @@ ok('гейты: класс бумаги и несопоставимые един
   assert.equal(isNonCommon('Common Units representing limited partner interests'), false);
   assert.equal(isNonCommon('Common Units'), false);
   assert.equal(applyGates({ ...base, sec: 'Series B Preferred Stock' }, { close: 10 }).drop, 'security');
-  assert.equal(applyGates(base, { close: 10, unitsMismatch: true }).drop, 'units');
+  // признак «другие единицы» стоит на эмитенте, но отсеивает только строку с несходящейся ценой (A3, ниже)
+  assert.equal(applyGates(base, { close: 50, unitsMismatch: true }).drop, 'units');
 });
 ok('сплиты: номинальная цена восстанавливается из котировки', () => {
   // Обратный сплит 1:20 в 2024: котировки до него Yahoo умножает на 20
@@ -3208,6 +3209,7 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
 {
   const { titleFlags, roleFlags, PARSER_REV, QUARTER_REV } = await import('./lib/edgar.mjs');
   const universeLib = await import('./lib/universe.mjs');
+  const gatesLib = await import('./lib/gates.mjs');
   // Квартальный датасет с заданными строками сделок: [подача, дата, код, акции, цена, остаток, класс, A/D]
   const quarterZip = (rows, owners = [['Q-1', 900, 'Ivanov Ivan', 'Director', '']]) => zipCreate({
     'SUBMISSION.tsv': ['ACCESSION_NUMBER\tFILING_DATE\tDOCUMENT_TYPE\tISSUERCIK\tISSUERNAME\tISSUERTRADINGSYMBOL\tAFF10B5ONE\tDATE_OF_ORIG_SUB\tREMARKS',
@@ -3344,6 +3346,25 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.equal(applyGates({ ...base, code: 'S' }, { close: 7 }).ok, true, 'продаж правило не касается');
     assert.equal(applyGates(base, { close: null, noPrice: true }).ok, true, 'нет котировки — сверять не с чем');
     assert.equal(applyGates({ ...base, fn: { offering: 1 } }, { close: 7 }).drop, 'offering', 'у размещения остаётся своя причина');
+  });
+
+  ok('A3: «другие единицы» — признак эмитента, отсев — по строке: расписки TSM за доллары проходят, акции в местной валюте — нет', () => {
+    const { unitsRowMismatch, UNITS_TOL } = gatesLib;
+    const ads = { code: 'P', px: 322.05, sh: 1000, val: 322050, fn: {}, sec: 'American Depositary Shares (TSM)' };          // Бёрнс, 01.04.2026
+    const twd = { code: 'P', px: 71.7867, sh: 3000, val: 215360, fn: {}, sec: 'Common Shares (2330.TW)' };                  // 21.07.2026
+    assert.equal(applyGates(ads, { close: 337.95, unitsMismatch: true }).ok, true, 'цена расписки сходится с котировкой (0,953) — строка идёт дальше');
+    assert.equal(applyGates(twd, { close: 398.37, unitsMismatch: true }).drop, 'units', 'отношение 0,18 — другие единицы');
+    assert.equal(applyGates(twd, { close: 398.37, unitsMismatch: false }).drop, 'discount', 'без признака эмитента — как раньше');
+    // строка со сходящейся ценой проходит ОСТАЛЬНЫЕ гейты, а не просто пропускается
+    assert.equal(applyGates(ads, { close: 337.95, unitsMismatch: true, planned: true }).drop, 'planned');
+    assert.equal(applyGates({ ...ads, px: 290 }, { close: 337.95, unitsMismatch: true }).drop, 'discount', 'отношение 0,858 — в допуске единиц, дальше решает гейт дисконта');
+    assert.equal(applyGates({ ...ads, px: 290 }, { close: 337.95, unitsMismatch: true, lows: [288, 300] }).ok, true, 'внутри дневного диапазона — проходит');
+    assert.equal(applyGates({ ...ads, px: 280 }, { close: 337.95, unitsMismatch: true }).drop, 'units', 'отношение 0,829 — вне допуска');
+    // нет цены формы или котировки — сверить нечем: у эмитента с признаком строка отсеивается, как раньше
+    assert.equal(applyGates({ ...ads, px: null, val: 0 }, { close: 337.95, unitsMismatch: true }).drop, 'units');
+    assert.equal(applyGates(ads, { close: null, unitsMismatch: true, noPrice: true }).drop, 'units');
+    assert.equal(UNITS_TOL, 0.15);
+    assert.equal(unitsRowMismatch(10, 10), false); assert.equal(unitsRowMismatch(11.5, 10), false); assert.equal(unitsRowMismatch(11.6, 10), true); assert.equal(unitsRowMismatch(8.4, 10), true);
   });
 }
 

@@ -19,7 +19,7 @@ import {
   factorAlpha, factorSeries, vsBenchmark, pathStats, neweyWestT, annualize, rfOf,
 } from './lib/portfolio.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker } from './lib/universe.mjs';
-import { applyGates, isPlanned, isNonCommon, DROP_LABELS } from './lib/gates.mjs';
+import { applyGates, isPlanned, isNonCommon, DROP_LABELS, UNITS_TOL } from './lib/gates.mjs';
 import { buildOwnerGroups, isPersonOwner, isFundOnly, topRole, dOwnOf } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './lib/routine.mjs';
 import { readOpens, opensOf, nextTradingDay } from './lib/opens.mjs';
@@ -353,7 +353,7 @@ for (const [t, rows] of byTicker) {
   if (ratios.length >= 5) {
     const q = p => ratios[Math.min(ratios.length - 1, Math.floor(p * ratios.length))];
     const med = q(0.5);
-    if (Math.abs(med - 1) > 0.15 && (q(0.75) - q(0.25)) / med < 0.1) unitsMismatch.add(t);
+    if (Math.abs(med - 1) > UNITS_TOL && (q(0.75) - q(0.25)) / med < 0.1) unitsMismatch.add(t);
   }
 }
 
@@ -392,6 +392,7 @@ for (const r of buys) {
     routine: r._routine,
     regular: isRegularSeries(hist, r.tdate, r.cik, 'P'),
     fundOnly: isFundOnly(r),
+    // признак эмитента; отсеивается только строка, чья собственная цена не сходится с котировкой (lib/gates.mjs, unitsRowMismatch)
     unitsMismatch: unitsMismatch.has(r.T),
     lows: lowsMap.get(`${r.t}|${r.tdate}`) ?? null,
   });
