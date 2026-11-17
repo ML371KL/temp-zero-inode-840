@@ -218,6 +218,7 @@ const SKIP = {
   noopen: 'нет открытия — сделка пропущена', noclose: 'нет закрытия — сделка пропущена', nobench: 'нет данных по IWM или SPY — сделка пропущена',
   frozen: 'открытие ровно равно вчерашнему закрытию — котировка застыла, сделка пропущена',
   px: 'открытие ниже $5 — сделка пропущена',
+  limit: 'открытие выше лимита заявки LOO (+10% к закрытию дня подачи) — бот такую бумагу не покупает, сделка пропущена',
 };
 const MONTH_NOM = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
 const monthRu = ym => { const [y, m] = String(ym).split('-'); return `${MONTH_NOM[Number(m) - 1] ?? ym} ${y}`; };
@@ -371,6 +372,58 @@ function renderCounter() {
     + '</table>';
 }
 
+// Здоровье сигнала (audit-840-health-2026-11-17/REPORT.md, раздел 3.7): статус и четыре числа над счётчиком, справа — z за 250 дней.
+// Методика — в руководстве (docs/ЧТО-РАБОТАЕТ.md, «Здоровье сигнала»), здесь только числа: всё считает сборка (morning.json → health).
+const H_STATUS = {
+  normal: ['норма', 'Перевес в обычной полосе. Ступени — по плану.'],
+  watch: ['наблюдение', 'Перевес за полгода заметно ниже исторического: в нормальной истории так бывает примерно раз в три года. Ступень не поднимать, торговать как есть; держится дольше полугода — разбор.'],
+  alarm: ['тревога', 'Отставание, которое в нормальной истории случается раз в десять лет. Бот — на малую ступень, разбор причин; к плану ступеней — после возврата в «норму».'],
+  nodata: ['мало данных', 'Сумма весов сглаживания меньше 100: статус ещё не определяется.'],
+};
+const GUIDE_URL = 'https://github.com/ML371KL/temp-zero-inode-840/blob/main/docs/%D0%A7%D0%A2%D0%9E-%D0%A0%D0%90%D0%91%D0%9E%D0%A2%D0%90%D0%95%D0%A2.md';
+const sgnNum = (v, k = 2) => (v === null || v === undefined || !Number.isFinite(v) ? '—' : (v > 0 ? '+' : '') + v.toFixed(k));
+function renderHealth() {
+  const h = state.morning?.health, box = $('#m-health');
+  if (!h || !H_STATUS[h.status]) { box.innerHTML = ''; box.className = 'health'; return; }
+  const p = h.params ?? {}, sp = h.spread ?? {}, lv = h.live ?? {};
+  const [lab, hint] = H_STATUS[h.status];
+  box.className = 'health st-' + h.status;
+  // z за последние 250 дней: пороги наблюдения и тревоги пунктиром; отрезок «мало данных» — приглушённо
+  const pts = (h.series ?? []).filter(x => Number.isFinite(x.z)), n = pts.length;
+  const W = 150, H = 30, lo = -3.5, hi = 3;
+  const X = i => (n > 1 ? (i / (n - 1)) * (W - 4) : 0) + 2, Y = z => H - 2 - ((Math.max(lo, Math.min(hi, z)) - lo) / (hi - lo)) * (H - 4);
+  const line = (a, cls2) => a.length > 1 ? `<polyline points="${a.map(i => X(i).toFixed(1) + ',' + Y(pts[i].z).toFixed(1)).join(' ')}" class="${cls2}"/>` : '';
+  const lastNo = pts.reduce((k, x, i) => (x.s === 'nodata' ? i : k), -1);
+  const idx = [...pts.keys()];
+  const thr = z => `<line x1="0" x2="${W}" y1="${Y(z).toFixed(1)}" y2="${Y(z).toFixed(1)}" class="spark-thr"/>`;
+  const spark = n > 1 ? `<svg class="spark" viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" role="img" aria-label="z за последние ${n} дней">`
+    + `<title>z по дням с ${esc(fmtDate(pts[0].d))}: пунктир — наблюдение (${sgnNum(p.zWatch)}) и тревога (${sgnNum(p.zAlarm)})</title>`
+    + thr(p.zWatch ?? -1.55) + thr(p.zAlarm ?? -2.25)
+    + line(idx.slice(0, lastNo + 1), 'spark-line spark-nodata') + line(idx.slice(Math.max(0, lastNo)), 'spark-line')
+    + `<circle cx="${X(n - 1).toFixed(1)}" cy="${Y(pts[n - 1].z).toFixed(1)}" r="2.5" class="spark-dot h-dot"/></svg>` : '';
+  const cell = (label, value, sub, title) => `<div class="hc" title="${esc(title)}"><span class="hc-l">${label}</span><span class="hc-v">${value}</span><span class="hc-s">${sub}</span></div>`;
+  const yr = sp.days >= (p.spreadDays ?? 250) ? 'за год' : `с ${esc(fmtDate(h.from))}`;
+  const noSpread = Number.isFinite(sp.diff) && sp.diff <= 0;
+  box.innerHTML = `<div class="health-top"><b>Здоровье сигнала</b>`
+    + `<span class="h-pill" title="${esc(hint)}">${esc(lab)}</span>`
+    + `<span class="muted">с ${esc(fmtDate(h.since))} · по ${esc(fmtDate(h.asOf))}</span>${spark}</div>`
+    + `<div class="h-cells">`
+    + cell('перевес за полгода', `${fmtPct(h.m, 2)} <small>± ${h.se === null ? '—' : (h.se * 100).toFixed(2)}</small>`, `история ${fmtPct(p.mu0, 2)}`,
+      `Сглаженный перевес дня D+1 основного списка: остаток к IWM с бетой ${p.beta ?? 1.17}, сделки обрезаны на ${fmtPct(p.lo, 0)} и ${fmtPct(p.hi, 0)}, `
+      + `день весит не больше ${p.kcap ?? 5} сделок, полупериод ${p.half ?? 125} дней. За 2006–2026 — ${fmtPct(p.mu0, 2)}`)
+    + cell('отставание', `z ${sgnNum(h.z)}`, `наблюдение ниже ${fmtPct(h.thrWatch, 2)}, тревога ниже ${fmtPct(h.thrAlarm, 2)}`,
+      `Насколько сглаженный перевес ниже исторического, в единицах его ошибки. Наблюдение — z ≤ ${sgnNum(p.zWatch)} (в нормальной истории раз в три года), `
+      + `тревога — z ≤ ${sgnNum(p.zAlarm)} (раз в десять лет). Из тревоги — при z выше ${sgnNum(p.zWatch)}, в норму — выше ${sgnNum(p.zBack, 1)}`)
+    + cell('скор различает', `${sgnNum(Number.isFinite(sp.diff) ? sp.diff * 100 : null)} п.п.`,
+      `${yr}${noSpread ? ' · <span class="h-warn">скор не различает</span>' : ' · история +0.26…0.29'}`,
+      'Основной список минус бумаги со скором 0–1 за 250 дней, та же мера. За 2006–2026 — +0.26…0.29 п.п.; ниже нуля за год не уходила ни разу')
+    + cell(`живые данные с ${esc(fmtDate(h.from))}`, esc(plural(lv.n ?? 0, 'сделка', 'сделки', 'сделок')),
+      `${fmtPct(lv.net, 2)} после издержек · t ${lv.tDays === null || lv.tDays === undefined ? '—' : lv.tDays.toFixed(1)}`,
+      `Все сделки основного списка с ${fmtDate(h.from)}, к IWM после издержек каждой сделки, без сделок, открывшихся выше лимита LOO +10%`)
+    + `</div><div class="h-note"><span class="h-note-long">Статус меняется, только когда перевес за полгода заметно ниже исторического: плохая неделя его не сдвигает. </span>`
+    + `Методика — <a href="${GUIDE_URL}#${encodeURIComponent('здоровье-сигнала')}" target="_blank" rel="noopener">в руководстве</a>.</div>`;
+}
+
 // Плашка всплеска: z-оценка числа покупающих эмитентов за три месяца к 36 прошлым. Справка: проверка
 // не доказала, что правило «возврат в рынок» выигрывает у 837 (просадка хуже, Шарп не растёт), и панель
 // перевеса не обещает. Справа — z за 60 месяцев.
@@ -411,6 +464,7 @@ function dayNote(day, rows, liveOn = false) {
 }
 
 function renderMorning() {
+  renderHealth();
   renderCounter();
   renderSurge();
   const days = state.morning.days;
@@ -504,8 +558,9 @@ function renderDay() {
     $('#m-rest').className = 'morning' + live;
     $('#m-rest').innerHTML = dayTable(rest, ctx);
   }
-  $('#m-foot').innerHTML = 'Только заявки на аукционы: MOO до 9:28 и MOC до 15:50 по Нью-Йорку. Около 60% перевеса дня набирается в первые 5 минут — '
-    + 'покупка по рынку после открытия его съедает. Сумма на бумагу одинаковая. Скор и итоги проверки — на вкладке <a href="#stats">Статистика</a>.';
+  $('#m-foot').innerHTML = 'Только заявки на аукционы: покупка на открытии (LOO до 9:28, лимит +10% к закрытию дня подачи), продажа на закрытии (MOC до 15:50 по Нью-Йорку). '
+    + 'Перевес дня достаётся покупке по цене аукциона: сразу после открытия цена продавца выше неё на 0,3–0,5%, и покупка по рынку его съедает. '
+    + 'Сумма на бумагу одинаковая. Скор и итоги проверки — на вкладке <a href="#stats">Статистика</a>.';
 }
 
 // ---------- ЛЕНТА ----------

@@ -7,6 +7,8 @@
   --accent: #3b76d6; --accent-ink: #ffffff;
   --good-bg: #e3f2ec; --bad-bg: #fbe9e2; --warn-bg: #fdf3d8;
   --grid: #e8ebef; --shadow: 0 1px 3px rgba(20,30,50,.08);
+  /* Статусы здоровья сигнала: наблюдение — жёлтый, тревога — красный (текст на своём фоне ≥ 4.5:1) */
+  --c-warn: #8a5a00; --c-alarm: #b42318; --alarm-bg: #fde4e2;
 }
 :root[data-theme="dark"] {
   --bg: #0c1117; --surface: #11161d; --border: #232b36;
@@ -15,6 +17,7 @@
   --accent: #4f8ef7; --accent-ink: #0c1117;
   --good-bg: #12312a; --bad-bg: #38200f; --warn-bg: #32290f;
   --grid: #1a212b; --shadow: none;
+  --c-warn: #e3b341; --c-alarm: #f97066; --alarm-bg: #3d1518;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
@@ -233,6 +236,32 @@ footer { padding: 14px 20px; border-top: 1px solid var(--border); }
 .spark-dot { fill: var(--accent); }
 .surge.on .spark-dot { fill: var(--c-buy); }
 
+/* Здоровье сигнала: статус и четыре числа над счётчиком. Цвет — только у плашки статуса, полосы слева и точки спарклайна */
+.health {
+  --h-c: var(--ink-3); --h-bg: var(--grid);
+  background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--h-c); border-radius: 10px;
+  padding: 8px 14px; margin-bottom: 10px; font-size: 13px; box-shadow: var(--shadow);
+}
+.health:empty { display: none; }
+.health.st-normal { --h-c: var(--c-buy); --h-bg: var(--good-bg); }
+.health.st-watch { --h-c: var(--c-warn); --h-bg: var(--warn-bg); }
+.health.st-alarm { --h-c: var(--c-alarm); --h-bg: var(--alarm-bg); background: color-mix(in srgb, var(--alarm-bg) 45%, var(--surface)); }
+.health.st-nodata { --h-c: var(--ink-3); --h-bg: var(--grid); }
+.health-top { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.h-pill { border-radius: 10px; padding: 1px 10px; font-size: 12.5px; font-weight: 700; background: var(--h-bg); color: var(--h-c); cursor: help; }
+.health.st-nodata .h-pill { color: var(--ink-2); }
+.h-cells { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px 18px; margin-top: 6px; }
+.hc { cursor: help; min-width: 0; }
+.hc-l { display: block; font-size: 11.5px; color: var(--ink-2); }
+.hc-v { display: block; font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hc-v small { font-size: 12px; font-weight: 500; color: var(--ink-2); }
+.hc-s { display: block; font-size: 11.5px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.h-warn { color: var(--c-alarm); font-weight: 600; }
+.h-note { margin-top: 6px; font-size: 11.5px; color: var(--ink-3); }
+.h-note a { color: var(--ink-2); }
+.spark-nodata { stroke: var(--ink-3); stroke-dasharray: 2 2; }
+.health .h-dot { fill: var(--h-c); }
+
 table.morning td { vertical-align: top; }
 table.morning td.marks { white-space: normal; min-width: 150px; }
 table.morning td.marks .pill { margin: 0 2px 2px 0; }
@@ -273,6 +302,11 @@ table.mini.rev th:last-child, table.mini.rev td:last-child { text-align: left; }
   .strip-t th { font-size: 10.5px; padding: 0 4px 4px; white-space: normal; vertical-align: bottom; }
   .surge { padding: 6px 12px; }
   .spark { margin-left: 0; }
+  .health { padding: 8px 12px; }
+  .h-cells { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 12px; }
+  .hc-v { font-size: 14px; }
+  /* На телефоне блок не должен вытеснять счётчик с первого экрана: пояснение — в подсказке статуса и в руководстве */
+  .h-note-long { display: none; }
   /* Шапка на телефоне съедала треть первого экрана */
   .topbar { padding: 10px 12px 8px; gap: 10px; }
   .brand .sub { display: none; }
