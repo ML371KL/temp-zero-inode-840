@@ -50,13 +50,21 @@ const write = rec => { if (!DRY) appendFileSync(dayFile(), JSON.stringify(rec) +
 // Состояние — из журналов сегодняшнего и предыдущих дней (FEED.backDays): замеченные, разобранные, попытки скачать. Прошлые дни нужны,
 // чтобы первый такт в 06:00 не принимал вчерашние вечерние подачи, ещё стоящие в ленте, за новые (131–146 лишних скачиваний каждое
 // утро). Замеченная вчера, но не разобранная подача остаётся в очереди и добирается сегодня.
-const seen = new Map(), forms = new Set(), tries = new Map();
+const seen = new Map(), forms = new Set(), tries = new Map(), netFails = new Map();
+// Запуск посреди дня после уже работавшего сегодня сборщика (перезапуск после слепоты, сбоя, перезагрузки): три целиком новые
+// страницы на первом такте — настоящий разрыв, а не «накопившееся за ночь»
+let restarted = false;
 {
-  const j = loadFeed(DIR, nyWall(Date.now()).slice(0, 10), FEED.backDays);
+  const today = nyWall(Date.now()).slice(0, 10);
+  const j = loadFeed(DIR, today, FEED.backDays);
   for (const [a, r] of j.seen) seen.set(a, r);
   for (const a of j.forms.keys()) forms.add(a);
+  restarted = loadFeed(DIR, today, 0).runs.length > 0;
 }
-const pending = () => [...seen.values()].filter(s => !forms.has(s.acc) && (tries.get(s.acc) ?? 0) < FEED.maxTries);
+// Очередь на скачивание: подачи, по которым сеть уже сбоила, идут последними — несдающаяся подача не держит остальных
+const pending = () => [...seen.values()]
+  .filter(s => !forms.has(s.acc) && (tries.get(s.acc) ?? 0) < FEED.maxTries && (netFails.get(s.acc) ?? 0) < FEED.maxNetFails)
+  .sort((a, b) => (netFails.get(a.acc) ?? 0) - (netFails.get(b.acc) ?? 0));
 
 async function get(url) {
   const { body } = await politeFetch(url, { ua: SEC_UA, as: 'text', retries: FEED.retries, timeoutMs: FEED.timeoutMs, intervalMs: GAP_MS });
@@ -65,24 +73,28 @@ async function get(url) {
 
 // Скачать и разобрать подачу; false — файла ещё нет (повторим на следующем такте)
 async function fetchForm(s) {
-  tries.set(s.acc, (tries.get(s.acc) ?? 0) + 1);
   // fetchFiling не передаёт свой интервал, а у хоста по умолчанию ~7 запросов в секунду: подачи качаются тем же полите-запросом, что и страницы ленты
-  const txt = await get(`${edgarBase()}/Archives/${filingPath(s.cik, s.acc)}`);
+  let txt;
+  try { txt = await get(`${edgarBase()}/Archives/${filingPath(s.cik, s.acc)}`); }
+  catch (e) { netFails.set(s.acc, (netFails.get(s.acc) ?? 0) + 1); throw e; }       // сбой сети: попытка не списывается, подача — в конец очереди
+  tries.set(s.acc, (tries.get(s.acc) ?? 0) + 1);
   if (!txt) return false;
+  // Оборванный файл в журнал не пишется: запись без сделок выглядела бы разобранной формой, и подачу больше никто бы не скачал
+  if (!formComplete(txt)) throw new Error('файл подачи оборван — повтор на следующем такте');
   const head = txt.slice(0, txt.indexOf('<XML>') >= 0 ? txt.indexOf('<XML>') : 4000);
   const at = acceptedAt(head);
   const filed = s.filed ?? (at ? at.slice(0, 10) : null);
   const parsed = parseForm4Txt(txt, s.acc, filed);
   // rev — ревизия разбора, end — файл подачи скачан целиком: ночная сборка берёт из журнала только формы, разобранные её же
   // разбором и полные (live.mjs --feed-dir), остальные качает сама
-  write({ k: 'form', acc: s.acc, filed, at: at ?? null, rev: PARSER_REV, end: formComplete(txt), trades: parsed.trades, amend: parsed.amend });
+  write({ k: 'form', acc: s.acc, filed, at: at ?? null, rev: PARSER_REV, end: true, trades: parsed.trades, amend: parsed.amend });
   forms.add(s.acc);
   return true;
 }
 
 async function tick(stat) {
   let gap = false, pageErr = null;
-  const backlog = stat.polls === 0;                                // первый такт запуска: накопившееся за ночь или простой — не разрыв
+  const backlog = stat.polls === 0 && !restarted;                  // первый такт первого запуска дня: накопившееся за ночь — не разрыв
   try {
     for (let page = 0; page < PAGES; page++) {
       const entries = parseAtom(await get(feedUrl(page * PAGE)));
