@@ -3580,5 +3580,88 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   });
 }
 
+// ==================== АУДИТ ФОРМ 17.11.2026, пакет B: ночная сборка на сервере и лента ====================
+{
+  const { PARSER_REV } = await import('./lib/edgar.mjs');
+  const { readJsonGz } = await import('./lib/util.mjs');
+  const accB = n => `0000000012-26-${String(n).padStart(6, '0')}`;
+  const pathB = (cik, acc) => `edgar/data/${cik}/${acc.replace(/-/g, '')}/${acc}.txt`;
+  const idxLineB = (name, cik, day, path) => `4                ${name.padEnd(62)}${String(cik).padEnd(12)}${day.replace(/-/g, '')}    ${path}`;
+  const formB = (acc, sym, { day = '2026-11-06', tdate = '2026-11-05', sh = 1000, px = 20 } = {}) =>
+    `<SEC-DOCUMENT>${acc}.txt : ${day.replace(/-/g, '')}\n<SEC-HEADER>\n<ACCEPTANCE-DATETIME>${day.replace(/-/g, '')}171500\n</SEC-HEADER>\n<XML>\n<ownershipDocument><documentType>4</documentType>`
+    + `<issuer><issuerCik>555000</issuerCik><issuerTradingSymbol>${sym}</issuerTradingSymbol></issuer><aff10b5One>0</aff10b5One>`
+    + `<reportingOwner><reportingOwnerId><rptOwnerCik>777</rptOwnerCik><rptOwnerName>Doe John</rptOwnerName></reportingOwnerId>`
+    + `<reportingOwnerRelationship><isOfficer>1</isOfficer><officerTitle>CFO</officerTitle></reportingOwnerRelationship></reportingOwner>`
+    + `<nonDerivativeTable><nonDerivativeTransaction><securityTitle><value>Common Stock</value></securityTitle>`
+    + `<transactionDate><value>${tdate}</value></transactionDate><transactionCoding><transactionCode>P</transactionCode><equitySwapInvolved>0</equitySwapInvolved></transactionCoding>`
+    + `<transactionAmounts><transactionShares><value>${sh}</value></transactionShares><transactionPricePerShare><value>${px}</value></transactionPricePerShare>`
+    + `<transactionAcquiredDisposedCode><value>A</value></transactionAcquiredDisposedCode></transactionAmounts>`
+    + `<postTransactionAmounts><sharesOwnedFollowingTransaction><value>10000</value></sharesOwnedFollowingTransaction></postTransactionAmounts>`
+    + `<ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature></nonDerivativeTransaction></nonDerivativeTable>`
+    + `</ownershipDocument>\n</XML>\n</SEC-DOCUMENT>`;
+  const S3B = '<?xml version="1.0" encoding="UTF-8"?>\n<Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>';
+  const runScript = (script, args, env) => new Promise(resolve => execFile(process.execPath, [join(ROOT, 'scripts', script), ...args],
+    { encoding: 'utf8', env: { ...process.env, POLITE_BACKOFF_MS: '2', ...env } }, (err, so, se) => resolve({ code: err ? (err.code ?? 1) : 0, out: so + se })));
+
+  await okAsync('B1: «нет файла» по подаче свежего дня — не «снята»: повтор в конце прохода, добор, день partial; снятой считается только у дня старше суток', async () => {
+    // ночь 06.11.2026: SEC ответила 404 по 31 подаче из 515, сборка на сервере пометила день полным (собрано 484, ждут 0)
+    const L = join(ROOT, '.selftest-nofile');
+    rmSync(L, { recursive: true, force: true });
+    const D = '2026-11-06', [A, B, C] = [1, 2, 3].map(accB);
+    const index = ['Form Type   Company Name   CIK   Date Filed   File Name', '-'.repeat(80), idxLineB('ISSUER A', 555000, D, pathB(555000, A)),
+      idxLineB('ISSUER B', 555000, D, pathB(555000, B)), idxLineB('DOE JOHN', 777, D, pathB(777, B)), idxLineB('ISSUER C', 555000, D, pathB(555000, C))].join('\n');
+    let bMissing = true;
+    const hitsB = [];
+    const srv = createServer((req, res) => {
+      const url = decodeURIComponent(req.url);
+      if (/form\.20261106\.idx$/.test(url)) { res.writeHead(200); res.end(index); return; }
+      if (/daily-index/.test(url)) { res.writeHead(403, { 'content-type': 'application/xml' }); res.end(S3B); return; }
+      const m = /(\d{10}-\d{2}-\d{6})\.txt$/.exec(url);
+      if (m?.[1] === B) hitsB.push(url);
+      if (m && (m[1] !== B || !bMissing)) { res.writeHead(200); res.end(formB(m[1], m[1] === A ? 'AAA' : m[1] === B ? 'BBB' : 'CCC')); return; }
+      res.writeHead(404); res.end();
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const run = todayIso => runScript('live.mjs', ['--data', L, '--today', todayIso, '--retries', '0', '--reread-budget-min', '0'], { EDGAR_BASE: `http://127.0.0.1:${srv.address().port}` });
+    const st = () => readJson(join(L, 'state', 'live.json'));
+    const reset = () => {
+      rmSync(L, { recursive: true, force: true });
+      mkdirSync(join(L, 'state'), { recursive: true });
+      writeJson(join(L, 'state', 'live.json'), { schema: SHARD_VERSION, from: '2026-11-02', lastDay: '2026-11-05', parserRev: PARSER_REV });
+      writeJson(join(L, 'state', 'backfill.json'), { done: ['2026q3'] });
+      writeJsonGz(join(L, 'trades', 'live.json.gz'), { v: SHARD_VERSION, trades: [], amend: [] });
+    };
+    try {
+      reset();
+      const r1 = await run('2026-11-07');                          // 22:03 ET 06.11 = 03:03 UTC 07.11
+      assert.equal(r1.code, 0, r1.out);
+      let c = st().coverage[D];
+      assert.deepEqual([c.status, c.indexed, c.collected, c.pending, c.gone ?? 0], ['partial', 3, 2, 1, 0], 'день неполон, подача ждёт добора, «снятых» нет');
+      assert.deepEqual(Object.keys(st().pending[D]), [B]); assert.match(st().pending[D][B].err, /нет файла/);
+      assert.equal(hitsB.length, 4, 'оба адреса подачи спрошены дважды: в проходе и повтором в конце прохода');
+      assert.equal(st().lastDay >= D, true, 'день пройден: список собирается, недобор виден в покрытии');
+      bMissing = false;                                            // следующая попытка сборки: файл уже отдаётся
+      const r2 = await run('2026-11-07');
+      assert.equal(r2.code, 0, r2.out);
+      c = st().coverage[D];
+      assert.deepEqual([c.status, c.collected, c.pending], ['complete', 3, 0]);
+      assert.deepEqual(readJsonGz(join(L, 'trades', 'live.json.gz')).trades.map(r => r.t).sort(), ['AAA', 'BBB', 'CCC']);
+      // подачу и правда сняли: пока день свежий — ждёт в доборе, через сутки считается снятой, и день закрывается полным
+      reset(); bMissing = true;
+      await run('2026-11-07'); await run('2026-11-07');
+      assert.equal(st().coverage[D].status, 'partial'); assert.equal(st().pending[D][B].tries, 2);
+      const r3 = await run('2026-11-08');
+      assert.equal(r3.code, 0, r3.out);
+      c = st().coverage[D];
+      assert.deepEqual([c.status, c.collected, c.gone, c.pending], ['complete', 2, 1, 0]); assert.equal(st().pending, undefined);
+      // день старше суток при первом же чтении (догон после простоя): как раньше — снята сразу
+      reset();
+      await run('2026-11-10');
+      c = st().coverage[D];
+      assert.deepEqual([c.status, c.collected, c.gone], ['complete', 2, 1]);
+    } finally { await new Promise(r => srv.close(r)); rmSync(L, { recursive: true, force: true }); }
+  });
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);

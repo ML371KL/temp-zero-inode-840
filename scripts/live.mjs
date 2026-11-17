@@ -123,7 +123,7 @@ async function download(paths) {
       if (txt) { rlStreak = 0; return { txt }; }
     } catch (e) { lastErr = e; }
   }
-  if (!lastErr) { rlStreak = 0; return { gone: true }; }
+  if (!lastErr) { rlStreak = 0; return { gone: true }; }      // 404 по всем адресам; что это значит — решает isFreshDay ниже
   const msg = String(lastErr.message ?? lastErr);
   if (/лимит SEC/.test(msg) && ++rlStreak >= RL_STREAK_MAX && !secBlocked) {
     secBlocked = true;
@@ -132,6 +132,14 @@ async function download(paths) {
   }
   return { error: msg };
 }
+
+// «Нет файла» по подаче из индекса СВЕЖЕГО дня — не «подачу сняли». В ночь 06.11.2026 SEC в 22:03–22:06 ET ответила 404 по всем
+// адресам 31 подачи из 515; сборка на сервере сочла их снятыми, пометила день полным и потеряла 14 строк сделок, а через полчаса
+// сборка GitHub тем же кодом скачала все 515 (аудит форм 17.11.2026, находка 3). Поэтому у дня индекса не старше суток (сегодня
+// или вчера по UTC — ночная сборка идёт в 03:0x UTC следующих суток) такая подача ложится в добор: повтор в конце прохода и в
+// следующих прогонах, день — partial. Снятой подача считается только у дня старше суток.
+const NO_FILE = 'нет файла (404)';
+const isFreshDay = d => addDaysIso(d, 1) >= today;
 
 // ---------- состояние покрытия и добора ----------
 const coverage = { ...(state.coverage ?? {}) };
@@ -222,6 +230,8 @@ async function run() {
         ingest(res.txt, acc, d); filingsDone++; picked++;
         delete pending[d][acc];
         if (coverage[d]) coverage[d].collected = (coverage[d].collected ?? 0) + 1;
+      } else if (res.gone && isFreshDay(d)) {
+        pend(d, acc, p.paths, NO_FILE); still++;       // файла всё ещё нет, а день свежий — ждём дальше
       } else if (res.gone) {
         delete pending[d][acc];
         if (coverage[d]) coverage[d].gone = (coverage[d].gone ?? 0) + 1;
@@ -286,6 +296,7 @@ async function run() {
     const filings = uniqueFilings(entries);
     const prevPending = pending[day] ?? {};
     let collected = 0, gone = 0, budgetHit = false;
+    const noFile = [];          // подачи свежего дня с ответом «нет файла»: повтор в конце прохода
     for (const f of filings) {
       const ps = paths.get(f.acc);
       if (budgetHit || overBudget() || secBlocked) {
@@ -299,8 +310,18 @@ async function run() {
       if (res.txt) {
         ingest(res.txt, f.acc, day); filingsDone++; collected++;
         if (pending[day]) delete pending[day][f.acc];
-      } else if (res.gone) gone++;
+      } else if (res.gone && isFreshDay(day)) { pend(day, f.acc, ps, NO_FILE); noFile.push(f); }
+      else if (res.gone) gone++;
       else { pend(day, f.acc, ps, res.error); console.log(`[live] ${day}: ${f.acc} отложена (${res.error})`); }
+    }
+    if (noFile.length) {
+      let back = 0;
+      for (const f of noFile) {
+        if (budgetHit || overBudget() || secBlocked) break;
+        const res = await download(paths.get(f.acc));
+        if (res.txt) { ingest(res.txt, f.acc, day); filingsDone++; collected++; back++; delete pending[day][f.acc]; }
+      }
+      console.log(`[live] ${day}: «нет файла» по ${noFile.length} подачам индекса — повтор в конце прохода вернул ${back}, в доборе ${noFile.length - back}`);
     }
     coverage[day] = { indexed: filings.length, collected, ...(gone ? { gone } : {}), at: nowIso(), ...(secBlocked ? { error: 'лимит SEC' } : {}) };
     settle(day);
