@@ -3482,7 +3482,9 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.deepEqual(off.fpi, ['PAM', 'DOLE', 'LOW']); assert.deepEqual(on.fpi, off.fpi, 'счётчику тикеры иностранных эмитентов известны при любом fpiFrom');
     assert.equal(compareMain(on.rows, on.rows).same, true);
     assert.deepEqual(compareMain(off.rows, on.rows).diff.map(x => x.t), ['PAM', 'DOLE'], 'сверка двух сборок видит, если пометку поставила только одна');
-    assert.ok((await import('./lib/morning.mjs')).MORNING.fpiFrom > '2090', 'в коде — заведомо будущая дата: до слияния её ставит ведущий');
+    // Дату ставит ведущий при выкладке; раньше 18.11.2026 она стоять не может: дни подачи до выкладки обязаны остаться как были
+    const from = (await import('./lib/morning.mjs')).MORNING.fpiFrom;
+    assert.ok(/^\d{4}-\d{2}-\d{2}$/.test(from) && from >= '2026-11-18', 'MORNING.fpiFrom — дата не раньше дня выкладки (18.11.2026)');
   });
 
   await okAsync('A1: backfill строит справочник первой формы попутно; пропавший файл восстанавливается без перечитывания сделок', async () => {
