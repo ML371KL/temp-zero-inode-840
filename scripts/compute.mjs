@@ -23,7 +23,7 @@ import { applyGates, isPlanned, isNonCommon, DROP_LABELS } from './lib/gates.mjs
 import { buildOwnerGroups, isPersonOwner, isFundOnly, topRole, dOwnOf } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './lib/routine.mjs';
 import { readOpens, opensOf, nextTradingDay } from './lib/opens.mjs';
-import { MORNING, BREADTH, buildDayFull, tradeResult, summarize, breadth, prevDays } from './lib/morning.mjs';
+import { MORNING, BREADTH, HEALTH, buildDayFull, tradeResult, summarize, breadth, prevDays, signalHealth } from './lib/morning.mjs';
 import { listDayOf } from './lib/livecal.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -263,8 +263,9 @@ const quality = { reassigned: 0, reassignedTickers: new Set(), noEntry: 0, unkno
 const panel = new Panel();
 panel.add('SPY', monthlyFromDaily(spy), true);
 if (iwm?.length) panel.add('IWM', monthlyFromDaily(iwm), true);
-// Тикеры, чьи цены нужны утреннему списку и счётчику: покупки последних дней подачи (с запасом в 45 дней)
-const leanFrom = [COUNTER_FROM, addDaysIso(today, -45)].reduce((a, b) => (a < b ? a : b));
+// Тикеры, чьи цены нужны утреннему списку, счётчику и здоровью сигнала: покупки последних дней подачи (с запасом в 45 дней) и все
+// подачи с начала здоровья сигнала (HEALTH.from, 14.08.2026: статус пересчитывается от первого дня при каждой сборке)
+const leanFrom = [COUNTER_FROM, HEALTH.from, addDaysIso(today, -45)].reduce((a, b) => (a < b ? a : b));
 // и бумаги прошлогодних покупок тех же эмитентов: поле prev (повтор) смотрит, прошли ли они гейты, а у строки без ряда ценовые гейты
 // не срабатывают — у эмитента, сменившего тикер, prev разошёлся бы с полной сборкой
 const leanTickers = ONLY_MORNING ? (() => {
@@ -465,8 +466,8 @@ W('feed.json', feedRows);
 // и не должен терять старые дни.
 const opensStore = readOpens(DATA);
 const dayCand = new Map();
-// Строки-кандидаты нужны только для последних дней и для счётчика: старше — не копим в памяти
-const DAY_CUT = [COUNTER_FROM, addDaysIso(today, -30)].reduce((a, b) => (a < b ? a : b));
+// Строки-кандидаты нужны только для последних дней, для счётчика и для здоровья сигнала (с подачи HEALTH.from): старше — не копим в памяти
+const DAY_CUT = [COUNTER_FROM, HEALTH.from, addDaysIso(today, -30)].reduce((a, b) => (a < b ? a : b));
 // Повтор (prev, scripts/lib/morning.mjs, prevDays): дни подачи каждого эмитента, в которые была покупка от $10 тыс., прошедшая гейты
 // (не-обыкновенные бумаги гейты отсеивают сами). По всей истории, а не с DAY_CUT: окно prev — год. buys упорядочены по дате подачи.
 const eventDays = new Map();
@@ -516,18 +517,25 @@ function dayWithResults(fd) {
 }
 // Счётчик: основной список (скор ≥2) и все от $10 млн; каждая сделка — сразу к IWM и к SPY,
 // издержки у каждой свои (оборот ≥$30 млн — 0,10% на круг, $10–30 млн — 0,15%).
+// Здоровье сигнала (scripts/lib/morning.mjs, signalHealth): все сделки списка от $10 млн с подачи HEALTH.from — те же строки и те же
+// пропуски, что у счётчика (в том числе limit: открытие выше лимита LOO бота).
 const counterTrades = { main: [], all: [] }, counterSkips = { main: {}, all: {} };
+const healthTrades = [];
+const resultsFrom = COUNTER_FROM < HEALTH.from ? COUNTER_FROM : HEALTH.from;
 for (const fd of allFdates) {
-  if (fd < COUNTER_FROM) continue;
+  if (fd < resultsFrom) continue;
   const day = dayWithResults(fd);
   if (!day.done) continue;
   for (const row of day.rows) {
+    if (fd >= HEALTH.from && !row.skip) healthTrades.push({ day: day.entry, fd, t: row.t, main: row.main, score: row.score, cost: row.cost, r: row.r, b: row.b, ex: row.ex, exS: row.exS });
+    if (fd < COUNTER_FROM) continue;
     for (const k of row.main ? ['main', 'all'] : ['all']) {
       if (row.skip) { counterSkips[k][row.skip] = (counterSkips[k][row.skip] ?? 0) + 1; continue; }
       counterTrades[k].push({ day: day.entry, fd, t: row.t, score: row.score, cost: row.cost, r: row.r, b: row.b, bs: row.bs, ex: row.ex, exS: row.exS });
     }
   }
 }
+const healthOut = signalHealth(healthTrades);
 const counterOut = {
   from: COUNTER_FROM,
   costs: { hi: MORNING.costHi, lo: MORNING.costLo, split: MORNING.dvCost },
@@ -541,9 +549,13 @@ W('morning.json', {
   // Для сторожа: за какую дату подачи список, когда и кем собран, как покрыт индекс (null — поля покрытия в live.json ещё нет)
   listFor, builtAt: new Date().toISOString(), builder: BUILDER, source: SOURCE, coverage,
   params: { minVal: MORNING.minVal, minPx: MORNING.minPx, dvMin: MORNING.dvMin, dvCost: MORNING.dvCost, scoreMin: MORNING.scoreMin, costHi: MORNING.costHi, costLo: MORNING.costLo, stake: MORNING.stake },
-  counter: counterOut, days: morningDays,
+  counter: counterOut, health: healthOut, days: morningDays,
 });
 if (COUNTER_DUMP) writeJson(COUNTER_DUMP, counterTrades);
+// --health-dump файл.json — все сделки здоровья сигнала построчно (сверка с опорной таблицей исследования)
+const HEALTH_DUMP = argVal('--health-dump', null);
+if (HEALTH_DUMP) writeJson(HEALTH_DUMP, healthTrades);
+const fmtHealth = h => (h ? `${h.status} с ${h.since}, по ${h.asOf}: m ${(h.m * 100).toFixed(3)}%, z ${h.z}, S_W ${h.sw}, сделок ${h.n}` : 'нет данных');
 // План докачки для сборки на VPS: у каких тикеров дня listFor нет бара D0 (и с какой даты качать) и каким строкам прошедших
 // дней не хватает открытия/закрытия дня входа. Пусто — докачивать нечего.
 if (PLAN) {
@@ -567,6 +579,7 @@ if (PLAN) {
 }
 if (ONLY_MORNING) {
   console.log(`[compute] --only-morning: список за ${listFor}, бумаг от $10 млн ${morningDays[0]?.rows.length ?? 0}, без цены на D0 ${morningDays[0]?.unpriced?.length ?? 0}`);
+  console.log(`[compute] здоровье сигнала: ${fmtHealth(healthOut)}`);
   process.exit(0);
 }
 
@@ -1000,6 +1013,7 @@ console.log(`[compute] ремонт рядов: пересчитано по сп
   const lastDay = morningDays[0];
   console.log(`[compute] утренний список ${lastDay?.date ?? '—'}: ${lastDay?.rows.length ?? 0} бумаг от $10 млн, в основном списке (скор ≥${MORNING.scoreMin}) ${lastDay?.rows.filter(x => x.main).length ?? 0}`);
   console.log(`[compute] счётчик с ${COUNTER_FROM}: основной — ${fmtSum(counterOut.main)}; все от $10 млн — ${fmtSum(counterOut.all)}`);
+  console.log(`[compute] здоровье сигнала: ${fmtHealth(healthOut)}`);
   console.log(`[compute] всплеск покупок: ${breadthOut ? `на ${breadthOut.asOf} B3=${breadthOut.b3}, z=${breadthOut.z}, ${breadthOut.surge ? 'ВСПЛЕСК' : 'нет'}` : 'н/д'}`);
 }
 if (workingSet) {

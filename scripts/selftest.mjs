@@ -22,6 +22,7 @@ import { missedSecDays, staleState, DEADLINE_NY_HOUR, STALE_MIN_MISSED } from '.
 import { main as morningMain, liveVerdict, reconcileStage, d0Verdict } from './vps/morning-build.mjs';
 import { parseFeedJournal, loadFeed, pruneFeed, feedFile, reconcile, mergeFeedRows, parseAtom, filingPath } from './lib/feed.mjs';
 import { buildDay, buildDayFull, tradeResult, summarize, breadth, bestRole, tagsOf, sessionOf, scoreOf, costOf, compareMain, prevDays } from './lib/morning.mjs';
+import { HEALTH, healthY, healthDay, healthStep, nextStatus, healthTrace, signalHealth, looLimit } from './lib/morning.mjs';
 import { pickOpens, mergeOpens, nextTradingDay, opensOf, readOpens, writeOpens } from './lib/opens.mjs';
 import { nyWall, nyToMs } from './lib/nytime.mjs';
 import { parseRegistry, exchangeAt, mergeRanges, sameInstrumentAsLatest } from './lib/symbols.mjs';
@@ -851,6 +852,77 @@ ok('утренний список: сводка счётчика — к IWM и �
   const mixed = summarize([{ day: 'a', ex: 0.01, exS: 0.01, cost: 0.001 }, { day: 'a', ex: 0.01, exS: 0.01, cost: 0.0015 }]);
   assert.equal(mixed.cost, 0.00125); assert.equal(mixed.iwm.net, 0.0088); assert.equal(mixed.iwm.cumNet, 0.0175);
 });
+
+// ---------- здоровье сигнала (audit-840-health-2026-11-17/REPORT.md, раздел 3.10: самотесты 1–6) ----------
+const near = (a, b, eps, what) => assert.ok(Math.abs(a - b) <= eps, `${what}: ${a} против ${b}`);
+// n дней подряд (ISO-даты по порядку), по k сделок основного списка с доходностью r при IWM = 0
+const flatDays = (n, k, r) => Array.from({ length: n }, (_, i) => addDaysIso('2026-08-17', i)).flatMap(day => Array.from({ length: k }, () => ({ day, main: true, r, b: 0 })));
+ok('здоровье 1: мера сделки обрезается на −6% и +15%, средняя дня 3,3333%, вес 3', () => {
+  const ys = [0.01, -0.10, 0.20].map(r => healthY(r, 0));
+  assert.deepEqual(ys, [0.01, -0.06, 0.15]);
+  const d = healthDay(ys);
+  assert.equal(d.W, 3); assert.equal(d.n, 3); near(d.ybar, 0.033333, 1e-6, 'средняя дня');
+  near(healthY(0.02, 0.01), 0.02 - 1.17 * 0.01, 1e-12, 'остаток с бетой 1,17');
+  assert.deepEqual(healthDay([]), { n: 0, W: 0, ybar: null }, 'день без сделок основного списка — вес 0');
+});
+ok('здоровье 2: восемь сделок по +0,5% — вес дня 5, вклад в S_Y 0,025', () => {
+  const d = healthDay(Array(8).fill(healthY(0.005, 0)));
+  assert.equal(d.W, 5);
+  const s = healthStep({ sw: 0, sy: 0, sw2: 0 }, d.W, d.ybar);
+  near(s.sy, 0.025, 1e-12, 'S_Y'); assert.equal(s.sw, 5); assert.equal(s.sw2, 5);
+  // день без сделок только затухает: λ = 0,5^(1/125)
+  const s2 = healthStep(s, 0, null);
+  near(s2.sw, 5 * 0.5 ** (1 / 125), 1e-12, 'затухание S_W'); near(s2.sw2, 5 * 0.5 ** (2 / 125), 1e-12, 'затухание S_W2'); near(s2.m, 0.005, 1e-12, 'm не меняется');
+});
+ok('здоровье 3: 250 дней по 4 сделки ровно по +0,37% — m 0,37%, z 0, S_W 542,512, se 0,1020%', () => {
+  const last = healthTrace(flatDays(250, 4, 0.0037)).at(-1);
+  near(last.m, 0.0037, 1e-12, 'm'); near(last.z, 0, 1e-9, 'z'); near(last.sw, 542.512, 5e-4, 'S_W'); near(last.se, 0.001020, 5e-7, 'se');
+  assert.equal(last.s, 'normal');
+});
+ok('здоровье 4: 250 дней по 4 сделки ровно по 0% — z −3,629, тревога', () => {
+  const tr = healthTrace(flatDays(250, 4, 0));
+  near(tr.at(-1).z, -3.629, 5e-4, 'z'); assert.equal(tr.at(-1).s, 'alarm');
+  assert.equal(tr[0].s, 'nodata', 'пока S_W < 100 — «мало данных»');
+  const first = tr.findIndex(x => x.sw >= HEALTH.minW);
+  assert.equal(tr[first - 1].s, 'nodata'); assert.notEqual(tr[first].s, 'nodata');
+});
+ok('здоровье 5: автомат статусов с гистерезисом', () => {
+  const seq = [[-1.6, 'watch'], [-1.2, 'watch'], [-0.9, 'normal'], [-2.3, 'alarm'], [-1.6, 'alarm'], [-1.2, 'watch'], [-0.9, 'normal']];
+  let st = 'normal';
+  for (const [z, want] of seq) { st = nextStatus(st, z); assert.equal(st, want, `z ${z}`); }
+  assert.equal(nextStatus('normal', -1.55), 'watch', 'ровно −1,55 — наблюдение'); assert.equal(nextStatus('watch', -2.25), 'alarm', 'ровно −2,25 — тревога');
+  assert.equal(nextStatus('watch', -1.0), 'watch', 'ровно −1,0 — ещё наблюдение'); assert.equal(nextStatus('alarm', -1.55), 'alarm', 'ровно −1,55 — ещё тревога');
+  assert.equal(nextStatus('alarm', -0.5), 'normal', 'из тревоги сразу в норму'); assert.equal(nextStatus('watch', null), 'watch', 'нет z — без изменений');
+});
+ok('здоровье 6: лимит LOO как у бота — 11,01 при закрытии D0 10,00 пропуск limit, 11,00 считается', () => {
+  const I = [200, 201, 199], S = [400, 404, 399];
+  assert.equal(tradeResult([11.01, 11.5, 10.00], I, S).skip, 'limit');
+  assert.equal(tradeResult([11.00, 11.5, 10.00], I, S).skip, undefined);
+  assert.equal(tradeResult([11.00, 11.5, 10.00, 12345], I, S).r, 0.0455, 'с объёмом — так же');
+  assert.equal(tradeResult([14.325, 13.66, 12.98, 13023500], I, S).skip, 'limit', 'GLXY 06.11.2026: разрыв +10,4%');
+  assert.equal(tradeResult([69, 66.51, 62.22, 5101600], I, S).skip, 'limit', 'TTMI 06.11.2026: разрыв +10,9%');
+  assert.equal(tradeResult([11.5, 11.6, null], I, S).skip, undefined, 'нет закрытия D0 — лимит не проверяется');
+  assert.equal(looLimit(12.98), 14.27, 'вниз до цента'); assert.equal(looLimit(10), 11);
+});
+ok('здоровье: поле health — смены, «с какого дня», пороги, справочные строки, ряд не длиннее 250 дней', () => {
+  // 30 дней по 4 сделки +0,37% (мало данных), затем 270 дней по 4 сделки 0% — норма, наблюдение, тревога; плюс скор 0–1 по +0,1%
+  const tr = [...flatDays(300, 4, 0.0037).slice(0, 120), ...flatDays(300, 4, 0).slice(120)].map(x => ({ ...x, score: 3, cost: 0.001, ex: x.r, exS: x.r }));
+  const rest = Array.from({ length: 300 }, (_, i) => ({ day: addDaysIso('2026-08-17', i), main: false, score: 1, r: 0.001, b: 0, cost: 0.0015, ex: 0.001, exS: 0.001 }));
+  const h = signalHealth([...tr, ...rest]);
+  assert.equal(h.from, '2026-08-17'); assert.equal(h.days, 300); assert.equal(h.n, 1200);
+  assert.equal(h.series.length, 250, 'ряд — последние 250 дней'); assert.equal(h.series.at(-1).d, h.asOf);
+  assert.deepEqual(h.changes.map(c => [c.from, c.to]), [['nodata', 'normal'], ['normal', 'watch'], ['watch', 'alarm']]);
+  assert.equal(h.status, 'alarm'); assert.equal(h.since, h.changes.at(-1).d);
+  assert.ok(h.changes[1].z <= -1.55 && h.changes[2].z <= -2.25);
+  near(h.thrWatch, 0.0037 - 1.55 * h.se, 1e-6, 'порог наблюдения'); near(h.thrAlarm, 0.0037 - 2.25 * h.se, 1e-6, 'порог тревоги');
+  assert.equal(h.spread.days, 250); assert.equal(h.spread.nMain, 1000); assert.equal(h.spread.nRest, 250);
+  near(h.spread.diff, 0 - 0.001, 1e-9, 'основной список минус скор 0–1 за 250 дней');
+  assert.equal(h.live.n, 1200); near(h.live.net, (120 * 0.0037) / 1200 - 0.001, 5e-5, 'после издержек (среднее округлено до 0,01 п.п.)');
+  assert.equal(h.params.mu0, 0.0037); assert.equal(signalHealth([]), null);
+  // день только со сделками скора 0–1: показатель затухает, но день считается
+  const t2 = signalHealth([{ day: '2026-08-17', main: true, r: 0.01, b: 0, cost: 0.001, ex: 0.01, exS: 0.01 }, { day: '2026-08-18', main: false, r: 0.01, b: 0, cost: 0.001, ex: 0.01, exS: 0.01 }]);
+  assert.equal(t2.days, 2); near(t2.sw, 0.5 ** (1 / 125), 1e-3, 'затух'); assert.equal(t2.status, 'nodata'); assert.deepEqual(t2.changes, []); assert.equal(t2.since, '2026-08-17');
+});
 ok('всплеск покупок: z к 36 прошлым месяцам, порог 2, нужен запас в 24 месяца', () => {
   // Малый пример руками: окно 3, запас 3. B3 = 36, 38, 37, 38, 38, 78; на последнем месяце
   // прошлые B3 = 37, 38, 38 (среднее 37.667, sd 0.577) -> z = 40.333 / 0.577 = 69.86
@@ -1117,6 +1189,12 @@ ok('compute: утренний список, счётчик D+1 и всплеск
   assert.equal(m.counter.main.iwm.net, 0.014, 'нетто: 1,5% минус 0,10% на круг'); assert.equal(m.counter.upTo, d1L);
   assert.equal(m.counter.all.n, 1); assert.deepEqual(m.counter.costs, { hi: 0.001, lo: 0.0015, split: 3e7 });
   assert.equal(m.params.dvMin, 1e7); assert.equal(m.params.scoreMin, 2);
+  // здоровье сигнала: одна сделка с подачи после HEALTH.from — мера с бетой 1,17, «мало данных»
+  const h = m.health;
+  assert.ok(h, 'поле health в morning.json');
+  assert.equal(h.from, d1L); assert.equal(h.asOf, d1L); assert.equal(h.n, 1); assert.equal(h.days, 1);
+  assert.equal(h.status, 'nodata'); assert.equal(h.sw, 1); near(h.m, 0.02 - 1.17 * 0.005, 1e-6, 'перевес: +2% минус 1,17 × IWM +0,5%');
+  assert.deepEqual(h.series.map(x => x.d), [d1L]); assert.deepEqual(h.changes, []); assert.equal(h.live.n, 1); assert.equal(h.live.mean, 0.015);
   const old = m.days.find(d => d.date === '2020-02-05');
   assert.ok(old && !old.done && old.entry === null, 'у старых подач дня входа в хранилище нет — результат не выдумывается');
   const b = R('stats.json').breadth;
@@ -1238,7 +1316,8 @@ ok('notify: новая дата подачи даёт одно письмо — 
   assert.match(out, new RegExp(`DDD · .* · скор 2 · \\$50${NB}тыс\\. · просадка глубже 30%\\n`));
   assert.ok(!/EEE/.test(out), 'бумаги со скором 0–1 в письмо построчно не идут');
   assert.match(out, /Ещё 1 бумага со скором 0–1 — на панели\./);
-  assert.match(out, /Только заявки на аукционы: MOO до 9:28 и MOC до 15:50 по Нью-Йорку\. Около 60% перевеса дня — первые 5 минут: покупка по рынку после открытия его съедает\./);
+  assert.match(out, /Только заявки на аукционы: LOO до 9:28 \(лимит \+10% к закрытию дня подачи\) и MOC до 15:50 по Нью-Йорку\. Покупка по рынку после открытия дороже аукциона на 0,3–0,5% и съедает перевес дня\./);
+  assert.ok(!/около 60%|первые 5 минут|MOO/i.test(out), 'устаревшие фразы об исполнении из письма убраны');
   assert.match(out, /Счётчик с 05\.11: 23 сделки, среднее \+0,31% к IWM, \+0,18% к S&P, в плюсе 58%\./);
   assert.ok(out.indexOf('CCC ·') < out.indexOf('BBB ·') && out.indexOf('BBB ·') < out.indexOf('DDD ·'), 'порядок — как в списке (скор, затем сумма)');
 });
@@ -1275,6 +1354,83 @@ ok('notify: --preview печатает образец с оговоркой и �
   const out = execFileSync(process.execPath, [...NOTIFY_ARGS(dir), '--dry-run', '--preview'], { encoding: 'utf8' });
   assert.match(out, /AAA · /); assert.match(out, /Это образец формата, а не новый список/);
   assert.equal(readJson(join(dir, 'state', 'notify.json'), null), null, 'состояние не создано');
+});
+
+// ---------- здоровье сигнала в Telegram (audit-840-health-2026-11-17/REPORT.md, раздел 3.6) ----------
+const hParams = { mu0: 0.0037, sig: 0.03, beta: 1.17, lo: -0.06, hi: 0.15, kcap: 5, half: 125, zWatch: -1.55, zAlarm: -2.25, zBack: -1, minW: 100, spreadDays: 250 };
+const hC0 = { d: nDay(-60), from: 'nodata', to: 'normal', z: 0.67 };
+const mHealth = (extra = {}) => ({
+  from: `${nYear}-08-17`, asOf: nDay(-1), n: 294, days: 63, sw: 177.77, m: 0.00474, se: 0.00207, z: 0.5, status: 'normal', since: hC0.d,
+  thrWatch: 0.000492, thrAlarm: -0.000957, params: hParams,
+  spread: { days: 63, main: 0.0048, rest: 0.0021, diff: 0.0027, nMain: 294, nRest: 180 }, live: { n: 294, days: 59, mean: 0.0043, net: 0.0031, tDays: 2.36 },
+  series: [], changes: [hC0], ...extra,
+});
+// Смена и файл здоровья на день смены: перевес и z в ряду, статус после смены
+const hChange = (d, from, to, z, m, extra = {}) => ({ c: { d, from, to, z }, h: mHealth({ status: to, m, z, since: d, series: [{ d, m, z, s: to }], ...extra }) });
+const sentHealthOf = dir => readJson(join(dir, 'state', 'notify.json'), {}).sentHealth;
+// Состояние, в котором письма и здоровье уже пересеяны (как после первого прогона новой версии)
+function healthDir(name) {
+  const dir = freshDir(name);
+  writeJson(join(dir, 'state', 'notify.json'), { version: 4, sentMorning: [`morning|${nDay(-9)}`], sentHealth: [] });
+  return dir;
+}
+const hBase = [mDay(nDay(-9), [mRow('OLD', 3e5)])];   // уже отправленный список: писем нет, остаются только смены здоровья
+ok('notify: строка здоровья сигнала — после строки счётчика в утреннем и пустом письме; значок у наблюдения и тревоги; «мало данных» — с датой начала', () => {
+  const pdir = freshDir('data-hprev');
+  const preview = health => {
+    writeMorning([mDay(nDay(-1), [mRow('AAA', 3e5)])], mCounter, health ? { health } : {});
+    return execFileSync(process.execPath, [...NOTIFY_ARGS(pdir), '--dry-run', '--preview'], { encoding: 'utf8' });
+  };
+  assert.match(preview(mHealth()), /Счётчик с 05\.11: сделок пока нет\.\nЗдоровье сигнала: норма · перевес за полгода \+0,47% \(история \+0,37%\)\n/);
+  assert.match(preview(mHealth({ status: 'watch', m: 0.0018 })), /\nЗдоровье сигнала: ⚠️ наблюдение · перевес за полгода \+0,18% \(история \+0,37%\)\n/);
+  assert.match(preview(mHealth({ status: 'alarm', m: -0.0005 })), /\nЗдоровье сигнала: 🛑 тревога · перевес за полгода −0,05% \(история \+0,37%\)\n/);
+  assert.match(preview(mHealth({ status: 'nodata' })), /\nЗдоровье сигнала: мало данных \(с 17\.08\)\n/);
+  assert.ok(!/Здоровье сигнала/.test(preview(null)), 'без поля health строки нет');
+  const dir = healthDir('data-hempty');
+  const out = notify([mDay(nDay(-1), [mRow('LOW', 2e5, REST)])], { dir, extra: { listFor: nDay(-1), health: mHealth() } });
+  assert.match(out, /утренний список пуст/);
+  assert.match(out, /Счётчик с 05\.11: сделок пока нет\.\nЗдоровье сигнала: норма · перевес за полгода \+0,47% \(история \+0,37%\)\n/);
+});
+ok('notify: смена статуса здоровья — одно сообщение на ключ health|D+1|статус: наблюдение, тревога, отбой; повтор невозможен', () => {
+  const dir = healthDir('data-hchange');
+  const W = hChange(nDay(-5), 'normal', 'watch', -1.6, 0.0018);
+  let out = notify(hBase, { dir, extra: { health: { ...W.h, changes: [hC0, W.c] } } });
+  assert.match(out, /смен статуса здоровья сигнала к отправке: 1/);
+  assert.match(out, /🩺 Инсайдерский радар · здоровье сигнала: норма → наблюдение\n/);
+  assert.match(out, /\nПеревес дня D\+1 за полгода \(сглаженный\): \+0,18% при историческом \+0,37%; z −1,6 \(наблюдение с −1,55, тревога с −2,25\)\.\n/);
+  assert.match(out, /\nЧто делать: ступень не поднимать, торговать как есть\.\nСкор различает: \+0,27 п\.п\. с 17\.08\. Подробности — на панели\.\n/);
+  assert.deepEqual(sentHealthOf(dir), [`health|${W.c.d}|watch`]);
+  assert.match(notify(hBase, { dir, extra: { health: { ...W.h, changes: [hC0, W.c] } } }), /новых утренних списков нет/, 'тот же ключ второй раз не уходит');
+  const A = hChange(nDay(-3), 'watch', 'alarm', -2.3, -0.0005, { spread: { days: 250, main: 0.001, rest: 0.0014, diff: -0.0004, nMain: 900, nRest: 600 } });
+  out = notify(hBase, { dir, extra: { health: { ...A.h, changes: [hC0, W.c, A.c] } } });
+  assert.match(out, /здоровье сигнала: наблюдение → тревога\n/);
+  assert.match(out, /\nЧто делать: бот — на малую ступень, разбор причин; за 21 год такое было один раз \(май–июнь 2018\)\.\n/);
+  assert.match(out, /\nСкор различает: −0,04 п\.п\. за год — скор не различает\. Подробности — на панели\./);
+  assert.equal((out.match(/🩺/g) ?? []).length, 1, 'прежняя смена не повторяется');
+  const N = hChange(nDay(-1), 'alarm', 'normal', -0.8, 0.003);
+  out = notify(hBase, { dir, extra: { health: { ...N.h, changes: [hC0, W.c, A.c, N.c] } } });
+  assert.match(out, /здоровье сигнала: тревога → норма\nПеревес за полгода \+0,30%, z −0,8\. Работа по плану\.\nПодробности — на панели\.\n/);
+  assert.deepEqual(sentHealthOf(dir).sort(), [`health|${W.c.d}|watch`, `health|${A.c.d}|alarm`, `health|${N.c.d}|normal`].sort());
+});
+ok('notify: здоровье молча — первый прогон с полем health, выход из «мало данных» в норму, смена старше недели', () => {
+  const dir = freshDir('data-hseed');
+  notify(hBase, { dir });                                              // пересев писем без поля health
+  assert.equal(sentHealthOf(dir), undefined, 'без поля health состояние здоровья не заводится');
+  const W = hChange(nDay(-2), 'normal', 'watch', -1.6, 0.0018);
+  let out = notify(hBase, { dir, extra: { health: { ...W.h, changes: [hC0, W.c] } } });
+  assert.match(out, /здоровье сигнала: первый прогон — смены статуса из файла \(1\) считаются отправленными/);
+  assert.ok(!/🩺/.test(out), 'историю не рассылаем');
+  assert.deepEqual(sentHealthOf(dir), [`health|${W.c.d}|watch`]);
+  const dir2 = healthDir('data-hquiet');
+  const NN = { d: nDay(-1), from: 'nodata', to: 'normal', z: 0.5 };
+  out = notify(hBase, { dir: dir2, extra: { health: mHealth({ changes: [NN] }) } });
+  assert.ok(!/🩺/.test(out), 'выход из «мало данных» в норму сообщения не даёт');
+  const old = { d: nDay(-10), from: 'normal', to: 'watch', z: -1.6 };
+  out = notify(hBase, { dir: dir2, extra: { health: mHealth({ status: 'watch', changes: [hC0, old] }) } });
+  assert.ok(!/🩺/.test(out)); assert.match(out, /старше 7 дней — не рассылается/);
+  assert.deepEqual(sentHealthOf(dir2), [`health|${old.d}|watch`]);
+  const dir3 = healthDir('data-hany');
+  assert.match(notify(hBase, { dir: dir3, args: ['--any-date'], extra: { health: mHealth({ status: 'watch', changes: [hC0, old] }) } }), /здоровье сигнала: норма → наблюдение/, '--any-date снимает проверку свежести');
 });
 
 // ---------- доставка: сбой Telegram не теряет письмо (аудит 28.10.2026, C1) ----------
@@ -1415,7 +1571,7 @@ const SITE = 'https://ml371kl.github.io/temp-zero-inode-840/';
 function styleFaults(html) {
   const bad = [];
   const lines = html.split('\n');
-  if (!/^(🔔|ℹ️) <b>Инсайдерский радар · [^<\n]+<\/b>$/u.test(lines[0])) bad.push(`заголовок: ${lines[0]}`);
+  if (!/^(🔔|ℹ️|🩺) <b>Инсайдерский радар · [^<\n]+<\/b>$/u.test(lines[0])) bad.push(`заголовок: ${lines[0]}`);
   if (!new RegExp(`^<a href="${SITE.replace(/[.]/g, '\\.')}">Открыть панель</a> · \\d\\d\\.\\d\\d(\\.\\d{4})?, \\d\\d:\\d\\d МСК$`).test(lines.at(-1))) bad.push(`подвал: ${lines.at(-1)}`);
   if (lines.at(-2) !== '') bad.push('перед подвалом нет пустой строки');
   if (html.length > 4096) bad.push(`длиннее 4096: ${html.length}`);
@@ -2028,6 +2184,15 @@ await okAsync('воркер: /morning — приём по токену, верс
   assert.equal((await m2.json()).marker.by, 'vps', 'первая запись остаётся');
   assert.equal((await (await call('GET', L)).json()).by, 'vps');
   assert.equal((await call('GET', '/morning/letter/сегодня')).status, 404);
+  // отметка сообщения о смене статуса здоровья сигнала: D+1 смены и новый статус
+  const HL = '/morning/letter/2026-11-20-health-watch';
+  assert.equal((await call('GET', HL)).status, 404);
+  assert.equal((await call('PUT', HL, { body: JSON.stringify({ by: 'vps', at: '2026-11-21T03:06:00Z' }) })).status, 401);
+  assert.equal((await call('PUT', HL, { body: JSON.stringify({ by: 'vps', at: '2026-11-21T03:06:00Z' }), token: T })).status, 200);
+  assert.equal((await (await call('GET', HL)).json()).by, 'vps');
+  assert.equal((await call('GET', '/morning/letter/2026-11-20')).status, 404, 'отметка здоровья — не отметка письма того же дня');
+  assert.equal((await call('GET', '/morning/letter/2026-11-20-health-bad')).status, 404);
+  assert.equal((await call('PUT', '/morning/letter/2026-11-20-health-x', { body: JSON.stringify({ by: 'vps', at: '2026-11-21T03:06:00Z' }), token: T })).status, 404);
 });
 await okAsync('воркер: /bars — только с токеном, до 25 тикеров, свой старт для тикера, 429 и сбои названы', async () => {
   const worker = (await import(pathToFileURL(join(ROOT, 'worker', 'index.js')).href)).default;
@@ -2116,7 +2281,7 @@ function fakeWorker({ charts = {}, morning = null, markers = {} } = {}) {
     req.on('end', () => {
       const u = new URL(req.url, 'http://x'), auth = req.headers.authorization ?? null;
       const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
-      const lm = /^\/morning\/letter\/(\d{4}-\d{2}-\d{2})$/.exec(u.pathname);
+      const lm = /^\/morning\/letter\/(\d{4}-\d{2}-\d{2}(?:-health-[a-z]+)?)$/.exec(u.pathname);
       if (lm && req.method === 'GET') return state.markers[lm[1]] ? send(200, state.markers[lm[1]]) : send(404, { error: 'нет' });
       if (lm && req.method === 'PUT') {
         calls.markerPuts.push({ date: lm[1], auth, body: JSON.parse(raw) });
@@ -2173,6 +2338,8 @@ await okAsync('сборка на VPS: бары D0 и открытия докач
     const row = sent.days.find(d => d.date === recentF).rows[0], ref = R('morning.json').days.find(d => d.date === recentF).rows[0];
     for (const k of ['t', 'val', 'mx', 'score', 'main', 'dv', 'px', 'cost', 'tags', 'o', 'c', 'ex', 'exS', 'prev'])
       assert.deepEqual(row[k], ref[k], 'поле ' + k + ' должно совпасть с полным пересчётом');
+    assert.ok(sent.health, 'здоровье сигнала есть и в сборке на VPS');
+    assert.deepEqual(sent.health, R('morning.json').health, 'здоровье сигнала: сборка на VPS = полный пересчёт');
     assert.ok(existsSync(join(work, 'done', `${recentF}.json`)), 'день отмечен собранным');
     // повторный запуск того же дня ничего не делает
     assert.equal(await morningMain(argv, env), 0); assert.equal(api.calls.morningPuts.length, 1);
@@ -2267,6 +2434,42 @@ await okAsync('notify: уточнение, когда полный пересч�
       await notifyW(dir, { tg: tg.base, worker: wk.base, args: ['--any-date'] });
       assert.equal(tg.calls.tg.length, 1);
     } finally { await wk2.close(); }
+  } finally { await wk.close(); await tg.close(); }
+});
+await okAsync('notify: смена здоровья сигнала уходит после письма один раз на двоих отправителей — отметка в воркере, как у писем', async () => {
+  const d = nDay(-1);
+  const W = hChange(d, 'normal', 'watch', -1.6, 0.0018);
+  const health = { ...W.h, changes: [hC0, W.c] };
+  const wk = await fakeWorker(), tg = await fakeApis([]);
+  try {
+    // VPS: письмо за день и смена статуса; после доставки — две отметки
+    const dirV = healthDir('data-hmk-vps');
+    writeMorning([mDay(d, [mRow('AAA', 3e5)])], mCounter, { health });
+    const r1 = await notifyW(dirV, { tg: tg.base, worker: wk.base, args: ['--sender', 'vps'], env: { PAPER_TOKEN: 'tok' } });
+    assert.equal(r1.code, 0, r1.out); assert.equal(tg.calls.tg.length, 2);
+    assert.equal(lineOf(tg.calls.tg[0], 0), '🔔 <b>Инсайдерский радар · утренний список</b>', 'сначала письмо');
+    assert.equal(lineOf(tg.calls.tg[1], 0), '🩺 <b>Инсайдерский радар · здоровье сигнала: норма → наблюдение</b>');
+    for (const c of tg.calls.tg) assert.deepEqual(styleFaults(c.body.text), [], styleFaults(c.body.text).join('; ') + ' :: ' + c.body.text);
+    assert.match(tg.calls.tg[0].body.text, /\nЗдоровье сигнала: ⚠️ наблюдение · перевес за полгода \+0,18% \(история \+0,37%\)\n/);
+    assert.deepEqual(wk.calls.markerPuts.map(x => x.date), [d, `${d}-health-watch`]);
+    assert.deepEqual(tg.calls.nexus.map(b => b.eventId), [`840|morning|${d}`, `840|health|${d}|watch`]);
+    assert.deepEqual(sentHealthOf(dirV), [`health|${d}|watch`]);
+    // GitHub позже, своё состояние без этого ключа: отметки есть — ни письма, ни смены; ключ записан
+    const dirG = healthDir('data-hmk-gh');
+    const r2 = await notifyW(dirG, { tg: tg.base, worker: wk.base });
+    assert.equal(r2.code, 0, r2.out); assert.equal(tg.calls.tg.length, 2, 'дубля нет');
+    assert.match(r2.out, /смена health\|.+\|watch уже отправлена \(vps/);
+    assert.deepEqual(sentHealthOf(dirG), [`health|${d}|watch`]);
+    // Telegram не принял смену — ключ не записан, следующий прогон досылает
+    const wk2 = await fakeWorker(), tg2 = await fakeApis([TG_OK, { status: 500, body: { ok: false, error_code: 500, description: 'Internal Server Error' } }]);
+    try {
+      const dirF = healthDir('data-hmk-fail');
+      const r3 = await notifyW(dirF, { tg: tg2.base, worker: wk2.base });
+      assert.notEqual(r3.code, 0); assert.deepEqual(sentHealthOf(dirF), [], 'недоставленная смена не числится отправленной');
+      const r4 = await notifyW(dirF, { tg: tg2.base, worker: wk2.base });
+      assert.equal(r4.code, 0, r4.out); assert.equal(tg2.calls.tg.length, 3, 'досылается одна смена');
+      assert.match(tg2.calls.tg[2].body.text, /здоровье сигнала: норма → наблюдение/); assert.deepEqual(sentHealthOf(dirF), [`health|${d}|watch`]);
+    } finally { await wk2.close(); await tg2.close(); }
   } finally { await wk.close(); await tg.close(); }
 });
 await okAsync('crosscheck.mjs: пишет crossCheck в morning.json по списку VPS за ту же дату; без списка, за другую дату или при недоступном воркере молчит', async () => {

@@ -1,10 +1,13 @@
-// Telegram-уведомления. Повод ровно один: ВЫШЕЛ УТРЕННИЙ СПИСОК — покупки инсайдеров по подачам
+// Telegram-уведомления. Поводов два. Главный — ВЫШЕЛ УТРЕННИЙ СПИСОК — покупки инсайдеров по подачам
 // последнего дня, которые можно купить на открытии следующего торгового дня и продать на его
 // закрытии (D+1; ревизия 04.11.2026 и независимая проверка, docs/ЧТО-РАБОТАЕТ.md). Одно письмо на
 // дату подачи. Если основной список (оборот от $10 млн в день, скор от 2) пуст, письмо всё равно уходит — коротким
 // «сигналов нет» за день, для которого собран список (morning.listFor): иначе тишина не отличалась бы от
 // «конвейер встал» (ревизия данных 04.11.2026, П14). Письма о позициях рабочего набора «у максимума, 3 мес.»
 // убраны: набор альфы не дал.
+// Второй, редкий повод — СМЕНИЛСЯ СТАТУС «ЗДОРОВЬЯ СИГНАЛА» (morning.health, scripts/lib/morning.mjs, signalHealth; меньше одного
+// сообщения в год): одно сообщение на ключ health|<D+1>|<новый статус>, кроме выхода из «мало данных» в «норму». В каждом утреннем
+// и пустом письме — строка со статусом после строки счётчика (audit-840-health-2026-11-17/REPORT.md, раздел 3.6).
 //
 // Без секретов (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) в чат ничего не уходит — прод не блокирует.
 // Состояние «что уже отправлено» — data/state/notify.json (живёт на ветке data). Дата попадает
@@ -169,7 +172,7 @@ async function markerPut(date) {
     } catch (error) { console.error('[notify] отметка письма не отправлена:', error?.message || error); }
     await sleep(1500);
   }
-  console.error(`[notify] ВНИМАНИЕ: письмо за ${date} ушло, а отметки в воркере нет — ежедневная сборка на GitHub может отправить его повторно`);
+  console.error(`[notify] ВНИМАНИЕ: сообщение ${date} ушло, а отметки в воркере нет — ежедневная сборка на GitHub может отправить его повторно`);
   return false;
 }
 
@@ -237,10 +240,11 @@ if (args.includes('--test')) {
   }
   const ok = 'sent' === await send(
     head('ℹ️', 'Проверка связи') + '\n'
-    + 'Связка работает. Сюда приходит ровно одно событие: <b>утренний список</b> — покупки инсайдеров '
+    + 'Связка работает. Сюда приходит <b>утренний список</b> — покупки инсайдеров '
     + 'по вчерашним подачам в ликвидных бумагах (оборот от $10\u00a0млн в день, скор от 2).\n'
-    + 'Только заявки на аукционы: MOO до 9:28 и MOC до 15:50 по Нью-Йорку. '
-    + 'В дни без подходящих бумаг придёт короткое «сигналов нет»: тишина значит, что сборка не вышла.\n\n' + footer());
+    + 'Только заявки на аукционы: LOO до 9:28 (лимит +10% к закрытию дня подачи) и MOC до 15:50 по Нью-Йорку. '
+    + 'В дни без подходящих бумаг придёт короткое «сигналов нет»: тишина значит, что сборка не вышла. '
+    + 'Отдельное сообщение — только при смене статуса «здоровья сигнала» (реже раза в год).\n\n' + footer());
   if (ok) console.log('[notify] тестовое сообщение отправлено');
   process.exit(ok ? 0 : 1);
 }
@@ -273,6 +277,41 @@ function nextBusinessDay(iso) {
 const TAG_LABEL = { off: 'офицер', deep: 'просадка глубже 30%', big: '≥$1\u00a0млн' };
 const TOP_N = 10;
 const signed2 = x => fmtNum(x * 100, 2, { fixed: true, sign: true }) + '%';
+// Здоровье сигнала (morning.health): строка письма и сообщение о смене статуса. Значок — не в начале строки: эмодзи только в заголовке.
+const H_LABEL = { normal: 'норма', watch: 'наблюдение', alarm: 'тревога', nodata: 'мало данных' };
+const H_ICON = { watch: '⚠️ ', alarm: '🛑 ' };
+const H_MU0 = 0.0037;   // запасное значение, если в файле нет params
+const signedZ = z => fmtNum(z, 1, { sign: true });
+function healthLine(h) {
+  if (!h || !H_LABEL[h.status]) return null;
+  if (h.status === 'nodata') return `Здоровье сигнала: мало данных (с ${fmtDate(h.from)})`;
+  return `Здоровье сигнала: ${H_ICON[h.status] ?? ''}${H_LABEL[h.status]} · перевес за полгода ${signed2(h.m)} (история ${signed2(h.params?.mu0 ?? H_MU0)})`;
+}
+// Сообщение о смене статуса c = { d, from, to, z } (audit-840-health-2026-11-17/REPORT.md, раздел 3.6). Перевес и z — на день смены.
+function healthMessage(h, c) {
+  const p = h.params ?? {};
+  const at = (h.series ?? []).find(x => x.d === c.d) ?? { m: h.m, z: h.z };
+  const z = c.z ?? at.z;
+  const lines = [head('🩺', `здоровье сигнала: ${H_LABEL[c.from] ?? esc(c.from)} → ${H_LABEL[c.to] ?? esc(c.to)}`)];
+  if (c.to === 'normal') {
+    lines.push(`Перевес за полгода ${signed2(at.m)}, z ${signedZ(z)}. Работа по плану.`);
+  } else if (c.to === 'nodata') {
+    lines.push(`Данных для статуса мало: сумма весов сглаживания ниже ${fmtNum(p.minW ?? 100, 0)}.`);
+  } else {
+    lines.push(`Перевес дня D+1 за полгода (сглаженный): ${signed2(at.m)} при историческом ${signed2(p.mu0 ?? H_MU0)}; z ${signedZ(z)} `
+      + `(наблюдение с ${fmtNum(p.zWatch ?? -1.55, 2)}, тревога с ${fmtNum(p.zAlarm ?? -2.25, 2)}).`);
+    lines.push(c.to === 'alarm'
+      ? 'Что делать: бот — на малую ступень, разбор причин; за 21 год такое было один раз (май–июнь 2018).'
+      : 'Что делать: ступень не поднимать, торговать как есть.');
+    const sp = h.spread;
+    if (sp && Number.isFinite(sp.diff)) {
+      const when = sp.days >= (p.spreadDays ?? 250) ? 'за год' : `с ${fmtDate(h.from)}`;
+      lines.push(`Скор различает: ${fmtNum(sp.diff * 100, 2, { fixed: true, sign: true })} п.п. ${when}${sp.diff <= 0 ? ' — скор не различает' : ''}. Подробности — на панели.`);
+      return [...lines, '', footer()].join('\n');
+    }
+  }
+  return [...lines, 'Подробности — на панели.', '', footer()].join('\n');
+}
 function counterLine(c) {
   const s = c?.main;
   const from = fmtDate(c?.from);
@@ -297,7 +336,9 @@ function emptyMessage(day, counter, cov) {
   if (rest.length) lines.push(`Ещё ${plural(rest.length, 'бумага', 'бумаги', 'бумаг')} со скором 0–1 — на панели.`);
   if (cov?.status === 'partial' && cov.indexed > 0) lines.push(`Индекс разобран не полностью: ${cov.collected ?? 0} из ${cov.indexed} форм.`);
   if (sourceNote()) lines.push(sourceNote());
-  lines.push('', counterLine(counter), '', footer());
+  lines.push('', counterLine(counter));
+  if (healthLine(morning?.health)) lines.push(healthLine(morning.health));
+  lines.push('', footer());
   return lines.join('\n');
 }
 // Уточнение после полной пересборки: чем основной список отличается от того, что ушло с VPS. Строки — тикер, скор, сумма.
@@ -325,8 +366,10 @@ function morningMessage(day, counter, note = '') {
   ];
   if (main.length > TOP_N) lines.push(`и ещё ${main.length - TOP_N} — на панели`);
   if (rest.length) lines.push('', `Ещё ${plural(rest.length, 'бумага', 'бумаги', 'бумаг')} со скором 0–1 — на панели.`);
-  // Исполнение — только аукционы: около 60% перевеса дня набирается в первые 5 минут после открытия
-  lines.push('', 'Только заявки на аукционы: MOO до 9:28 и MOC до 15:50 по Нью-Йорку. Около 60% перевеса дня — первые 5 минут: покупка по рынку после открытия его съедает.', counterLine(counter));
+  // Исполнение — только аукционы: сразу после открытия цена продавца выше цены аукциона на 0,3–0,5%, покупка по рынку съедает перевес дня
+  // (проверка рычагов 17.11.2026, раздел 2)
+  lines.push('', 'Только заявки на аукционы: LOO до 9:28 (лимит +10% к закрытию дня подачи) и MOC до 15:50 по Нью-Йорку. Покупка по рынку после открытия дороже аукциона на 0,3–0,5% и съедает перевес дня.', counterLine(counter));
+  if (healthLine(morning?.health)) lines.push(healthLine(morning.health));
   if (note) lines.push('', note);
   lines.push('', footer());
   return lines.join('\n');
@@ -359,8 +402,26 @@ const sent = new Set(state.version === NOTIFY_VERSION ? (state.sentMorning ?? []
 state.version = NOTIFY_VERSION;
 delete state.sentTrades; delete state.sentPositions;   // ключи прежних схем больше не читаются
 const dayId = d => `morning|${d.date}`;
+
+// Здоровье сигнала: ключ health|<D+1>|<новый статус>, одно сообщение на ключ, «отправил → запомнил» (state.sentHealth). Выход из
+// «мало данных» в «норму» сообщения не даёт. Первый прогон с полем (state.sentHealth ещё нет) молча считает все смены файла
+// отправленными: историю не рассылаем. Смена старше HEALTH_FRESH_DAYS дней (её D+1) не рассылается, а записывается отправленной:
+// так выглядел бы пересчёт истории задним числом, а не новая смена. Без поля health в файле состояние здоровья не трогается.
+const HEALTH_FRESH_DAYS = 7;
+const health = morning?.health ?? null;
+const healthSeeding = !!health && !Array.isArray(state.sentHealth);
+const sentHealth = new Set(state.sentHealth ?? []);
+const healthId = c => `health|${c.d}|${c.to}`;
+// Отметка в воркере (общая с письмами): /morning/letter/<D+1>-health-<статус>
+const healthMarker = c => `${c.d}-health-${c.to}`;
+const healthChanges = (health?.changes ?? []).filter(c => !(c.from === 'nodata' && c.to === 'normal') && H_LABEL[c.to] && /^\d{4}-\d{2}-\d{2}$/.test(c.d ?? ''));
+if (healthSeeding) {
+  for (const c of healthChanges) sentHealth.add(healthId(c));
+  console.log(`[notify] здоровье сигнала: первый прогон — смены статуса из файла (${healthChanges.length}) считаются отправленными`);
+}
 function saveState() {
   state.sentMorning = [...sent].slice(-400);
+  if (health || Array.isArray(state.sentHealth)) state.sentHealth = [...sentHealth].slice(-200);
   writeJson(statePath, state, true);
 }
 
@@ -381,10 +442,24 @@ const hasLetter = d => mainOf(d).length > 0 || (d.date === listFor && emptyOk);
 // (ручной прогон после простоя).
 const fresh = days.filter(d => hasLetter(d) && !sent.has(dayId(d))
   && (args.includes('--any-date') || today <= nextBusinessDay(d.date))).reverse();   // от старого к свежему
+// Смены статуса здоровья, о которых ещё не писали (от старой к свежей — так они лежат в файле)
+const healthDue = [];
+for (const c of healthChanges) {
+  if (sentHealth.has(healthId(c))) continue;
+  if (!args.includes('--any-date') && c.d < addDaysIso(today, -HEALTH_FRESH_DAYS)) {
+    console.log(`[notify] здоровье сигнала: смена ${healthId(c)} старше ${HEALTH_FRESH_DAYS} дней — не рассылается, записана отправленной`);
+    sentHealth.add(healthId(c));
+    continue;
+  }
+  healthDue.push(c);
+}
 saveState();
 // Уточнение по crossCheck может понадобиться и без новых списков: письмо ушло с VPS раньше, а пересчёт разошёлся с ним позже
-if (!fresh.length && morning?.crossCheck?.same !== false) { console.log('[notify] новых утренних списков нет'); process.exit(0); }
-console.log(`[notify] новых утренних списков: ${fresh.length}${fresh.some(d => !mainOf(d).length) ? ' (в том числе пустой день)' : ''}`);
+if (!fresh.length && morning?.crossCheck?.same !== false && !healthDue.length) { console.log('[notify] новых утренних списков нет'); process.exit(0); }
+console.log(fresh.length || morning?.crossCheck?.same === false
+  ? `[notify] новых утренних списков: ${fresh.length}${fresh.some(d => !mainOf(d).length) ? ' (в том числе пустой день)' : ''}`
+  : '[notify] новых утренних списков нет');
+if (healthDue.length) console.log(`[notify] смен статуса здоровья сигнала к отправке: ${healthDue.length}`);
 
 // ---------- отправка ----------
 // eventId — «840|morning|дата подачи»: список, доставленный повторно, на хабе ляжет на прежнюю запись.
@@ -410,14 +485,26 @@ if (cc && cc.same === false && cc.listFor && (cc.diff ?? []).length && !sent.has
   const mk = await markerGet(cc.listFor);
   if (mk?.by === 'vps' && mk.ok) messages.push({ date: null, text: fixMessage(cc), markup: undefined, id: `fix|${cc.listFor}`, eventId: `840|fix|${cc.listFor}` });
 }
-if (!messages.length) { console.log('[notify] писем к отправке нет'); process.exit(0); }
+// Смена статуса здоровья — после писем. Уходит с той сборкой, которая первой её посчитала (обычно VPS около 22:05 по Нью-Йорку):
+// отправитель кладёт отметку в воркер, вторая сборка видит её и не повторяет. Воркер не ответил — отправляем (как у писем).
+for (const c of healthDue) {
+  const mk = await markerGet(healthMarker(c));
+  if (mk?.ok) {
+    console.log(`[notify] смена ${healthId(c)} уже отправлена (${mk.by}, ${mk.at}) — повторно не шлём`);
+    sentHealth.add(healthId(c));
+    continue;
+  }
+  messages.push({ date: null, marker: healthMarker(c), health: true, text: healthMessage(health, c), markup: undefined, id: healthId(c), eventId: '840|' + healthId(c) });
+}
+const remember = m => (m.health ? sentHealth : sent).add(m.id);
+if (!messages.length) { saveState(); console.log('[notify] писем к отправке нет'); process.exit(0); }
 
 if (DRY) {
   // Пробный прогон «доставляет» в консоль и двигает состояние так же, как боевой: на этом
-  // стоят самотесты последовательных прогонов. В сеть он не ходит.
+  // стоят самотесты последовательных прогонов. Отметки воркера он только читает.
   for (const m of messages) {
     console.log('\n' + '─'.repeat(46) + '\n' + plain(m.text));
-    sent.add(m.id);
+    remember(m);
   }
   saveState();
   process.exit(0);
@@ -429,8 +516,8 @@ for (const [k, m] of messages.entries()) {
   if (k) await sleep(1200);
   const outcome = await send(m.text, m.markup, m.eventId);
   if (outcome === 'fail') { failCount++; continue; }
-  if (outcome === 'sent') { okCount++; if (m.date) await markerPut(m.date); }
-  sent.add(m.id);
+  if (outcome === 'sent') { okCount++; if (m.date || m.marker) await markerPut(m.marker ?? m.date); }
+  remember(m);
   saveState();
 }
 console.log('[notify] отправлено в Telegram:', okCount, 'из', messages.length);
