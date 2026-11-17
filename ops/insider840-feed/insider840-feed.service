@@ -3,6 +3,8 @@ Description=Инсайдерский радар 840 · лента формы 4 �
 Wants=network-online.target
 After=network-online.target
 # Сбой посреди дня перезапускается (состояние читается из журнала); шесть стартов в час гасят только петлю.
+# Сам сборщик выходит с ошибкой, когда лента не читается 15 минут (scripts/lib/feed.mjs, FEED.blindExitMin): цикл «15 минут слепоты +
+# RestartSec» — не больше четырёх стартов в час, до предела StartLimitBurst не доходит, тревога приходит на каждый выход.
 StartLimitIntervalSec=3600
 StartLimitBurst=6
 
