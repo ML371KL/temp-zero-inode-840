@@ -40,6 +40,16 @@ export const MORNING = {
   prevMax: 365,         // окно поля prev (повтор), календарных дней
 };
 
+// ЗДОРОВЬЕ СИГНАЛА (audit-840-health-2026-11-17/REPORT.md, раздел 3; согласовано 17.11.2026). Один показатель — сглаженный перевес
+// дня D+1 основного списка: сделка — остаток к IWM с бетой 1,17, обрезанный на −6% и +15%; день весит не больше пяти сделок;
+// экспоненциальное сглаживание с полупериодом 125 дней от первого D+1 после подачи 14.08.2026; статус — по отставанию от исторических
+// +0,37% в единицах ошибки (z) с гистерезисом. limit — лимит заявки LOO бота (+10% к закрытию дня подачи): сделка выше него пропускается
+// и в счётчике, и здесь. spreadDays — окно справочной строки «скор различает».
+export const HEALTH = {
+  from: '2026-08-14', beta: 1.17, lo: -0.06, hi: 0.15, kcap: 5, half: 125, mu0: 0.0037, sig: 0.03,
+  zWatch: -1.55, zAlarm: -2.25, zBack: -1.0, minW: 100, limit: 0.10, spreadDays: 250,
+};
+
 // Повтор (ревизия 10.11.2026, раздел 4, audit-840-fresh-2026-11-10): если у бумаги уже была покупка инсайдера за последние 14 дней,
 // перевес D+1 вдвое меньше (+0,23…0,26% против +0,44…0,51% в обеих половинах истории). Отбор списка от этого НЕ зависит: поле prev
 // строки читает теневой вариант бота (ibkr-bot-840, [shadow]), который понижает повторы в очереди дня внутри того же скора.
@@ -138,6 +148,9 @@ export function buildDayFull(rows, p = MORNING) {
 }
 export const buildDay = (rows, p = MORNING) => buildDayFull(rows, p).rows;
 
+// Лимит заявки LOO по закрытию D0 — как у бота: × (1 + limit), вниз до цента
+export const looLimit = (px, h = HEALTH) => Math.floor(px * (1 + h.limit) * 100 + 1e-9) / 100;
+
 // Результат одной сделки. entry/iwm/spy — [открытие, закрытие, вчерашнее закрытие] из одного
 // ответа источника (lib/opens.mjs). Пропуск — это причина, а не ноль: пропущенная сделка не
 // должна ни улучшать, ни портить счётчик. Результат считается сразу к IWM (ex) и к SPY (exS):
@@ -151,6 +164,10 @@ export function tradeResult(entry, iwm, spy, p = MORNING) {
   const vol = entry[3];
   if (vol !== null && vol !== undefined ? !(vol > 0) : (entry[2] !== null && entry[2] !== undefined && entry[0] === entry[2])) return { skip: 'frozen' };
   if (entry[0] < p.minPx) return { skip: 'px' };
+  // Лимит LOO: бот покупает на аукционе открытия с лимитом «закрытие D0 × 1,10, вниз до цента» (ibkr-bot-840, plan.loo_limit) и бумагу,
+  // открывшуюся выше лимита, не получает. entry[2] — вчерашнее закрытие из того же ответа, то есть закрытие D0. Счётчик и здоровье сигнала
+  // считают ровно то, что бот может купить (audit-840-health-2026-11-17, раздел 2.6: с 05.11 это GLXY и TTMI 06.11). Нет закрытия D0 — не проверяется.
+  if (entry[2] > 0 && entry[0] > looLimit(entry[2]) + 1e-9) return { skip: 'limit' };
   const ok = b => b && b[0] > 0 && b[1] > 0;
   if (!ok(iwm) || !ok(spy)) return { skip: 'nobench' };
   const r = entry[1] / entry[0] - 1;
@@ -198,6 +215,81 @@ export function summarize(trades, p = MORNING) {
     cost: rnd(mean(trades.map(x => x.cost ?? p.costHi)), 5),
     iwm: metrics(trades, 'ex', p),
     spy: metrics(trades, 'exS', p),
+  };
+}
+
+// ---------- Здоровье сигнала ----------
+// Спецификация — audit-840-health-2026-11-17/REPORT.md, разделы 3.1–3.9; методика для владельца — docs/ЧТО-РАБОТАЕТ.md, «Здоровье сигнала».
+// Статус пересчитывается от первого D+1 целиком при каждой сборке: одинаковые данные дают одинаковый статус и одинаковые смены.
+const rn = (v, k) => (v === null || v === undefined || !Number.isFinite(v) ? null : rnd(v, k));
+// Мера сделки (3.2): y = clip(r − β·b, lo, hi); r и b — открытие → закрытие D+1 бумаги и IWM
+export const healthY = (r, b, h = HEALTH) => Math.min(h.hi, Math.max(h.lo, r - h.beta * b));
+// Мера дня (3.2): ys — меры сделок основного списка за день. Вес дня — число сделок, но не больше kcap; нет сделок — вес 0.
+export function healthDay(ys, h = HEALTH) {
+  const n = ys.length;
+  return { n, W: Math.min(n, h.kcap), ybar: n ? ys.reduce((s, y) => s + y, 0) / n : null };
+}
+// Шаг сглаживания (3.3). s — { sw, sy, sw2 } прошлого дня (нули на старте). День с весом 0 только затухает.
+export function healthStep(s, W, ybar, h = HEALTH) {
+  const lam = 0.5 ** (1 / h.half);
+  const sw = lam * s.sw + W, sy = lam * s.sy + (W ? W * ybar : 0), sw2 = lam * lam * s.sw2 + W;
+  if (!(sw > 0)) return { sw, sy, sw2, m: null, se: null, z: null };
+  const m = sy / sw, se = h.sig * Math.sqrt(sw2) / sw;
+  return { sw, sy, sw2, m, se, z: (m - h.mu0) / se };
+}
+// Автомат статусов (3.4): normal | watch | alarm. Тревога — из любого состояния при z ≤ zAlarm; наблюдение — из нормы при z ≤ zWatch;
+// из наблюдения в норму — при z > zBack; из тревоги — в норму при z > zBack, в наблюдение при zWatch < z ≤ zBack. Нет z — без изменений.
+export function nextStatus(st, z, h = HEALTH) {
+  if (z === null || z === undefined || !Number.isFinite(z)) return st;
+  if (z <= h.zAlarm) return 'alarm';
+  if (st === 'normal') return z <= h.zWatch ? 'watch' : 'normal';
+  if (st === 'watch') return z > h.zBack ? 'normal' : 'watch';
+  if (st === 'alarm') return z > h.zBack ? 'normal' : z > h.zWatch ? 'watch' : 'alarm';
+  return st;
+}
+// Ход показателя по дням. trades — сделки списка от $10 млн (скор любой) с результатом, с подачи h.from: [{ day, main, r, b }],
+// day — D+1. День — D+1 хотя бы с одной такой сделкой (3.1). Автомат работает с первого дня; пока sw < minW, показывается nodata.
+export function healthTrace(trades, h = HEALTH) {
+  const byDay = new Map();
+  for (const x of trades) (byDay.get(x.day) ?? byDay.set(x.day, []).get(x.day)).push(x);
+  let s = { sw: 0, sy: 0, sw2: 0 }, st = 'normal';
+  return [...byDay.keys()].sort().map(d => {
+    const day = healthDay(byDay.get(d).filter(x => x.main).map(x => healthY(x.r, x.b, h)), h);
+    s = healthStep(s, day.W, day.ybar, h);
+    st = nextStatus(st, s.z, h);
+    return { d, ...day, ...s, st, s: s.sw < h.minW ? 'nodata' : st };
+  });
+}
+// Поле morning.json → health (3.9). trades — как у healthTrace, плюс score, ex, cost (справочные строки 3.5). Нет сделок — null.
+// series — последние keep дней { d, m, z, s }, changes — все смены показанного статуса { d, from, to, z }, since — день последней смены.
+export function signalHealth(trades, h = HEALTH, { keep = 250 } = {}) {
+  const rows = healthTrace(trades, h);
+  if (!rows.length) return null;
+  const last = rows.at(-1), changes = [];
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i].s !== rows[i - 1].s) changes.push({ d: rows[i].d, from: rows[i - 1].s, to: rows[i].s, z: rn(rows[i].z, 3) });
+  }
+  // Справочные строки (3.5): различение скором за последние spreadDays дней показателя (пока их меньше — с первого) и живые данные
+  const win = new Set(rows.slice(-h.spreadDays).map(x => x.d));
+  const ym = [], yr = [];
+  for (const x of trades) if (win.has(x.day)) (x.main ? ym : yr).push(healthY(x.r, x.b, h));
+  const avg = a => (a.length ? mean(a) : null);
+  const sMain = avg(ym), sRest = avg(yr);
+  const main = trades.filter(x => x.main);
+  const sum = summarize(main);
+  return {
+    from: rows[0].d, asOf: last.d, n: main.length, days: rows.length,
+    sw: rn(last.sw, 3), m: rn(last.m, 6), se: rn(last.se, 6), z: rn(last.z, 3), status: last.s,
+    since: changes.length ? changes.at(-1).d : rows[0].d,
+    thrWatch: last.se === null ? null : rn(h.mu0 + h.zWatch * last.se, 6), thrAlarm: last.se === null ? null : rn(h.mu0 + h.zAlarm * last.se, 6),
+    params: { mu0: h.mu0, sig: h.sig, beta: h.beta, lo: h.lo, hi: h.hi, kcap: h.kcap, half: h.half, zWatch: h.zWatch, zAlarm: h.zAlarm, zBack: h.zBack, minW: h.minW, spreadDays: h.spreadDays },
+    spread: {
+      days: win.size, main: rn(sMain, 6), rest: rn(sRest, 6), diff: sMain === null || sRest === null ? null : rn(sMain - sRest, 6),
+      nMain: ym.length, nRest: yr.length,
+    },
+    live: { n: sum.n, days: sum.days, mean: sum.iwm?.mean ?? null, net: sum.iwm?.net ?? null, tDays: sum.iwm?.tDays ?? null },
+    series: rows.slice(-keep).map(x => ({ d: x.d, m: rn(x.m, 6), z: rn(x.z, 3), s: x.s })),
+    changes,
   };
 }
 
