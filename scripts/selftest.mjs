@@ -3331,6 +3331,20 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.equal(applyGates({ code: 'P', px: 25, fn: {}, sec: 'Series A Preference Shares' }, { close: 25 }).drop, 'security');
     for (const s of ['Common Stock', 'Ordinary Shares', 'American Depositary Shares', 'Class A Common Stock']) assert.equal(isNonCommon(s), false, s);
   });
+
+  ok('A2: покупка с ценой формы выше закрытия дня сделки больше чем в 1,25 раза — не покупка (Cemex 25.09.2026)', () => {
+    // 400 800 сертификатов по 17,28 песо при цене расписки $9,71: «сумма» $6,93 млн, балл «от $1 млн»
+    const cx = { code: 'P', px: 17.28, sh: 400800, val: 6925824, fn: { wavg: 1 }, sec: 'Ordinary Participation Certificates (CEMEX.CPO)' };
+    assert.equal(applyGates(cx, { close: 9.71 }).drop, 'premium');
+    const base = { code: 'P', px: 10, fn: {}, di: 'D' };
+    assert.equal(applyGates(base, { close: 8.01 }).ok, true, 'отношение 1,248 — проходит');
+    assert.equal(applyGates(base, { close: 8 }).ok, true, 'ровно 1,25 — проходит: порог строгий');
+    assert.equal(applyGates(base, { close: 7.99 }).drop, 'premium');
+    assert.equal(applyGates(base, { close: 0.9 }).drop, 'outlier', 'больше десятикратной — по-прежнему «выброс»');
+    assert.equal(applyGates({ ...base, code: 'S' }, { close: 7 }).ok, true, 'продаж правило не касается');
+    assert.equal(applyGates(base, { close: null, noPrice: true }).ok, true, 'нет котировки — сверять не с чем');
+    assert.equal(applyGates({ ...base, fn: { offering: 1 } }, { close: 7 }).drop, 'offering', 'у размещения остаётся своя причина');
+  });
 }
 
 rmSync(TMP, { recursive: true, force: true });
