@@ -55,6 +55,11 @@ export function loadAllTrades(dataDir) {
     const k = `${r.cik}|${ownerKeyOf(r)}|${r.tdate}|${r.code}|${secKey(r.sec)}`;
     (groups.get(k) ?? groups.set(k, []).get(k)).push(r);
   }
+  // Второй проход — только для поправок, не нашедших исходную форму: поправка, добавившая или убравшая подателя с наименьшим
+  // номером, получает другой ключ (TMUS 15.03.2018: к форме на $13,3 млн добавлен податель с меньшим CIK; 11 таких поправок за
+  // 2016–2026). Группа из одних поправок ищет исходную форму среди строк того же эмитента, даты сделки, кода и класса по
+  // пересечению составов подателей. Исходные формы разных лиц между собой не объединяются; подходящих групп несколько — не трогаем.
+  const rejoined = rejoinOrphanAmendments(groups);
   const out = [];
   let replaced = 0, exactDups = 0, keptOriginals = 0;
   for (const g of groups.values()) {
@@ -72,8 +77,31 @@ export function loadAllTrades(dataDir) {
   // P/S. Пока этого нет, безопаснее не гасить ничего: маркеры поправок лежат в shard.amend.
   return {
     trades: out,
-    stats: { raw: byKey.size, replacedByAmendment: replaced, exactDuplicates: exactDups, separateOriginals: keptOriginals, amendments: amend.length },
+    stats: { raw: byKey.size, replacedByAmendment: replaced, exactDuplicates: exactDups, separateOriginals: keptOriginals, amendments: amend.length, rejoinedAmendments: rejoined },
   };
+}
+
+// groups — Map(ключ -> строки). Группа из одних поправок (4/A) присоединяется к единственной группе того же эмитента, даты сделки,
+// кода и класса, где есть исходная форма и хотя бы один общий податель. Возвращает число присоединённых строк.
+export function rejoinOrphanAmendments(groups) {
+  const bucketOf = r => `${r.cik}|${r.tdate}|${r.code}|${secKey(r.sec)}`;
+  const ownersOf = g => { const s = new Set(); for (const r of g) for (const o of r.owners ?? []) if (o?.cik > 0) s.add(o.cik); return s; };
+  const buckets = new Map();
+  for (const [k, g] of groups) { const b = bucketOf(g[0]); (buckets.get(b) ?? buckets.set(b, []).get(b)).push(k); }
+  let n = 0;
+  for (const keys of buckets.values()) {
+    if (keys.length < 2) continue;
+    for (const k of keys) {
+      const g = groups.get(k);
+      if (!g || g.some(r => r.form !== '4/A')) continue;
+      const mine = ownersOf(g);
+      if (!mine.size) continue;
+      const hosts = keys.filter(h => h !== k && groups.has(h) && groups.get(h).some(r => r.form !== '4/A') && [...ownersOf(groups.get(h))].some(c => mine.has(c)));
+      if (hosts.length !== 1) continue;
+      groups.get(hosts[0]).push(...g); groups.delete(k); n += g.length;
+    }
+  }
+  return n;
 }
 
 // Устойчивый признак состава подателей строки: наименьший CIK (0 — подателей нет). От порядка подателей не зависит.
