@@ -52,12 +52,20 @@ const restore = () => {          // вернуть из полной копии 
 // минимума в ответе нет: сборка «как на сервере» его не выдумывает и остаётся при том же правиле, что и эталон.
 const fullOpens = readOpens(FULL);
 const fullLows = readLows(FULL);
-const prevLows = new Map();          // тикер -> Map(дата сделки -> минимум предыдущего бара)
-for (const [k, v] of fullLows) if (v.length > 1) { const [t, d] = k.split('|'); (prevLows.get(t) ?? prevLows.set(t, new Map()).get(t)).set(d, v[1]); }
+const prevLows = new Map(), lowDays = new Map();          // тикер -> Map(дата сделки -> минимум предыдущего бара); тикер -> даты слоя
+for (const [k, v] of fullLows) {
+  const [t, d] = k.split('|');
+  (lowDays.get(t) ?? lowDays.set(t, []).get(t)).push(d);
+  if (v.length > 1) (prevLows.get(t) ?? prevLows.set(t, new Map()).get(t)).set(d, v[1]);
+}
 const chartFor = (sym, from) => {
-  const s = readPriceCache(FULL, sym);
-  if (!s?.length) return null;
-  const rows = s.filter(r => r[0] >= from);
+  const s = readPriceCache(FULL, sym) ?? [];
+  // Тикер формы, который сборка не ведёт в кэше цен (другой класс акций эмитента: у Biglari формы подаются на BH, а бумага списка —
+  // BH-A): настоящий источник отдал бы его бары, а в копии данных они есть только в слое минимумов — дополняем ряд этими днями
+  const have = new Set(s.map(r => r[0]));
+  const extra = (lowDays.get(sym) ?? []).filter(d => !have.has(d)).map(d => [d, fullLows.get(`${sym}|${d}`)[0], fullLows.get(`${sym}|${d}`)[0], 0]);
+  const rows = [...s, ...extra].filter(r => r[0] >= from).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  if (!rows.length) return null;
   const ov = d => { const o = opensOf(fullOpens, sym, d); return o ? [o[0], o[1]] : null; };
   const low = rows.map((r, i) => fullLows.get(`${sym}|${r[0]}`)?.[0] ?? (rows[i + 1] ? prevLows.get(sym)?.get(rows[i + 1][0]) : undefined) ?? null);
   return { chart: { result: [{
