@@ -3204,5 +3204,105 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   }
 }
 
+// ==================== АУДИТ ФОРМ 17.11.2026 (audit-840-forms-2026-11-17/REPORT.md), пакет A: разбор и отбор ====================
+{
+  const { titleFlags, roleFlags, PARSER_REV, QUARTER_REV } = await import('./lib/edgar.mjs');
+  // Квартальный датасет с заданными строками сделок: [подача, дата, код, акции, цена, остаток, класс, A/D]
+  const quarterZip = (rows, owners = [['Q-1', 900, 'Ivanov Ivan', 'Director', '']]) => zipCreate({
+    'SUBMISSION.tsv': ['ACCESSION_NUMBER\tFILING_DATE\tDOCUMENT_TYPE\tISSUERCIK\tISSUERNAME\tISSUERTRADINGSYMBOL\tAFF10B5ONE\tDATE_OF_ORIG_SUB\tREMARKS',
+      ...[...new Set(rows.map(r => r[0]))].map(acc => `${acc}\t05-FEB-2020\t4\t111\tAlpha Corp\tALFA\t0\t\t`)].join('\n'),
+    'REPORTINGOWNER.tsv': ['ACCESSION_NUMBER\tRPTOWNERCIK\tRPTOWNERNAME\tRPTOWNER_RELATIONSHIP\tRPTOWNER_TITLE', ...owners.map(o => o.join('\t'))].join('\n'),
+    'NONDERIV_TRANS.tsv': ['ACCESSION_NUMBER\tSECURITY_TITLE\tTRANS_DATE\tTRANS_CODE\tEQUITY_SWAP_INVOLVED\tTRANS_SHARES\tTRANS_PRICEPERSHARE\tTRANS_ACQUIRED_DISP_CD\tSHRS_OWND_FOLWNG_TRANS\tDIRECT_INDIRECT_OWNERSHIP',
+      ...rows.map(([acc, d, code, sh, px, own, sec, ad]) => `${acc}\t${sec}\t${d}\t${code}\t0\t${sh}\t${px}\t${ad ?? 'A'}\t${own}\tD`)].join('\n'),
+    'FOOTNOTES.tsv': 'ACCESSION_NUMBER\tFOOTNOTE_ID\tFOOTNOTE_TXT',
+  });
+  // Форма 4 в XML с заданными строками: [дата, код, акции, цена, класс, A/D]
+  const xmlForm = (rows, { title = '', officer = 0, director = 1, remarks = '' } = {}) => `<SEC-DOCUMENT>\n<XML>\n<ownershipDocument><documentType>4</documentType>`
+    + `<issuer><issuerCik>111222</issuerCik><issuerTradingSymbol>TST</issuerTradingSymbol></issuer><aff10b5One>0</aff10b5One>`
+    + `<reportingOwner><reportingOwnerId><rptOwnerCik>900901</rptOwnerCik><rptOwnerName>Doe John</rptOwnerName></reportingOwnerId>`
+    + `<reportingOwnerRelationship><isDirector>${director}</isDirector><isOfficer>${officer}</isOfficer><officerTitle>${title}</officerTitle></reportingOwnerRelationship></reportingOwner>`
+    + `<nonDerivativeTable>${rows.map(([d, code, sh, px, sec, ad]) => `<nonDerivativeTransaction><securityTitle><value>${sec}</value></securityTitle>`
+      + `<transactionDate><value>${d}</value></transactionDate><transactionCoding><transactionCode>${code}</transactionCode><equitySwapInvolved>0</equitySwapInvolved></transactionCoding>`
+      + `<transactionAmounts><transactionShares><value>${sh}</value></transactionShares><transactionPricePerShare><value>${px}</value></transactionPricePerShare>`
+      + `<transactionAcquiredDisposedCode><value>${ad ?? 'A'}</value></transactionAcquiredDisposedCode></transactionAmounts>`
+      + `<postTransactionAmounts><sharesOwnedFollowingTransaction><value>90000</value></sharesOwnedFollowingTransaction></postTransactionAmounts>`
+      + `<ownershipNature><directOrIndirectOwnership><value>D</value></directOrIndirectOwnership></ownershipNature></nonDerivativeTransaction>`).join('')}</nonDerivativeTable>`
+    + `<remarks>${remarks}</remarks></ownershipDocument>\n</XML>\n</SEC-DOCUMENT>`;
+
+  ok('A4: класс бумаги, записанный в одной форме двумя способами, — одна строка с полной суммой (оба разбора)', () => {
+    // 0001127602-23-029699 (15.12.2023): в форме $2,0 млн, у панели оставалось $176 тыс. — второй агрегат затирал первый по ключу строки
+    const rows = [['Q-1', '03-FEB-2020', 'P', 100000, 18, 500000, 'Common Stock'], ['Q-1', '03-FEB-2020', 'P', 10000, 17.6, 510000, 'Common stock'],
+      ['Q-1', '03-FEB-2020', 'P', 500, 25, 500, 'Series A Preferred Stock']];
+    const q = normalizeQuarterZip(quarterZip(rows)).trades;
+    assert.equal(q.length, 2, 'обыкновенные — одна строка, привилегированные — своя');
+    const c = q.find(r => /common/i.test(r.sec));
+    assert.equal(c.sh, 110000); assert.equal(c.val, 1976000); assert.equal(c.own, 510000);
+    const x = parseForm4Txt(xmlForm([['2020-02-03', 'P', 100000, 18, 'Common Stock'], ['2020-02-03', 'P', 10000, 17.6, 'Common  stock']]), 'X-1', '2020-02-05').trades;
+    assert.equal(x.length, 1); assert.equal(x[0].sh, 110000); assert.equal(x[0].val, 1976000);
+    // ключ строки шарда у слитого агрегата один — в шарде не остаётся «победившей» половины
+    const key = r => `${r.acc}|${r.code}|${r.tdate}|${r.sec.toLowerCase().replace(/\s+/g, ' ')}`;
+    assert.equal(new Set(q.map(key)).size, q.length);
+  });
+
+  ok('A4: покупка с кодом «выбытие» — не покупка: помечается и отсеивается, рядом с обычной покупкой в сумму не входит (оба разбора)', () => {
+    // только «выбытие»: строка остаётся в шарде под прежним ключом (перечитывание замещает на месте), но с пометкой и отсевом
+    const only = normalizeQuarterZip(quarterZip([['Q-1', '03-FEB-2020', 'P', 5000, 20, 0, 'Common Stock', 'D']])).trades;
+    assert.equal(only.length, 1); assert.equal(only[0].ad, 'D'); assert.equal(only[0].val, 100000);
+    assert.equal(applyGates(only[0], { close: 20 }).drop, 'disposed');
+    // обычная покупка и «выбытие» в одной подаче, дате и классе: в шарде — только обычная покупка, без пометки
+    const mix = normalizeQuarterZip(quarterZip([['Q-1', '03-FEB-2020', 'P', 5000, 20, 0, 'Common Stock', 'D'], ['Q-1', '03-FEB-2020', 'P', 1000, 21, 9000, 'Common Stock', 'A']])).trades;
+    assert.equal(mix.length, 1); assert.equal(mix[0].sh, 1000); assert.equal(mix[0].val, 21000); assert.equal('ad' in mix[0], false);
+    assert.equal(applyGates(mix[0], { close: 21 }).ok, true);
+    // продажа с любым кодом и обычная покупка не затронуты
+    const sale = normalizeQuarterZip(quarterZip([['Q-1', '03-FEB-2020', 'S', 5000, 20, 0, 'Common Stock', 'D']])).trades;
+    assert.equal(sale.length, 1); assert.equal('ad' in sale[0], false);
+    const xOnly = parseForm4Txt(xmlForm([['2020-02-03', 'P', 5000, 20, 'Common Stock', 'D']]), 'X-2', '2020-02-05').trades;
+    assert.equal(xOnly.length, 1); assert.equal(xOnly[0].ad, 'D'); assert.equal(applyGates(xOnly[0], { close: 20 }).drop, 'disposed');
+    const xMix = parseForm4Txt(xmlForm([['2020-02-03', 'P', 5000, 20, 'Common Stock', 'D'], ['2020-02-03', 'P', 1000, 21, 'Common Stock', 'A']]), 'X-3', '2020-02-05').trades;
+    assert.equal(xMix.length, 1); assert.equal(xMix[0].sh, 1000); assert.equal('ad' in xMix[0], false);
+    // строка без поля (старый шард до перечитывания) проходит как раньше
+    assert.equal(applyGates({ code: 'P', px: 20, fn: {} }, { close: 20 }).ok, true);
+  });
+
+  ok('A4: роль в живом разборе — только из титула офицера, примечания формы её не дают', () => {
+    // Jefferies / Sumitomo Mitsui: «…Deputy President of SMFG…» в примечаниях давало C всем подателям с пустым титулом
+    const remarks = 'Mr. Smith serves as Deputy President of the parent and as CFO of an affiliate.';
+    const r = parseForm4Txt(xmlForm([['2020-02-03', 'P', 1000, 20, 'Common Stock']], { remarks }), 'X-4', '2020-02-05').trades[0];
+    assert.equal(r.owners[0].rel, 'D', 'директор без титула остаётся директором');
+    assert.equal(/[CFO]/.test(r.owners[0].rel), false, 'ложного балла «офицер» нет');
+    const ceo = parseForm4Txt(xmlForm([['2020-02-03', 'P', 1000, 20, 'Common Stock']], { title: 'Chief Executive Officer', officer: 1, remarks }), 'X-5', '2020-02-05').trades[0];
+    assert.equal(ceo.owners[0].rel, 'DOC');
+  });
+
+  ok('A4: «Vice President» — не CEO; CFO определяется независимо; признак «офицер» не меняется', () => {
+    assert.equal(titleFlags('Vice President'), '');
+    assert.equal(titleFlags('Executive Vice President, General Counsel'), '');
+    assert.equal(titleFlags('Sr. Vice-President & CFO'), 'F', 'раньше — C: слово president стояло первым');
+    assert.equal(titleFlags('Vice President and Chief Financial Officer'), 'F');
+    assert.equal(titleFlags('President and CFO'), 'CF');
+    assert.equal(titleFlags('President'), 'C');
+    assert.equal(titleFlags('Vice Chairman and President'), 'C');
+    assert.equal(titleFlags('Vice President; President of ABC Division'), 'C', 'президент рядом с вице-президентом остаётся президентом');
+    assert.equal(titleFlags('Chief Executive Officer'), 'C');
+    assert.equal(titleFlags('EVP, CFO'), 'F');
+    assert.equal(titleFlags(''), '');
+    // офицер — C, F или O в rel. Вице-президент с флажком офицера — O, без флажка — офицер по титулу (раньше им был через C)
+    const officer = rel => /[CFO]/.test(rel);
+    assert.equal(relFlags('Officer', 'Senior Vice President'), 'O');
+    assert.equal(relFlags('Director', 'Vice President'), 'DO');
+    assert.equal(roleFlags('', 'Vice President'), 'XO');
+    for (const [rel, title] of [['Officer', 'Vice President'], ['Director', 'Vice President'], ['', 'Vice President'], ['Director, Officer', 'EVP'], ['Director', ''], ['TenPercentOwner', '']]) {
+      const old = (rel ? relFlags(rel, '') : 'X') + (/\bceo\b|chief\s+exec|\bpres(?:ident)?\b/.test(title.toLowerCase()) ? 'C' : '');
+      assert.equal(officer(relFlags(rel, title)), officer(old), `офицер не изменился: ${rel} / ${title}`);
+    }
+    const r = parseForm4Txt(xmlForm([['2020-02-03', 'P', 1000, 20, 'Common Stock']], { title: 'Vice President &amp; CFO', officer: 1, director: 0 }), 'X-6', '2020-02-05').trades[0];
+    assert.equal(r.owners[0].rel, 'OF');
+  });
+
+  ok('A4: ревизии разбора подняты — кварталы и живое окно перечитываются', () => {
+    assert.equal(PARSER_REV, 3); assert.equal(QUARTER_REV, 4);
+  });
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);

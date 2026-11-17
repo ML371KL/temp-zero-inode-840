@@ -13,11 +13,14 @@ export const SHARD_VERSION = 3;
 // сегодняшний день: live.mjs перечитывает окно [from, lastDay] в остаток бюджета (state.reread) и
 // замещает строки подач свежим разбором. 1 — разбор до 11.2026; 2 — природа сделки только по
 // сноскам полей сделки, сноски к остатку и форме владения — в fnh (ревизия данных, П2).
-export const PARSER_REV = 2;
+// 3 — аудит форм 17.11.2026: агрегат строки по нормализованному названию класса; покупка с кодом «выбытие» помечается (ad);
+// C/F только из титула офицера, без примечаний формы; «Vice President» — не C.
+export const PARSER_REV = 3;
 // То же для квартальных датасетов: backfill.mjs перечитывает кварталы с меньшей ревизией и замещает
 // строки на месте (как при смене схемы, но без смены SHARD_VERSION и без задержки живого контура).
 // 3 — флажок 10b5-1 «true» и сноски со всех полей сделки датасета (EQUITY_SWAP_TRANS_CD_FN и др.).
-export const QUARTER_REV = 3;
+// 4 — аудит форм 17.11.2026: то же, что PARSER_REV 3 (агрегат по классу, код «выбытие», «Vice President»).
+export const QUARTER_REV = 4;
 // Поля датасета, сноски к которым описывают пакет, а не сделку (см. П2 в FIXES-COLLECT.md)
 const HOLD_FN_FIELDS = new Set(['NATURE_OF_OWNERSHIP_FN', 'DIRECT_INDIRECT_OWNERSHIP_FN', 'SHRS_OWND_FOLWNG_TRANS_FN', 'VALU_OWND_FOLWNG_TRANS_FN']);
 
@@ -62,6 +65,23 @@ export function secKey(s) {
   return String(s ?? '').replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
     .replace(/"/g, '').replace(/\s+/g, ' ').trim().toLowerCase().slice(0, 40);
 }
+// Название класса, как оно ложится в строку шарда (поле sec), и ключ агрегата внутри одной подачи. Агрегат обязан строиться по
+// ТОМУ ЖЕ ключу, что потом у строки шарда: до 11.2026 он строился по сырому названию, и «Common Stock» с «Common stock» в одной
+// форме давали два агрегата с одним ключом строки — в шарде оставался один, часть сделки терялась (217 случаев за 2016–09.2026,
+// 84 покупки, 24 с потерей от $100 тыс.; аудит форм 17.11.2026, M6).
+const SEC_LEN = 60;
+const secOf = s => String(s ?? '').slice(0, SEC_LEN);
+const aggKey = (code, tdate, sec, disposed) => `${code}|${tdate}|${secKey(secOf(sec))}${disposed ? '|D' : ''}`;
+// Покупка (код P) с кодом «выбытие» (D) в поле «приобретение/выбытие» — не покупка: в форме бумаги ушли от лица (917 строк за
+// 2016–09.2026; в основном списке ~1 событие в год, результат −0,65%; аудит форм 17.11.2026, M7). Такие строки складываются
+// отдельно от обычных покупок той же подачи, даты и класса. Обычные покупки есть — в шард идёт только их агрегат (ключ строки тот
+// же, что и раньше, поэтому перечитывание замещает строку на месте). Обычных нет — идёт агрегат «выбытий» с пометкой ad: 'D',
+// его отсеивает гейт disposed. Выбрасывать строку нельзя: бэкфил при росте ревизии замещает строки по ключу и ничего не удаляет,
+// прежняя строка осталась бы в шарде навсегда.
+const isDisposedBuy = (code, ad) => code === 'P' && String(ad ?? '').trim().toUpperCase() === 'D';
+function dropShadowedDisposals(agg) {
+  for (const [k, a] of agg) if (a.ad === 'D' && agg.has(k.slice(0, -2))) agg.delete(k);
+}
 
 export function quarterList(fromYear, toYear, toQ) {
   const out = [];
@@ -82,14 +102,25 @@ export function relFlags(relStr, title) {
   if (s.includes('officer')) rel += 'O';
   if (s.includes('tenpercent') || s.includes('10%')) rel += 'T';
   if (s.includes('other')) rel += 'X';
-  return (rel || 'X') + titleFlags(title);
+  return roleFlags(rel, title);
 }
 
+// Буквы роли из титула офицера: C — CEO или президент, F — финансовый директор; определяются независимо («President and CFO» — CF).
+// «Vice President» — не президент: до 11.2026 слово president ловило и его (7,4% меток C в истории), а «Vice President & CFO»
+// получал C вместо F (аудит форм 17.11.2026, находка 7).
+const VICE_PRES_RE = /\bvice[\s-]*pres(?:ident)?\b\.?/g;
 export function titleFlags(title) {
   const t = (title || '').toLowerCase();
-  if (/\bceo\b|chief\s+exec|\bpres(?:ident)?\b/.test(t)) return 'C';
-  if (/\bcfo\b|chief\s+fin|principal\s+financial/.test(t)) return 'F';
-  return '';
+  const noVice = t.replace(VICE_PRES_RE, ' ');
+  return (/\bceo\b|chief\s+exec|\bpres(?:ident)?\b/.test(noVice) ? 'C' : '')
+    + (/\bcfo\b|chief\s+fin|principal\s+financial/.test(t) ? 'F' : '');
+}
+// Флажки формы плюс буквы титула. Признак «офицер» события (C, F или O в rel) от правки вице-президентов меняться не должен:
+// вице-президент без флажка офицера раньше был офицером через букву C — теперь получает O (офицер по титулу).
+export function roleFlags(rel, title) {
+  const tf = titleFlags(title);
+  const viceOnly = !tf && !rel.includes('O') && new RegExp(VICE_PRES_RE.source).test((title || '').toLowerCase());
+  return (rel || 'X') + (viceOnly ? 'O' : '') + tf;
 }
 
 // Квартальный zip -> { trades, amend }. Только коды P и S, формы 4/4A, без своп-сделок.
@@ -147,8 +178,9 @@ export function normalizeQuarterZip(zipBuf) {
     if (!tdate || !sh || sh <= 0) continue;
     // Класс бумаги важен: в Table I попадают и привилегированные акции, и варранты —
     // их цена не сопоставима с котировкой обыкновенных, а сигнал у них другой природы
-    const key = `${r.ACCESSION_NUMBER}|${r.TRANS_CODE}|${tdate}|${r.SECURITY_TITLE}`;
-    const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), fnIds: new Set(), holdIds: new Set(), sec: r.SECURITY_TITLE || '' };
+    const disposed = isDisposedBuy(r.TRANS_CODE, r.TRANS_ACQUIRED_DISP_CD);
+    const key = `${r.ACCESSION_NUMBER}|${aggKey(r.TRANS_CODE, tdate, r.SECURITY_TITLE, disposed)}`;
+    const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), fnIds: new Set(), holdIds: new Set(), sec: r.SECURITY_TITLE || '', ...(disposed ? { ad: 'D' } : {}) };
     a.sh += sh;
     a.cost += sh * (px ?? 0);
     // Учёт по форме владения (см. foldOwnership): остаток относится к ней, а не к лицу
@@ -178,6 +210,7 @@ export function normalizeQuarterZip(zipBuf) {
     a.acc = r.ACCESSION_NUMBER; a.code = r.TRANS_CODE; a.tdate = tdate;
     agg.set(key, a);
   }
+  dropShadowedDisposals(agg);
 
   const trades = [];
   for (const a of agg.values()) {
@@ -200,8 +233,9 @@ export function normalizeQuarterZip(zipBuf) {
       val: Math.round(a.cost),
       own: ow.own, di: ow.di, ownD: ow.ownD, shD: ow.shD, b5: sub.b5,
       orig: sub.orig ?? null,
-      sec: a.sec.slice(0, 60),
+      sec: secOf(a.sec),
       fn, ...(Object.keys(fnh).length ? { fnh } : {}),
+      ...(a.ad ? { ad: a.ad } : {}),
     });
   }
 
@@ -340,7 +374,10 @@ export function parseForm4Txt(txt, acc, fdate) {
     return {
       cik: Number(tag(rid, 'rptOwnerCik')),
       name: unescapeXml(tag(rid, 'rptOwnerName') || ''),
-      rel: (rel || 'X') + titleFlags(title || remarks),
+      // Роль — только из титула офицера, как в разборе квартальных датасетов. До 11.2026 при пустом титуле C/F искались в
+      // примечаниях формы, а те описывают чужие должности («…Deputy President of SMFG…»): буква доставалась всем подателям с
+      // пустым титулом, событие получало ложный балл «офицер», которого нет в истории (аудит форм 17.11.2026, A1).
+      rel: roleFlags(rel, title),
       title,
     };
   });
@@ -374,8 +411,9 @@ export function parseForm4Txt(txt, acc, fdate) {
     const nature = tag(tr, 'ownershipNature') ?? '';
     const di = tagVal(nature, 'directOrIndirectOwnership') === 'I' ? 'I' : 'D';
     const secTitle = unescapeXml(tagVal(tr, 'securityTitle') ?? '');
-    const key = `${code}|${tdate}|${secTitle}`;
-    const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), ids: new Set(), holdIds: new Set(), sec: secTitle };
+    const disposed = isDisposedBuy(code, tagVal(amounts, 'transactionAcquiredDisposedCode'));
+    const key = aggKey(code, tdate, secTitle, disposed);
+    const a = agg.get(key) ?? { sh: 0, cost: 0, forms: new Map(), ids: new Set(), holdIds: new Set(), sec: secTitle, ...(disposed ? { ad: 'D' } : {}) };
     a.sh += sh; a.cost += sh * (px ?? 0);
     const f = a.forms.get(di) ?? { sh: 0, own: null, ownMin: null, ownMax: null };
     f.sh += sh;
@@ -401,6 +439,7 @@ export function parseForm4Txt(txt, acc, fdate) {
     a.code = code; a.tdate = tdate;
     agg.set(key, a);
   }
+  dropShadowedDisposals(agg);
 
   const trades = [];
   for (const a of agg.values()) {
@@ -415,8 +454,9 @@ export function parseForm4Txt(txt, acc, fdate) {
       px: a.sh > 0 ? Math.round((a.cost / a.sh) * 10000) / 10000 : null,
       val: Math.round(a.cost), own: ow.own, di: ow.di, ownD: ow.ownD, shD: ow.shD, b5,
       orig: orig ?? null,
-      sec: String(a.sec).slice(0, 60),
+      sec: secOf(a.sec),
       fn, ...(Object.keys(fnh).length ? { fnh } : {}),
+      ...(a.ad ? { ad: a.ad } : {}),
       // Необязательное поле: у строк квартальных датасетов и у старых строк живого шарда его нет
       ...(at ? { at } : {}),
     });
