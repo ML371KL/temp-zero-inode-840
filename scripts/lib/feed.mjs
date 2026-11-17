@@ -8,8 +8,17 @@ import { addDaysIso } from './util.mjs';
 // timeoutMs и retries — запрос к SEC: 10 с и один повтор (худший случай ~22 с вместо 230); backDays — за сколько прошлых дней сборщик
 // читает журналы при старте (длинные выходные); blindExitMin — слепота, после которой сборщик выходит с ошибкой (не меньше blindMinTicks
 // сбоев подряд): тревога юнита примерно через четверть часа, перезапусков не больше четырёх в час.
-export const FEED = { from: '06:00', until: '22:00', intervalSec: 45, keepDays: 14, maxTries: 6, timeoutMs: 10000, retries: 1, backDays: 4, blindExitMin: 15, blindMinTicks: 3 };
+// maxTries — сколько раз ждём файл подачи, которого у SEC ещё нет (ответ «нет файла») или который пришёл оборванным; maxNetFails —
+// сколько сбоев сети по одной подаче терпим за запуск (сбой сети попытку не списывает: иначе короткий сбой выбивал бы из очереди
+// первые подачи до конца дня).
+export const FEED = { from: '06:00', until: '22:00', intervalSec: 45, keepDays: 14, maxTries: 6, maxNetFails: 20, timeoutMs: 10000, retries: 1, backDays: 4, blindExitMin: 15, blindMinTicks: 3 };
 export const feedFile = (dir, nyDate) => join(dir, `${nyDate}.jsonl`);
+// Запись form журнала годится ночной сборке вместо своей загрузки: разобрана той же ревизией разбора, файл скачан целиком, подана в
+// день индекса. Одно условие на оба места — первый источник форм (live.mjs --feed-dir) и добор недоставших (morning-build.mjs).
+export const feedFormUsable = (f, day, rev) => !!f && f.rev === rev && f.end === true && f.filed === day && Array.isArray(f.trades);
+// Запись другой ревизии разбора (или до 11.2026, без rev и end), но не оборванная: годится только как крайнее средство — на последней
+// попытке сборки, когда свою загрузку ждать уже некогда; подача при этом остаётся в доборе, день — неполным.
+export const feedFormStale = (f, day) => !!f && f.end !== false && f.filed === day && Array.isArray(f.trades);
 
 // Журнал JSONL, по записи в строке:
 //   run  — старт сборщика; seen — номер подачи замечен в ленте {acc, cik, form, filed, upd, t};

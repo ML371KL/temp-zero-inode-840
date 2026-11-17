@@ -2652,7 +2652,7 @@ ok('notify: список по ленте — в письме сказано, ч�
   const dir = seededDir('data-feedsrc');
   const days = [mDay(nDay(-1), [mRow('AAA', 3e5)])];
   const out = notify(days, { dir, extra: { source: 'feed' } });
-  assert.match(out, /Список собран по ленте EDGAR: индекс за день ещё не вышел, возможны неполные данные\./);
+  assert.match(out, /Список собран по ленте EDGAR: индекс за день не получен \(ещё не вышел или SEC не отвечала\), возможны неполные данные\./);
   const d2 = seededDir('data-feedsrc2');
   const out2 = notify([mDay(nDay(-1), [])], { dir: d2, extra: { source: 'feed' } });
   assert.match(out2, /утренний список пуст/); assert.match(out2, /по ленте EDGAR/, 'и в письме «сигналов нет»: лента могла видеть не всё');
@@ -3638,6 +3638,7 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       let c = st().coverage[D];
       assert.deepEqual([c.status, c.indexed, c.collected, c.pending, c.gone ?? 0], ['partial', 3, 2, 1, 0], 'день неполон, подача ждёт добора, «снятых» нет');
       assert.deepEqual(Object.keys(st().pending[D]), [B]); assert.match(st().pending[D][B].err, /нет файла/);
+      assert.equal(st().pending[D][B].nf, 1, 'счёт ответов «нет файла» подряд — один на проход, повтор в конце прохода его не удваивает');
       assert.equal(hitsB.length, 4, 'оба адреса подачи спрошены дважды: в проходе и повтором в конце прохода');
       assert.equal(st().lastDay >= D, true, 'день пройден: список собирается, недобор виден в покрытии');
       bMissing = false;                                            // следующая попытка сборки: файл уже отдаётся
@@ -3649,7 +3650,7 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       // подачу и правда сняли: пока день свежий — ждёт в доборе, через сутки считается снятой, и день закрывается полным
       reset(); bMissing = true;
       await run('2026-11-07'); await run('2026-11-07');
-      assert.equal(st().coverage[D].status, 'partial'); assert.equal(st().pending[D][B].tries, 2);
+      assert.equal(st().coverage[D].status, 'partial'); assert.equal(st().pending[D][B].tries, 2); assert.equal(st().pending[D][B].nf, 2);
       const r3 = await run('2026-11-08');
       assert.equal(r3.code, 0, r3.out);
       c = st().coverage[D];
@@ -3747,6 +3748,44 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.equal(formComplete('<SEC-DOCUMENT>x\n</SEC-DOCUMENT>\n'), true); assert.equal(formComplete('<SEC-DOCUMENT>x\n<XML>'), false);
   });
 
+  await okAsync('B5 (ревью): лента — оборванный файл подачи в журнал не пишется и качается заново; сбой сети попытку не списывает, несдающиеся подачи уходят в конец очереди', async () => {
+    const dir = join(ROOT, '.selftest-feed-b5d');
+    rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true });
+    const accs = [21, 22, 23, 24, 25].map(accB), seenLines = list => list.map(a => JSON.stringify({ k: 'seen', acc: a, cik: 555000, form: '4', filed: nyToday, upd: null, t: 'x' })).join('\n') + '\n';
+    writeFileSync(feedFile(dir, nyToday), seenLines(accs.slice(0, 1)));
+    let cut = true, down = false;
+    const hits = [];
+    const srv = createServer((req, res) => {
+      if (req.url.startsWith('/cgi-bin/browse-edgar')) { if (down) { res.writeHead(503); res.end('busy'); } else { res.writeHead(200); res.end(atomOf([])); } return; }
+      const m = /(\d{10}-\d{2}-\d{6})\.txt$/.exec(req.url);
+      if (!m) { res.writeHead(404); res.end(); return; }
+      hits.push(m[1]);
+      if (down) { res.writeHead(503); res.end('busy'); return; }
+      const txt = formB(m[1], 'AAA', { day: nyToday });
+      res.writeHead(200); res.end(cut ? txt.slice(0, Math.floor(txt.length / 2)) : txt);
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${srv.address().port}`;
+    try {
+      const r1 = await feedRun(dir, base);
+      assert.equal(r1.code, 0, r1.out);
+      assert.match(r1.out, /файл подачи оборван/);
+      assert.equal(journalOf(dir).forms.size, 0, 'оборванный файл не записан разобранной формой (иначе подачу больше никто не скачал бы)');
+      cut = false;
+      const r2 = await feedRun(dir, base);
+      assert.equal(r2.code, 0, r2.out);
+      const f = journalOf(dir).forms.get(accs[0]);
+      assert.equal(f?.end, true); assert.equal(f.trades.length > 0, true, 'следующий запуск скачал подачу целиком');
+      // сеть лежит три такта подряд: за такт пробуются три подачи, и каждый такт — те, по которым сбоев меньше; до правки это были
+      // одни и те же первые три, и после шести тактов они выбывали из очереди до конца дня
+      rmSync(feedFile(dir, nyToday)); writeFileSync(feedFile(dir, nyToday), seenLines(accs));
+      down = true; hits.length = 0;
+      const r3 = await feedRun(dir, base, ['--from', '00:00', '--until', '23:59', '--interval', '0.05', '--blind-exit-min', '0']);
+      assert.equal(r3.code, 1, r3.out);
+      assert.equal(new Set(hits).size, 5, 'за три сбойных такта спрошены все пять подач: ' + hits.length + ' запросов');
+    } finally { await new Promise(r => srv.close(r)); rmSync(dir, { recursive: true, force: true }); }
+  });
+
   // ---------- B2а, B4: журнал ленты — запас для подач, которые не скачались, и для ночи, когда SEC не отвечает ----------
   const mb = await import('./vps/morning-build.mjs');
   const morningLib = await import('./lib/morning.mjs');
@@ -3758,8 +3797,9 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, trades: [row('A-1', 'AAA')], amend: [] });
     writeJson(join(data, 'state', 'live.json'), { lastDay: D, coverage: { [D]: { status: 'partial', indexed: 4, collected: 1, pending: 3, at: 'x', error: 'сеть' } },
       pending: { [D]: { 'B-1': { paths: ['p'], tries: 1, err: 'нет файла (404)' }, 'C-1': { paths: ['p'], tries: 1, err: 'HTTP 503' }, 'E-1': { paths: ['p'], tries: 1, err: 'нет файла (404)' } } } });
-    writeFileSync(feedFile(feedDir, D), [{ k: 'form', acc: 'B-1', filed: D, trades: [row('B-1', 'BBB')], amend: [] }, { k: 'form', acc: 'C-1', filed: D, trades: [], amend: [{ acc: 'C-1', orig: D }] },
-      { k: 'form', acc: 'E-1', filed: '2026-11-05', trades: [row('E-1', 'EEE')], amend: [] }].map(x => JSON.stringify(x)).join('\n') + '\n');
+    const fr = (acc, t, extra = {}) => ({ k: 'form', acc, filed: D, rev: PARSER_REV, end: true, trades: [row(acc, t)], amend: [], ...extra });
+    writeFileSync(feedFile(feedDir, D), [fr('B-1', 'BBB'), fr('C-1', 'CCC', { trades: [], amend: [{ acc: 'C-1', orig: D }] }),
+      fr('E-1', 'EEE', { filed: '2026-11-05' })].map(x => JSON.stringify(x)).join('\n') + '\n');
     assert.equal(mb.feedFillPending({ data, feedDir }, D), 2, 'B-1 и C-1 есть в ленте за этот день; E-1 в ленте числится за другой день — не берётся');
     const live = readJson(join(data, 'state', 'live.json')), c = live.coverage[D];
     assert.deepEqual([c.status, c.indexed, c.collected, c.pending, c.fromFeed], ['partial', 4, 3, 1, 2]);
@@ -3767,7 +3807,7 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.deepEqual(readJsonGz(join(data, 'trades', 'live.json.gz')).trades.map(r => r.t).sort(), ['AAA', 'BBB']);
     assert.equal(mb.feedFillPending({ data, feedDir }, D), 0, 'повтор ничего не меняет');
     // последняя подача находится в ленте — день полный
-    writeFileSync(feedFile(feedDir, D), JSON.stringify({ k: 'form', acc: 'E-1', filed: D, trades: [row('E-1', 'EEE')], amend: [] }) + '\n', { flag: 'a' });
+    writeFileSync(feedFile(feedDir, D), JSON.stringify(fr('E-1', 'EEE')) + '\n', { flag: 'a' });
     assert.equal(mb.feedFillPending({ data, feedDir }, D), 1);
     const done = readJson(join(data, 'state', 'live.json'));
     assert.deepEqual([done.coverage[D].status, done.coverage[D].collected, done.coverage[D].pending, done.coverage[D].fromFeed, done.coverage[D].error], ['complete', 4, 0, 3, undefined]);
@@ -3775,17 +3815,46 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     rmSync(work, { recursive: true, force: true });
   });
 
-  ok('B1/B2а: сборка на сервере не ждёт до 23:30 подачу, по которой SEC три попытки подряд отвечает «нет файла»', () => {
-    const D = '2026-11-06', cov = { [D]: { status: 'partial', indexed: 3, collected: 2, pending: 1 } };
-    const st = (tries, err = 'нет файла (404)') => ({ lastDay: D, coverage: cov, pending: { [D]: { B: { paths: [], tries, err } } } });
-    assert.equal(liveVerdict(st(1), D, 0).ok, false); assert.equal(liveVerdict(st(2), D, 0).ok, false);
-    assert.deepEqual(liveVerdict(st(mb.NO_FILE_TRIES), D, 0), { ok: true, partial: true, noFile: 1 });
-    assert.equal(liveVerdict(st(9, 'HTTP 503'), D, 0).ok, false, 'сбой сети ждём до последней попытки');
+  ok('B2а (ревью): оборванная запись ленты и запись другой ревизии разбора подачу с добора не снимают — день остаётся partial; на последней попытке строки целой записи вливаются', () => {
+    const work = join(ROOT, '.selftest-feedfill2'), data = join(work, 'repo'), feedDir = join(work, 'feed'), D = '2026-11-06';
+    rmSync(work, { recursive: true, force: true }); mkdirSync(feedDir, { recursive: true });
+    const row = (acc, t) => ({ acc, form: '4', code: 'P', tdate: '2026-11-05', fdate: D, sec: 'Common Stock', sh: 1000, px: 20, val: 20000, t, cik: 555000, owners: [] });
+    writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, trades: [row('A-1', 'AAA')], amend: [] });
+    const p = err => ({ paths: ['p'], tries: 1, err });
+    const state = { lastDay: D, coverage: { [D]: { status: 'partial', indexed: 4, collected: 1, pending: 3, at: 'x', error: 'сеть' } },
+      pending: { [D]: { 'T-1': p('HTTP 503'), 'O-1': p('нет файла (404)'), 'R-1': p('HTTP 503') } } };
+    writeJson(join(data, 'state', 'live.json'), state);
+    writeFileSync(feedFile(feedDir, D), [
+      { k: 'form', acc: 'T-1', filed: D, rev: PARSER_REV, end: false, trades: [], amend: [] },                       // файл оборван: сделок «нет»
+      { k: 'form', acc: 'O-1', filed: D, trades: [row('O-1', 'OOO')], amend: [] },                                   // запись до правки: без rev и end
+      { k: 'form', acc: 'R-1', filed: D, rev: PARSER_REV - 1, end: true, trades: [row('R-1', 'RRR')], amend: [] },   // прошлая ревизия разбора
+    ].map(x => JSON.stringify(x)).join('\n') + '\n');
+    assert.equal(mb.feedFillPending({ data, feedDir }, D), 0, 'ни одна запись не годится вместо своей загрузки');
+    assert.deepEqual(readJson(join(data, 'state', 'live.json')), state, 'добор и покрытие не тронуты: день не стал «полным» без строк');
+    assert.deepEqual(readJsonGz(join(data, 'trades', 'live.json.gz')).trades.map(r => r.t), ['AAA']);
+    assert.equal(mb.feedFillPending({ data, feedDir }, D, { lastChance: true }), 0, 'последняя попытка: с добора всё равно не снимаются');
+    assert.deepEqual(readJson(join(data, 'state', 'live.json')), state, 'день остаётся partial, три подачи ждут');
+    assert.deepEqual(readJsonGz(join(data, 'trades', 'live.json.gz')).trades.map(r => r.t).sort(), ['AAA', 'OOO', 'RRR'], 'строки целых записей в списке есть, оборванной — нет');
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  ok('B1/B2а: сборка на сервере не ждёт до 23:30 подачу, по которой SEC раз за разом отвечает «нет файла», — но только единичную и не сразу', () => {
+    const D = '2026-11-06', at = '2026-11-07T03:05:00.000Z', late = Date.parse(at) + mb.NO_FILE_WAIT_MIN * 60e3;
+    const cov = { [D]: { status: 'partial', indexed: 515, collected: 514, pending: 1, at } };
+    const st = (nf, n = 1, err = 'нет файла (404)') => ({ lastDay: D, coverage: cov,
+      pending: { [D]: Object.fromEntries(Array.from({ length: n }, (_, i) => ['B' + i, { paths: [], tries: 9, err, ...(nf ? { nf } : {}) }])) } });
+    assert.equal(liveVerdict(st(1), D, 0, false, late).ok, false); assert.equal(liveVerdict(st(2), D, 0, false, late).ok, false);
+    assert.deepEqual(liveVerdict(st(mb.NO_FILE_TRIES), D, 0, false, late), { ok: true, partial: true, noFile: 1 });
+    assert.deepEqual(liveVerdict(st(mb.NO_FILE_TRIES, mb.NO_FILE_MAX), D, 0, false, late), { ok: true, partial: true, noFile: mb.NO_FILE_MAX });
+    assert.equal(liveVerdict(st(mb.NO_FILE_TRIES), D, 0, false, late - 60e3).ok, false, 'рано: с первого прохода индекса не прошло 25 минут (06.11 SEC отвечала так минимум три минуты)');
+    assert.equal(liveVerdict(st(9, mb.NO_FILE_MAX + 1), D, 0, false, late).ok, false, 'всплеск (06.11 — 31 подача): ждём до последней попытки');
+    assert.equal(liveVerdict(st(0, 1, 'HTTP 503'), D, 0, false, late).ok, false, 'сбой сети ждём до последней попытки, сколько бы попыток ни было');
+    assert.equal(liveVerdict(st(0), D, 0, false, late).ok, false, 'запись добора без счёта nf (старое состояние) — ждём');
     assert.deepEqual(liveVerdict(st(1), D, 0, true), { ok: true, partial: true }, 'последняя попытка — как раньше');
   });
 
   // Ночь, когда SEC не отвечает: данные фикстуры без подачи L1 в шарде (она только в журнале ленты), бары — через подставной воркер
-  const feedNight = async (name, secHandler) => {
+  const feedNight = async (name, secHandler, runBuild = morningMain) => {
     const work = join(ROOT, name), data = join(work, 'repo'), feedDir = join(work, 'feed');
     rmSync(work, { recursive: true, force: true });
     for (const d of ['trades', 'reference', 'prices', 'state']) cpSync(join(TMP, d), join(data, d), { recursive: true });
@@ -3806,7 +3875,7 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     const keep = { base: process.env.EDGAR_BASE, back: process.env.POLITE_BACKOFF_MS };
     process.env.EDGAR_BASE = `http://127.0.0.1:${sec.address().port}`; process.env.POLITE_BACKOFF_MS = '2';
     try {
-      const code = await morningMain(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', recentF, '--no-sync', '--feed-dir', feedDir, '--once', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+      const code = await runBuild(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', recentF, '--no-sync', '--feed-dir', feedDir, '--once', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
       return { code, puts: api.calls.morningPuts.map(x => JSON.parse(x)), l1 };
     } finally {
       for (const [k, v] of [['EDGAR_BASE', keep.base], ['POLITE_BACKOFF_MS', keep.back]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
@@ -3823,6 +3892,25 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   };
   await okAsync('B4: SEC не отвечает до последней попытки — список по ленте (раньше резерв включался только при неопубликованном индексе)', async () => {
     feedListOk(await feedNight('.selftest-feed-b4a', req => req.socket.destroy()), 'SEC недоступна');
+  });
+  await okAsync('B4 (ревью): SEC молчит и на непоследней, и на последней попытке — проба индекса повторяется, резерв по ленте включается без нового прогона шага форм', async () => {
+    const hits = { head: 0, get: 0 };
+    const r = await feedNight('.selftest-feed-b4c', req => { hits[req.method === 'HEAD' ? 'head' : 'get']++; req.socket.destroy(); }, async (args, env) => {
+      const opts = mb.parseArgs(args, env), ctx = { stage: {}, lastChance: false, summary: null };
+      const a1 = await mb.attempt(opts, recentF, ctx);
+      assert.equal(a1.ok, false, 'непоследняя попытка: формы не собраны — повтор');
+      assert.ok(!ctx.stage.index, 'SEC не ответила — шаг индекса не помечен пройденным (до правки помечался, и резерв ждал ещё один прогон форм)');
+      assert.equal(hits.head, 1); assert.ok(hits.get > 0, 'шаг форм на непоследней попытке всё же пробовали');
+      const gets = hits.get;
+      ctx.lastChance = true;
+      const a2 = await mb.attempt(opts, recentF, ctx);
+      assert.equal(a2.ok, true, a2.why);
+      assert.equal(ctx.source, 'feed'); assert.equal(ctx.feedWhy, 'SEC не отвечала');
+      assert.equal(hits.head, 1 + 3, 'на последней попытке — три пробы, прежде чем считать, что SEC не отвечает');
+      assert.equal(hits.get, gets, 'шаг форм на последней попытке не запускался: время до предела юнита не потрачено');
+      return 1;                                                    // main вернул бы 1: список по ленте — тревога
+    });
+    feedListOk(r, 'SEC недоступна две попытки подряд');
   });
   await okAsync('B4: индекс есть, но шаг форм не удался и на последней попытке — список по ленте вместо «НЕ СОБРАНО»', async () => {
     feedListOk(await feedNight('.selftest-feed-b4b', (req, res) => { if (req.method === 'HEAD') { res.writeHead(200); res.end(); } else { res.writeHead(503); res.end('busy'); } }), 'шаг форм не удался');

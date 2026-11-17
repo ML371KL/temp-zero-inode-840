@@ -6,7 +6,8 @@
 // Покрытие (контракт для витрины, письма и сторожа — менять только вместе с ними):
 //   state.coverage = { "ГГГГ-ММ-ДД": { status, indexed, collected, pending, at } } за последние 40 дней подачи;
 //   status ∈ complete | partial | holiday | not-published; indexed — уникальные подачи Form 4/4A в form.idx,
-//   collected — разобранные, pending — ждут добора, at — когда день закрыт (UTC). Необязательные: gone, error.
+//   collected — разобранные, pending — ждут добора, at — когда день закрыт (UTC). Необязательные: gone, error,
+//   fromFeed (сколько из collected взято из журнала ленты, а не скачано, — только сборка на сервере).
 //
 // Сбои сети не роняют прогон (до 11.2026 исключение на пробе индекса следующего дня роняло весь
 // daily.yml до сборки и письма — 28.10.2026): день ≥ сегодня−1 — «ещё не вышел», стоп; прошлый день —
@@ -15,7 +16,7 @@
 import { readJson, writeJson, readJsonGz, writeJsonGz, isoToday, addDaysIso, isIsoDate, politeFetch } from './lib/util.mjs';
 import { fetchDayIndex, fetchFiling, parseForm4Txt, uniqueFilings, secKey, edgarBase, SHARD_VERSION, PARSER_REV } from './lib/edgar.mjs';
 import { fpiFormsPath, emptyFpiForms, absorbFpiForms, parseFpiIdx, fillQuartersFor, fullIndexUrl, fullIndexText } from './lib/fpi.mjs';
-import { loadFeed } from './lib/feed.mjs';
+import { loadFeed, feedFormUsable } from './lib/feed.mjs';
 import { isWeekend, nextWeekday, missingIndexVerdict, shouldProbeNext, coverageEntry, pruneCoverage, firstUncoveredDay, windowStart } from './lib/livecal.mjs';
 import { join } from 'node:path';
 
@@ -112,7 +113,7 @@ function feedForms(day) {
   if (!feedCache.has(day)) feedCache.set(day, loadFeed(FEED_DIR, day).forms);
   return feedCache.get(day);
 }
-const feedUsable = (f, day) => !!f && f.rev === PARSER_REV && f.end === true && f.filed === day && Array.isArray(f.trades);
+const feedUsable = (f, day) => feedFormUsable(f, day, PARSER_REV);
 
 // Простой пул: fn по элементам, не больше n одновременно; stop() — прекратить выдачу новых.
 async function pool(items, n, fn, stop = () => false) {
@@ -158,14 +159,16 @@ const isFreshDay = d => addDaysIso(d, 1) >= today;
 
 // ---------- состояние покрытия и добора ----------
 const coverage = { ...(state.coverage ?? {}) };
-const pending = {};          // день -> { acc: { paths, tries, err } }
+const pending = {};          // день -> { acc: { paths, tries, err, nf } }; nf — сколько проходов ПОДРЯД SEC отвечала «нет файла»
 for (const [d, m] of Object.entries(state.pending ?? {})) pending[d] = { ...m };
 let lastError = state.lastError ?? null;
 const pendingCount = d => Object.keys(pending[d] ?? {}).length;
 function pend(day, acc, paths, err, bumpTry = true) {
   const m = pending[day] ?? (pending[day] = {});
   const prev = m[acc];
-  m[acc] = { paths, tries: (prev?.tries ?? 0) + (bumpTry ? 1 : 0), err: err ? String(err).slice(0, 160) : (prev?.err ?? null) };
+  // nf считает только ответы «нет файла» подряд: сбой сети или лимит обнуляют счёт — по нему сборка сервера решает, ждать ли подачу дальше
+  const nf = err === NO_FILE ? (prev?.nf ?? 0) + (bumpTry ? 1 : 0) : err ? 0 : (prev?.nf ?? 0);
+  m[acc] = { paths, tries: (prev?.tries ?? 0) + (bumpTry ? 1 : 0), err: err ? String(err).slice(0, 160) : (prev?.err ?? null), ...(nf ? { nf } : {}) };
 }
 function settle(day) {
   const c = coverage[day];
@@ -344,6 +347,7 @@ async function run() {
         if (budgetHit || overBudget() || secBlocked) break;
         const res = await download(paths.get(f.acc));
         if (res.txt) { ingest(res.txt, f.acc, day); filingsDone++; collected++; back++; delete pending[day][f.acc]; }
+        else if (!res.gone) pend(day, f.acc, paths.get(f.acc), res.error, false);   // повтор упал по сети — причина в доборе уже не «нет файла»
       }
       console.log(`[live] ${day}: «нет файла» по ${noFile.length} подачам индекса — повтор в конце прохода вернул ${back}, в доборе ${noFile.length - back}`);
     }
