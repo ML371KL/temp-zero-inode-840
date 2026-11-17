@@ -27,7 +27,7 @@ import { FEED, loadFeed, reconcile, mergeFeedRows } from '../lib/feed.mjs';
 import { coverageEntry } from '../lib/livecal.mjs';
 import { nyWall, nyToMs } from '../lib/nytime.mjs';
 import { isSecClosed, isMarketClosed } from '../lib/calendar.mjs';
-import { fetchBars, applyBars, barsFrom } from '../lib/bars.mjs';
+import { fetchBars, applyBars, applyLows, barsFrom, LOWS_BACK_DAYS } from '../lib/bars.mjs';
 import { OPENS_BENCH, readOpens, opensOf } from '../lib/opens.mjs';
 import { readPriceCache } from '../lib/prices.mjs';
 
@@ -276,14 +276,24 @@ export async function attempt(opts, day, ctx) {
         if (v.warn) log('ВНИМАНИЕ (последняя попытка, идём как есть):', v.warn);
       }
       const names = [...new Set([...Object.keys(plan.bars), ...Object.keys(plan.opens)])];
-      const items = names.map(sym => ({ sym, from: barsFrom(plan.bars[sym] ? plan.bars[sym].last : lastBar(opts.data, sym), day, plan.opens[sym] ?? []) }));
+      // Минимумы дня сделок из форм дня (plan.lows, ключ — тикер формы): тот же ответ источника цен, запрос должен начинаться за
+      // неделю до первой даты сделки. Чаще всего это те же бумаги, что без бара D0; тикер формы, которого среди них нет, просится
+      // отдельно и в кэш цен не пишется.
+      const lowNeeds = plan.lows ?? {};
+      const lowFrom = sym => (lowNeeds[sym]?.length ? addDaysIso([...lowNeeds[sym]].sort()[0], -LOWS_BACK_DAYS) : null);
+      const early = (a, b) => (b && b < a ? b : a);
+      const items = names.map(sym => ({ sym, from: early(barsFrom(plan.bars[sym] ? plan.bars[sym].last : lastBar(opts.data, sym), day, plan.opens[sym] ?? []), lowFrom(sym)) }));
+      const lowOnly = Object.keys(lowNeeds).filter(sym => !names.includes(sym));
+      for (const sym of lowOnly) items.push({ sym, from: lowFrom(sym) });
       if (items.length) {
-        log(`докачка баров (проход ${pass}): ${items.length} бумаг (${Object.keys(plan.bars).length} без бара D0, ${Object.keys(plan.opens).length} с открытиями)`);
+        log(`докачка баров (проход ${pass}): ${items.length} бумаг (${Object.keys(plan.bars).length} без бара D0, ${Object.keys(plan.opens).length} с открытиями, ${Object.keys(lowNeeds).length} с минимумами дня)`);
         const r = await fetchBars(opts.workerUrl, opts.token, items);
-        const stat = applyBars(opts.data, r.got, { opensNeeds: plan.opens, updated: day });
+        const stat = applyBars(opts.data, new Map([...r.got].filter(([sym]) => names.includes(sym))), { opensNeeds: plan.opens, updated: day });
+        const lowsAdded = applyLows(opts.data, r.got, lowNeeds);
         // Бумага, которой у Yahoo нет вовсе (missing), — не сбой: повтор ничего не даст. Сбой — когда воркер или Yahoo не ответили.
-        const transient = Object.keys(r.failed);
-        log('бары:', JSON.stringify({ ...stat, missing: stat.missing.length, transient: transient.length, limited: r.limited }));
+        // Минимумы дня у тикера формы, которого нет среди бумаг списка, необязательны: без них гейт работает по прежнему правилу.
+        const transient = Object.keys(r.failed).filter(sym => names.includes(sym));
+        log('бары:', JSON.stringify({ ...stat, missing: stat.missing.length, transient: transient.length, limited: r.limited, lows: lowsAdded }));
         if (transient.length && !ctx.lastChance) return fail(`бары не получены: ${transient.slice(0, 8).join(', ')}${transient.length > 8 ? '…' : ''}`);
       }
       if (pass === 1 && !plan.opensPending) break;

@@ -9,12 +9,13 @@
 // (ответ Yahoo chart тем же видом, что у настоящего воркера). Сравниваются строки списка дня D (состав, скор, сумма, оборот, цена,
 // издержки, пометки) и результаты дня D−1 (открытие, закрытие, к IWM и к SPY). Живой SEC и Yahoo не трогаются.
 import { createServer } from 'node:http';
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, readdirSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import { readJson, writeJson, readJsonGz, writeJsonGz, addDaysIso } from '../lib/util.mjs';
-import { readPriceCache, writePriceCache, priceCachePath } from '../lib/prices.mjs';
+import { readPriceCache, writePriceCache, priceCachePath, readLows } from '../lib/prices.mjs';
 import { readOpens, writeOpens, opensOf } from '../lib/opens.mjs';
 import { main as morningMain } from './morning-build.mjs';
 
@@ -46,17 +47,23 @@ const restore = () => {          // вернуть из полной копии 
   return n;
 };
 
-// Подставной воркер: бары из полного кэша, открытия/закрытия дней входа из полного хранилища
+// Подставной воркер: бары из полного кэша, открытия/закрытия дней входа из полного хранилища, минимумы дня — из полного слоя
+// reference/lows.csv.gz (минимум дня сделки и, для бара перед ним, «минимум предыдущего дня» той же строки слоя). Дня в слое нет —
+// минимума в ответе нет: сборка «как на сервере» его не выдумывает и остаётся при том же правиле, что и эталон.
 const fullOpens = readOpens(FULL);
+const fullLows = readLows(FULL);
+const prevLows = new Map();          // тикер -> Map(дата сделки -> минимум предыдущего бара)
+for (const [k, v] of fullLows) if (v.length > 1) { const [t, d] = k.split('|'); (prevLows.get(t) ?? prevLows.set(t, new Map()).get(t)).set(d, v[1]); }
 const chartFor = (sym, from) => {
   const s = readPriceCache(FULL, sym);
   if (!s?.length) return null;
   const rows = s.filter(r => r[0] >= from);
   const ov = d => { const o = opensOf(fullOpens, sym, d); return o ? [o[0], o[1]] : null; };
+  const low = rows.map((r, i) => fullLows.get(`${sym}|${r[0]}`)?.[0] ?? (rows[i + 1] ? prevLows.get(sym)?.get(rows[i + 1][0]) : undefined) ?? null);
   return { chart: { result: [{
     meta: { gmtoffset: -18000, exchangeName: 'NYQ' },
     timestamp: rows.map(r => Math.floor(Date.parse(r[0] + 'T14:30:00Z') / 1000)),
-    indicators: { quote: [{ open: rows.map(r => ov(r[0])?.[0] ?? r[1]), close: rows.map(r => ov(r[0])?.[1] ?? r[1]), volume: rows.map(r => r[3]) }], adjclose: [{ adjclose: rows.map(r => r[2]) }] },
+    indicators: { quote: [{ open: rows.map(r => ov(r[0])?.[0] ?? r[1]), close: rows.map(r => ov(r[0])?.[1] ?? r[1]), low, volume: rows.map(r => r[3]) }], adjclose: [{ adjclose: rows.map(r => r[2]) }] },
     events: {},
   }] } };
 };
@@ -91,6 +98,7 @@ let bad = 0;
 const table = [];
 for (const D of DAYS) {
   const t0 = Date.now();
+  let lowsCut = 0;
   const rest = restore();
   // 1. формы позже D убираем; live.json кончается на D
   for (const f of readdirSync(join(data, 'trades')).filter(x => x.endsWith('.json.gz'))) {
@@ -114,6 +122,18 @@ for (const D of DAYS) {
   const st = readOpens(data);
   for (const t of Object.keys(st.t)) for (const d of Object.keys(st.t[t])) if (d >= d0) delete st.t[t][d];
   writeOpens(data, st, d0);
+  // минимумы дня сделок из форм дня D: слой пополняет только сборка GitHub, на сервере в 22:03 их ещё нет (--keep-lows — оставить, как было до 11.2026)
+  if (!argv.includes('--keep-lows')) {
+    const drop = new Set();
+    for (const f of readdirSync(join(data, 'trades')).filter(x => x.endsWith('.json.gz'))) for (const r of readJsonGz(join(data, 'trades', f), { trades: [] }).trades ?? []) if (r.fdate === D && r.code === 'P' && r.t) drop.add(`${r.t},${r.tdate}`);
+    const lp = join(data, 'reference', 'lows.csv.gz');
+    if (existsSync(lp)) {
+      const lines = gunzipSync(readFileSync(lp)).toString('utf8').split('\n');
+      const kept = lines.filter((l, i) => i === 0 || !drop.has(l.slice(0, l.indexOf(',', l.indexOf(',') + 1))));
+      if (kept.length !== lines.length) writeFileSync(lp, gzipSync(kept.join('\n'), { level: 9 }));
+      lowsCut = lines.length - kept.length;
+    }
+  }
   // 4. сборка VPS
   const vpsSite = join(WORK, 'vps-' + D);
   const code = await morningMain(['--state', join(WORK, 'state-' + D), '--data', data, '--site', vpsSite, '--date', D, '--no-sync', '--no-live', '--no-index-check', '--once', '--dry-run', '--interval', '1'],
@@ -126,7 +146,7 @@ for (const D of DAYS) {
   const ok = !out.length && vps.listFor === ref.listFor && vps.days[0].date === D;
   if (!ok) bad++;
   table.push({ D, rows: a.n, same: a.same, prevRows: b.n, prevSame: b.same, main: vps.days[0].rows.filter(x => x.main).length, unpriced: vps.days[0].unpriced?.length ?? 0, ok, sec: Math.round((Date.now() - t0) / 1000) });
-  console.log(`${ok ? 'OK  ' : 'FAIL'} ${D}: строк списка ${a.same}/${a.n} совпало (основных ${vps.days[0].rows.filter(x => x.main).length}), результатов дня D−1 ${b.same}/${b.n}, без цены ${vps.days[0].unpriced?.length ?? 0}, ${Math.round((Date.now() - t0) / 1000)} с`);
+  console.log(`${ok ? 'OK  ' : 'FAIL'} ${D}: строк списка ${a.same}/${a.n} совпало (основных ${vps.days[0].rows.filter(x => x.main).length}), результатов дня D−1 ${b.same}/${b.n}, без цены ${vps.days[0].unpriced?.length ?? 0}, минимумов дня убрано ${lowsCut}, ${Math.round((Date.now() - t0) / 1000)} с`);
   for (const l of out) console.log('     ' + l);
   rmSync(join(WORK, 'state-' + D), { recursive: true, force: true });
   void rest;

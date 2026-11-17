@@ -305,7 +305,10 @@ export function parseYahooChart(body) {
   // Открытие и «сырое» закрытие дня из того же ответа — для prices/_opens.json.gz (lib/opens.mjs).
   // В ряд они не попадают: чистящая цепочка чтения кэша их не знает.
   const openArr = r.indicators?.quote?.[0]?.open;
-  const ohlc = new Map();
+  // Минимум дня из того же ответа — для слоя reference/lows.csv.gz на сборке сервера (lib/bars.mjs, applyLows): гейт «скидка к рынку»
+  // без него отсеивает покупку, прошедшую внутри дневного диапазона. В ряд не попадает, как и открытие.
+  const lowArr = r.indicators?.quote?.[0]?.low;
+  const ohlc = new Map(), lowOf = new Map();
   let prevIso = '';
   for (let i = 0; i < r.timestamp.length; i++) {
     const a = adj[i], c = close[i] ?? adj[i];
@@ -316,6 +319,8 @@ export function parseYahooChart(body) {
     const row = [iso, rnd(Number.isFinite(c) && c > 0 ? c : a), rnd(a), Number.isFinite(v) ? v : 0];
     const o = openArr?.[i], cRaw = close[i];
     ohlc.set(iso, [Number.isFinite(o) && o > 0 ? rnd(o) : null, Number.isFinite(cRaw) && cRaw > 0 ? rnd(cRaw) : null]);
+    const lo = lowArr?.[i];
+    if (Number.isFinite(lo) && lo > 0) lowOf.set(iso, lo); else lowOf.delete(iso);
     if (iso === prevIso) { series[series.length - 1] = row; continue; }
     series.push(row);
     prevIso = iso;
@@ -335,7 +340,8 @@ export function parseYahooChart(body) {
   const kept = new Set(clean.series.map(x => x[0]));
   return clean.series.length
     ? { series: clean.series, splits, dropped: clean.dropped, exchange: r.meta?.exchangeName ?? null,
-        ohlc: [...ohlc].filter(([d]) => kept.has(d)).map(([d, [o, c]]) => [d, o, c]) }
+        ohlc: [...ohlc].filter(([d]) => kept.has(d)).map(([d, [o, c]]) => [d, o, c]),
+        lows: [...lowOf].filter(([d]) => kept.has(d)) }
     : { missing: true };
 }
 

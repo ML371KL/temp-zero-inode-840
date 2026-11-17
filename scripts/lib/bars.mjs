@@ -3,7 +3,9 @@
 // (GET /bars, тот же токен приёма) и разбираются тем же кодом, что и в ежедневной сборке (parseYahooChart). Результат вливается в
 // копию data/ на VPS: кэш цен, сплиты и открытия дня входа. В ветку data VPS ничего не пишет.
 import { join } from 'node:path';
-import { parseYahooChart, readPriceCache, writePriceCache, mergeSeries } from './prices.mjs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { gunzipSync, gzipSync } from 'node:zlib';
+import { parseYahooChart, readPriceCache, writePriceCache, mergeSeries, nominalFactor } from './prices.mjs';
 import { readOpens, writeOpens, mergeOpens, pickOpens, volumesOf, OPENS_BENCH } from './opens.mjs';
 import { readJson, writeJson, addDaysIso } from './util.mjs';
 import { FPI } from './fpi.mjs';
@@ -50,6 +52,39 @@ export async function fetchBars(base, token, items, { fetchImpl = fetch, pauseMs
     for (const x of chunk) if (!got.has(x.sym) && !failed[x.sym]) failed[x.sym] = 'нет в ответе воркера';
   }
   return { got, failed, limited };
+}
+
+// Минимумы дня для гейта «скидка к рынку» (lib/gates.mjs, belowDayRange). Слой reference/lows.csv.gz пополняет только ежедневная
+// сборка GitHub (scripts/lows.mjs), поэтому на сервере в 22:03 у сделок из сегодняшних форм минимумов не было, и покупка дешевле
+// закрытия дня сделки на 8% отсеивалась без проверки диапазона: 12.11.2026 у COHR и EQPT крупнейшая покупка события на сервере
+// оказалась $223 тыс. и $250 тыс. вместо $997 тыс. и $554 тыс., вечерний план бота разошёлся с утренним (аудит форм 17.11.2026,
+// находка 4). Ответ источника цен, который сборка и так получает через воркер, несёт минимум дня: дописываем его в свою копию слоя
+// в том же виде, что lows.mjs, — строка «тикер формы, дата сделки, минимум дня, минимум предыдущего бара» в номинальной шкале.
+// needs — { тикер формы: [даты сделок] } (план сборки, compute --plan). Возвращает число дописанных строк.
+export const LOWS_BACK_DAYS = 7;          // запрос начинается за неделю до первой даты сделки: нужен и предыдущий торговый день
+export function applyLows(dataDir, got, needs = {}) {
+  const path = join(dataDir, 'reference', 'lows.csv.gz');
+  const text = existsSync(path) ? gunzipSync(readFileSync(path)).toString('utf8').replace(/\n+$/, '') : 'ticker,date,low,prevlow';
+  const have = new Set();
+  for (const l of text.split('\n').slice(1)) have.add(l.slice(0, l.indexOf(',', l.indexOf(',') + 1)));
+  const known = readJson(join(dataDir, 'prices', '_splits.json'), {});
+  const add = [];
+  for (const [sym, dates] of Object.entries(needs)) {
+    const r = got.get(sym);
+    if (!r?.lows?.length) continue;
+    const days = r.lows.map(x => x[0]);
+    const splits = [...new Map([...(known[sym] ?? []), ...(r.splits ?? [])].map(s => [s[0], s])).values()];
+    for (const d of new Set(dates)) {
+      if (have.has(`${sym},${d}`)) continue;
+      const i = days.indexOf(d);
+      if (i < 0) continue;
+      const k = nominalFactor(splits, d);
+      add.push(`${sym},${d},${(r.lows[i][1] * k).toFixed(4)},${i > 0 ? (r.lows[i - 1][1] * k).toFixed(4) : ''}`);
+      have.add(`${sym},${d}`);
+    }
+  }
+  if (add.length) { mkdirSync(join(dataDir, 'reference'), { recursive: true }); writeFileSync(path, gzipSync(text + '\n' + add.join('\n'), { level: 9 })); }
+  return add.length;
 }
 
 // Влить ответы в копию data/. opensNeeds — { тикер: [даты подач] }: для них в хранилище открытий кладётся первый торговый день

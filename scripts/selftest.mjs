@@ -3749,6 +3749,7 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
 
   // ---------- B2а, B4: журнал ленты — запас для подач, которые не скачались, и для ночи, когда SEC не отвечает ----------
   const mb = await import('./vps/morning-build.mjs');
+  const morningLib = await import('./lib/morning.mjs');
 
   ok('B2а: подачи индекса, которые не скачались, берутся из журнала ленты; покрытие дня пересчитывается', () => {
     const work = join(ROOT, '.selftest-feedfill'), data = join(work, 'repo'), feedDir = join(work, 'feed'), D = '2026-11-06';
@@ -3826,6 +3827,82 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   await okAsync('B4: индекс есть, но шаг форм не удался и на последней попытке — список по ленте вместо «НЕ СОБРАНО»', async () => {
     feedListOk(await feedNight('.selftest-feed-b4b', (req, res) => { if (req.method === 'HEAD') { res.writeHead(200); res.end(); } else { res.writeHead(503); res.end('busy'); } }), 'шаг форм не удался');
   });
+
+  // ---------- B3: минимумы дня на сервере ----------
+  const { applyLows, LOWS_BACK_DAYS } = await import('./lib/bars.mjs');
+  const { readLows } = await import('./lib/prices.mjs');
+  // ответ источника цен с минимумами дня: lows — { дата: минимум }
+  const chartLow = (series, lows = {}) => { const c = chartOf(series); c.chart.result[0].indicators.quote[0].low = series.map(r => lows[r[0]] ?? null); return c; };
+
+  ok('B3: минимум дня из ответа источника цен дописывается в слой в том же виде, что у lows.mjs (тикер формы, дата сделки, номинальная шкала)', () => {
+    const dir = join(ROOT, '.selftest-lows');
+    rmSync(dir, { recursive: true, force: true }); mkdirSync(join(dir, 'reference'), { recursive: true });
+    const ser = [['2026-11-06', 210, 210, 1e6], ['2026-11-09', 205, 205, 1e6], ['2026-11-10', 225, 225, 1e6]];
+    const got = new Map([['COHR', parseYahooChart(chartLow(ser, { '2026-11-06': 206.1, '2026-11-09': 197.19, '2026-11-10': 203.5 }))], ['NOLO', parseYahooChart(chartOf(ser))]]);
+    assert.deepEqual(got.get('COHR').lows, [['2026-11-06', 206.1], ['2026-11-09', 197.19], ['2026-11-10', 203.5]]);
+    assert.deepEqual(got.get('NOLO').lows, [], 'источник не отдал минимумы — слой не трогаем');
+    assert.equal(applyLows(dir, got, { COHR: ['2026-11-09', '2026-11-08'], NOLO: ['2026-11-09'], NONE: ['2026-11-09'] }), 1, 'только день с баром; 08.11 — воскресенье');
+    assert.deepEqual(readLows(dir).get('COHR|2026-11-09'), [197.19, 206.1], 'минимум дня сделки и предыдущего бара');
+    assert.equal(applyLows(dir, got, { COHR: ['2026-11-09', '2026-11-10'] }), 1, 'уже лежащая строка не дублируется');
+    assert.equal(readLows(dir).size, 2);
+    // сплит после даты сделки: минимум возвращается в цену своего времени, как у lows.mjs
+    writeJson(join(dir, 'prices', '_splits.json'), { SPLT: [['2026-11-10', 2]] });
+    assert.equal(applyLows(dir, new Map([['SPLT', parseYahooChart(chartLow(ser, { '2026-11-06': 100, '2026-11-09': 98 }))]]), { SPLT: ['2026-11-09'] }), 1);
+    assert.deepEqual(readLows(dir).get('SPLT|2026-11-09'), [196, 200]);
+    // гейт: покупка CEO Coherent 12.11.2026 — 199,48 при закрытии 225,19 и минимуме дня 197,19
+    const buy = { code: 'P', px: 199.48, sh: 5000, val: 997400, fn: {} };
+    assert.equal(applyGates(buy, { close: 225.19, lows: null }).drop, 'discount', 'без минимумов (сервер до правки)');
+    assert.equal(applyGates(buy, { close: 225.19, lows: readLows(dir).get('COHR|2026-11-09') }).ok, true, 'с минимумом дня покупка внутри диапазона');
+    assert.equal(LOWS_BACK_DAYS, 7);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  await okAsync('B3: сборка на сервере — план просит минимумы дня сделок, список совпадает с полной сборкой, у которой минимумы уже лежат (COHR 12.11.2026)', async () => {
+    // Покупка на 11,4% дешевле закрытия дня сделки, но внутри дневного диапазона: полная сборка (минимумы в слое) её оставляет,
+    // сборка на сервере до правки отсеивала как «скидку» — крупнейшая покупка события расходилась
+    const base = join(ROOT, '.selftest-lows-vps'), full = join(base, 'full'), work = join(base, 'vps'), data = join(work, 'repo');
+    rmSync(base, { recursive: true, force: true }); mkdirSync(join(full, 'state'), { recursive: true });
+    const days = bizDays('2024-01-02', today), FB = days.filter(d => d <= addDaysIso(today, -6)).at(-1), TD = days[days.indexOf(FB) - 1], PD = days[days.indexOf(FB) - 2];
+    const flat = days.map(d => [d, 100, 100, 1e6]);
+    const lser = days.map(d => [d, d >= TD ? 225 : 205, d >= TD ? 225 : 205, 1e6]);          // LOWA: рост 205 → 225 в день сделки
+    for (const b of ['SPY', 'IWM']) writePriceCache(full, b, flat);
+    writePriceCache(full, 'LOWA', lser);
+    writeJson(join(full, 'reference', 'tickers.json'), { 444: { ticker: 'LOWA', exchange: 'NYSE', name: 'Low Inside Range' } });
+    const buy = (acc, owners, sh, px) => T({ acc, cik: 444, t: 'LOWA', fdate: FB, tdate: TD, owners, code: 'P', sh, px, val: Math.round(sh * px), own: 1e5 });
+    writeJsonGz(join(full, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [buy('W1', ceo, 5000, 199.48), buy('W2', dir, 1000, 224)] });
+    writeJson(join(full, 'state', 'live.json'), { schema: SHARD_VERSION, lastDay: FB, coverage: { [FB]: { status: 'complete', indexed: 2, collected: 2, pending: 0, at: 'x' } } });
+    const lowsFile = (dir, lines) => applyLows(dir, new Map([['LOWA', parseYahooChart(chartLow(lser, lines))]]), { LOWA: [TD] });
+    const lowLines = { [PD]: 203.5, [TD]: 197.19 };
+    const run = (dataDir, site, extra = []) => execFileSync(process.execPath, [join(ROOT, 'scripts', 'compute.mjs'), '--data', dataDir, '--site', site, '--only-morning', ...extra], { stdio: 'pipe' });
+    const rowOf = site => readJson(join(site, 'data', 'morning.json')).days.find(d => d.date === FB).rows.find(r => r.t === 'LOWA');
+    try {
+      for (const d of ['trades', 'reference', 'prices', 'state']) cpSync(join(full, d), join(data, d), { recursive: true });       // копия сервера — ещё без минимумов
+      lowsFile(full, lowLines);                                                                                                     // полная сборка: lows.mjs их уже дописал
+      run(full, join(base, 'site-full'));
+      const ref = rowOf(join(base, 'site-full'));
+      assert.equal(ref.mx, 997400, 'эталон: покупка CEO внутри дневного диапазона остаётся');
+      run(data, join(base, 'site-nolow'), ['--plan', join(base, 'plan-nolow.json')]);
+      assert.equal(rowOf(join(base, 'site-nolow')).mx, 224000, 'без минимумов крупнейшая покупка события — другая: то, что сервер считал до правки');
+      assert.deepEqual(readJson(join(base, 'plan-nolow.json')).lows, { LOWA: [TD] }, 'план докачки просит минимум дня сделки: ключ — тикер формы и дата сделки');
+      // сборка на сервере: бар D0 срезан, воркер отдаёт ответ источника с минимумами
+      const d0 = days.filter(d => d <= FB).at(-1);
+      for (const sym of ['SPY', 'IWM', 'LOWA']) writePriceCache(data, sym, readPriceCache(data, sym).filter(r => r[0] < d0));
+      const api = await fakeWorker({ charts: { SPY: from => chartOf(flat.filter(r => r[0] >= from)), IWM: from => chartOf(flat.filter(r => r[0] >= from)), LOWA: from => chartLow(lser.filter(r => r[0] >= from), lowLines) } });
+      try {
+        const code = await morningMain(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', FB, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--once', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+        assert.equal(code, 0);
+        // день подачи в фикстуре уже прошёл, поэтому план считается дважды: ко второму проходу минимум лежит в слое, и план его больше не просит
+        assert.deepEqual(readJson(join(work, 'plan.json')).lows, {}, 'после докачки минимум дня в слое');
+        const asked = api.calls.bars.filter(b => b.sym === 'LOWA').map(b => b.from).sort()[0];
+        assert.ok(asked <= addDaysIso(TD, -LOWS_BACK_DAYS), `запрос покрывает день сделки и предыдущий бар: с ${asked}`);
+        assert.deepEqual(readLows(data).get(`LOWA|${TD}`), [197.19, 203.5]);
+        const row = JSON.parse(api.calls.morningPuts[0]).days.find(d => d.date === FB).rows.find(r => r.t === 'LOWA');
+        for (const k of ['mx', 'val', 'n', 'score', 'main']) assert.deepEqual(row[k], ref[k], `поле ${k}: сервер = полная сборка`);
+      } finally { await api.close(); }
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  //B6-TEST-PLACEHOLDER
 }
 
 rmSync(TMP, { recursive: true, force: true });

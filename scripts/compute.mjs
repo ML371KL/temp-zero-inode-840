@@ -603,7 +603,7 @@ const fmtHealth = h => (h ? `${h.status} с ${h.since}, по ${h.asOf}: m ${(h.m
 // дней не хватает открытия/закрытия дня входа. Пусто — докачивать нечего.
 if (PLAN) {
   const d0 = listFor ? d0Of(listFor) : null;
-  const bars = {}, opens = {};
+  const bars = {}, opens = {}, lows = {};
   if (listFor && d0) {
     for (const r of buys) {
       if (r.fdate !== listFor || !(r.val >= MORNING.minVal) || isNonCommon(r.sec)) continue;
@@ -612,13 +612,23 @@ if (PLAN) {
       if (!s?.some(x => x[0] === d0)) bars[r.T] = { last };   // нужен именно бар D0 (кэш мог уйти и дальше него)
     }
   }
+  // Минимумы дня сделок из форм дня listFor, которых нет в слое reference/lows.csv.gz: ключ слоя — тикер ФОРМЫ и дата сделки (как у
+  // scripts/lows.mjs и у гейта «скидка к рынку»). Глубже года назад не ходим — как lows.mjs.
+  if (listFor) {
+    const cut = addDaysIso(listFor, -400);
+    for (const r of buys) {
+      if (r.fdate !== listFor || !(r.val >= MORNING.minVal) || isNonCommon(r.sec) || !plausibleTicker(r.t) || r.tdate < cut) continue;
+      if (!lowsMap.has(`${r.t}|${r.tdate}`) && !(lows[r.t] ??= []).includes(r.tdate)) lows[r.t].push(r.tdate);
+    }
+    for (const t of Object.keys(lows)) if (!lows[t].length) delete lows[t];
+  }
   for (const day of morningDays) {
     if (!day.done) continue;
     for (const row of day.rows) if (row.skip === 'noopen' || row.skip === 'noclose') (opens[row.t] ??= []).push(day.date);
   }
   // opensPending: день listFor уже «прошёл» (его D+1 в хранилище открытий есть) и в нём есть бумаги без бара D0 — их открытия станут видны только после
   // докачки баров (второй проход плана). В боевой сборке день listFor ещё не прошёл, и второго прохода нет.
-  writeJson(PLAN, { listFor, d0, bars, opens, opensPending: !!(morningDays[0]?.done && morningDays[0]?.unpriced?.length) });
+  writeJson(PLAN, { listFor, d0, bars, opens, lows, opensPending: !!(morningDays[0]?.done && morningDays[0]?.unpriced?.length) });
 }
 if (ONLY_MORNING) {
   console.log(`[compute] --only-morning: список за ${listFor}, бумаг от $10 млн ${morningDays[0]?.rows.length ?? 0}, без цены на D0 ${morningDays[0]?.unpriced?.length ?? 0}`);
