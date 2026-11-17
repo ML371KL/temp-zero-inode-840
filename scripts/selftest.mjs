@@ -3902,7 +3902,20 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     } finally { rmSync(base, { recursive: true, force: true }); }
   });
 
-  //B6-TEST-PLACEHOLDER
+  ok('B6: сверка двух сборок сравнивает и крупнейшую покупку события (12.11.2026: COHR $223 тыс. у сервера, $997 тыс. у GitHub при том же скоре)', () => {
+    const { mxDiffers, MX_TOL } = morningLib;
+    const r = (t, score, mx, val = mx) => ({ t, name: t, score, main: score >= 2, mx, val });
+    const vps = [r('MP', 4, 2.1e6), r('HOS', 3, 5e5), r('COHR', 3, 222885, 1220285), r('EQPT', 3, 249989, 804105), r('PAM', 3, 786517)];
+    const gh = [r('MP', 4, 2.1e6), r('HOS', 3, 5e5), r('COHR', 3, 997400, 1220285), r('EQPT', 3, 554116, 804105), r('PAM', 3, 786517)];
+    const c = compareMain(vps, gh);
+    assert.equal(c.same, false, 'состав и скор равны, но порядок бумаг у бота другой');
+    assert.deepEqual(c.diff.map(x => [x.t, x.was, x.now, x.mxWas, x.mxNow]), [['COHR', 3, 3, 222885, 997400], ['EQPT', 3, 3, 249989, 554116]]);
+    assert.equal(compareMain(gh, gh).same, true);
+    assert.equal(compareMain([r('A', 2, 100000)], [r('A', 2, 100900)]).same, true, 'расхождение до 1% — не отличие (округление цены)');
+    assert.equal(compareMain([r('A', 2, 100000)], [r('A', 2, 101100)]).same, false);
+    assert.deepEqual(compareMain([r('A', 2, 1e5)], [r('A', 3, 2e6)]).diff[0], { t: 'A', name: 'A', was: 2, now: 3, val: 2e6 }, 'изменился скор — запись прежнего вида');
+    assert.equal(mxDiffers({ val: 5 }, { val: 5 }), false, 'у старых строк без mx сравнивается сумма'); assert.equal(MX_TOL, 0.01);
+  });
 }
 
 rmSync(TMP, { recursive: true, force: true });

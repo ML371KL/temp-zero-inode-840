@@ -360,6 +360,8 @@ function fixMessage(cc) {
     const tail = `<b>${esc(x.t)}</b> · ${esc(trunc(nameCase(x.name), 24))}`;
     if (x.was === null) return `+ ${tail} · скор ${x.now}${x.val ? ' · ' + money(x.val) : ''}`;
     if (x.now === null) return `− ${tail} убрана`;
+    // скор тот же, разошлась крупнейшая покупка события: от неё зависит место бумаги в очереди бота
+    if (x.mxWas !== undefined) return `≈ ${tail} · скор ${x.now} · крупнейшая покупка ${money(x.mxWas)} → ${money(x.mxNow)}`;
     return `≈ ${tail} · скор ${x.was} → ${x.now}`;
   });
   lines.push(...show);

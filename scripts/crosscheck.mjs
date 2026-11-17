@@ -1,5 +1,5 @@
 // Сверка списка ежедневной сборки (полный пересчёт на GitHub) со списком, который собрал и опубликовал VPS за ту же дату подачи.
-// Две независимые сборки одного дня: если основной список (состав или скор) разошёлся, это пишется в morning.json как crossCheck, а
+// Две независимые сборки одного дня: если основной список (состав, скор или крупнейшая покупка события) разошёлся, это пишется в morning.json как crossCheck, а
 // notify.mjs шлёт короткое письмо-уточнение, когда VPS уже отправил своё. Шаг необязательный: воркер недоступен, списка VPS нет
 // или он за другой день — сверки нет, ничего не падает.
 //   node scripts/crosscheck.mjs [--site site]            (MORNING_URL — адрес воркера)
@@ -32,4 +32,5 @@ mine.crossCheck = { listFor: mine.listFor, vpsBuiltAt: vps.builtAt, same: cmp.sa
 writeJson(file, mine);
 console.log(cmp.same
   ? `[crosscheck] ${mine.listFor}: списки совпали (основной: ${cmp.github})`
-  : `[crosscheck] ${mine.listFor}: РАСХОЖДЕНИЕ — VPS ${cmp.vps}, GitHub ${cmp.github}; ${cmp.diff.map(x => `${x.t} ${x.was ?? '—'}→${x.now ?? '—'}`).join(', ')}`);
+  : `[crosscheck] ${mine.listFor}: РАСХОЖДЕНИЕ — VPS ${cmp.vps}, GitHub ${cmp.github}; ${cmp.diff.map(x => (x.mxWas !== undefined
+    ? `${x.t} крупнейшая покупка ${x.mxWas}→${x.mxNow}` : `${x.t} ${x.was ?? '—'}→${x.now ?? '—'}`)).join(', ')}`);
