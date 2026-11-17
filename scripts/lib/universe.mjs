@@ -46,9 +46,13 @@ export function loadAllTrades(dataDir) {
   // (встречались строки на сотни миллиардов долларов) остался бы в выборке вторым экземпляром.
   // Замещает ТОЛЬКО поправка (resolveAmendments): две исходные формы одного лица за одну дату сделки —
   // это разные покупки (KOD 30.09.2026: три формы Baker Bros на $58,6 / $35,0 / $60,5 млн), их складываем.
+  // Лицо в ключе — наименьший CIK подателей, а не первый по порядку: в датасете SEC порядок подателей произвольный и у исходной
+  // формы и поправки разный (в 2026q3 первый податель датасета не совпал с первым подателем формы у 18 подач из 26). Поправка с
+  // несколькими подателями поэтому не находила исходную строку и оставалась вторым «первым раскрытием» со своей датой: 242 строки
+  // покупок за 2016–2026, около 5 лишних событий в год (CVNA: форма 14.06.2022 и поправка 15.06.2022; аудит форм 17.11.2026, A2).
   const groups = new Map();
   for (const r of byKey.values()) {
-    const k = `${r.cik}|${r.owners[0]?.cik ?? 0}|${r.tdate}|${r.code}|${secKey(r.sec)}`;
+    const k = `${r.cik}|${ownerKeyOf(r)}|${r.tdate}|${r.code}|${secKey(r.sec)}`;
     (groups.get(k) ?? groups.set(k, []).get(k)).push(r);
   }
   const out = [];
@@ -70,6 +74,13 @@ export function loadAllTrades(dataDir) {
     trades: out,
     stats: { raw: byKey.size, replacedByAmendment: replaced, exactDuplicates: exactDups, separateOriginals: keptOriginals, amendments: amend.length },
   };
+}
+
+// Устойчивый признак состава подателей строки: наименьший CIK (0 — подателей нет). От порядка подателей не зависит.
+export function ownerKeyOf(r) {
+  let m = 0;
+  for (const o of r.owners ?? []) if (o?.cik > 0 && (!m || o.cik < m)) m = o.cik;
+  return m;
 }
 
 // Строки одного эмитента, лица, даты сделки, кода и класса из РАЗНЫХ подач.

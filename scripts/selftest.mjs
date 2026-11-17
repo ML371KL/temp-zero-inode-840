@@ -3207,6 +3207,7 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
 // ==================== АУДИТ ФОРМ 17.11.2026 (audit-840-forms-2026-11-17/REPORT.md), пакет A: разбор и отбор ====================
 {
   const { titleFlags, roleFlags, PARSER_REV, QUARTER_REV } = await import('./lib/edgar.mjs');
+  const universeLib = await import('./lib/universe.mjs');
   // Квартальный датасет с заданными строками сделок: [подача, дата, код, акции, цена, остаток, класс, A/D]
   const quarterZip = (rows, owners = [['Q-1', 900, 'Ivanov Ivan', 'Director', '']]) => zipCreate({
     'SUBMISSION.tsv': ['ACCESSION_NUMBER\tFILING_DATE\tDOCUMENT_TYPE\tISSUERCIK\tISSUERNAME\tISSUERTRADINGSYMBOL\tAFF10B5ONE\tDATE_OF_ORIG_SUB\tREMARKS',
@@ -3301,6 +3302,27 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
 
   ok('A4: ревизии разбора подняты — кварталы и живое окно перечитываются', () => {
     assert.equal(PARSER_REV, 3); assert.equal(QUARTER_REV, 4);
+  });
+
+  ok('A5: поправка находит исходную форму при любом порядке подателей (Carvana 14 и 15.06.2022 — одно событие)', () => {
+    const { ownerKeyOf } = universeLib;
+    const garcia = { cik: 1017608, name: 'GARCIA ERNEST C. II', rel: 'T', title: '' }, verde = { cik: 1704727, name: 'VERDE INVESTMENTS, INC.', rel: 'T', title: '' };
+    const row = (o, extra = {}) => ({ acc: 'CV-1', form: '4', fdate: '2022-06-14', tdate: '2022-06-13', cik: 1690820, t: 'CVNA', owners: o, code: 'P', sh: 1191468, px: 20.67, val: 24628050,
+      own: 5e6, di: 'I', ownD: null, shD: null, b5: 0, orig: null, sec: 'Class A Common Stock', fn: {}, ...extra });
+    const d = join(TMP, '..', '.selftest-amendkey');
+    rmSync(d, { recursive: true, force: true });
+    writeJsonGz(join(d, 'trades', '2022.json.gz'), { v: SHARD_VERSION, amend: [], trades: [
+      row([garcia, verde]),
+      row([verde, garcia], { acc: 'CV-2', form: '4/A', fdate: '2022-06-15', orig: '2022-06-14' }),            // у поправки податели в другом порядке
+      row([{ cik: 1700538, name: 'GILL DANIEL J.', rel: 'O', title: 'Chief Product Officer' }], { acc: 'CV-3', sh: 94000, px: 21.77, val: 2046380 }),   // другое лицо, та же дата — не трогается
+    ] });
+    const { trades, stats } = loadAllTrades(d);
+    assert.equal(trades.length, 2, 'исходная форма и поправка — одна строка, покупка другого лица — своя');
+    const g = trades.find(r => r.val === 24628050);
+    assert.equal(g.form, '4/A'); assert.equal(g.fdate, '2022-06-14', 'поправка встала на место исходной: дата раскрытия — день первой подачи');
+    assert.equal(g.famend, '2022-06-15'); assert.equal(stats.replacedByAmendment, 1);
+    assert.equal(ownerKeyOf({ owners: [verde, garcia] }), 1017608); assert.equal(ownerKeyOf({ owners: [] }), 0); assert.equal(ownerKeyOf({}), 0);
+    rmSync(d, { recursive: true, force: true });
   });
 }
 
