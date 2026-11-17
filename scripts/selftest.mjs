@@ -3661,6 +3661,91 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       assert.deepEqual([c.status, c.collected, c.gone], ['complete', 2, 1]);
     } finally { await new Promise(r => srv.close(r)); rmSync(L, { recursive: true, force: true }); }
   });
+
+  // ---------- B5: лента на весь день — устойчивость ----------
+  const { FEED: FEEDP, formComplete } = await import('./lib/feed.mjs');
+  const nyToday = nyWall(Date.now()).slice(0, 10);
+  const feedRun = (dir, base, extra = ['--once']) => runScript(join('vps', 'feed-collector.mjs'), ['--dir', dir, ...extra], { EDGAR_BASE: base });
+  const journalOf = (dir, day = nyToday) => parseFeedJournal(existsSync(feedFile(dir, day)) ? readFileSync(feedFile(dir, day), 'utf8') : '');
+
+  await okAsync('B5: лента — сбой страницы не отменяет скачивание уже замеченных форм; три несдающиеся подряд формы не затягивают такт', async () => {
+    const dir = join(ROOT, '.selftest-feed-b5a');
+    rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true });
+    const accs = [1, 2, 3, 4, 5].map(accB);
+    writeFileSync(feedFile(dir, nyToday), accs.map(a => JSON.stringify({ k: 'seen', acc: a, cik: 555000, form: '4', filed: nyToday, upd: null, t: 'x' })).join('\n') + '\n');
+    const hits = { pages: 0, forms: [] };
+    let mode = 'page-down';
+    const srv = createServer((req, res) => {
+      if (req.url.startsWith('/cgi-bin/browse-edgar')) { hits.pages++; if (mode === 'page-down') { res.writeHead(503); res.end('busy'); } else { res.writeHead(200); res.end(atomOf([])); } return; }
+      const m = /(\d{10}-\d{2}-\d{6})\.txt$/.exec(req.url);
+      if (m) { hits.forms.push(m[1]); if (mode === 'forms-down') { res.writeHead(503); res.end('busy'); } else { res.writeHead(200); res.end(formB(m[1], 'AAA', { day: nyToday })); } return; }
+      res.writeHead(404); res.end();
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${srv.address().port}`;
+    try {
+      const r1 = await feedRun(dir, base);
+      assert.equal(r1.code, 0, r1.out);
+      assert.deepEqual([...journalOf(dir).forms.keys()].sort(), accs, 'страница ленты не ответила, а замеченные раньше формы разобраны');
+      assert.match(r1.out, /сбой такта/, 'такт при этом считается сбойным: ленту не прочитали');
+      const f = journalOf(dir).forms.get(accs[0]);
+      assert.equal(f.rev, PARSER_REV); assert.equal(f.end, true, 'в журнале — ревизия разбора и признак полного файла');
+      // формы не отдаются: после трёх сбоев подряд очередь ждёт следующего такта
+      rmSync(feedFile(dir, nyToday));
+      writeFileSync(feedFile(dir, nyToday), accs.map(a => JSON.stringify({ k: 'seen', acc: a, cik: 555000, form: '4', filed: nyToday, upd: null, t: 'x' })).join('\n') + '\n');
+      mode = 'forms-down'; hits.forms.length = 0;
+      const r2 = await feedRun(dir, base);
+      assert.equal(r2.code, 0, r2.out);
+      assert.equal(new Set(hits.forms).size, 3, 'запрошены три подачи из пяти: ' + hits.forms.length + ' запросов');
+      assert.equal(hits.forms.length, 3 * (FEEDP.retries + 1), 'один повтор на запрос');
+      assert.equal(journalOf(dir).forms.size, 0);
+    } finally { await new Promise(r => srv.close(r)); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  await okAsync('B5: лента — первый такт дня не перекачивает вчерашние формы; замеченная вчера, но не разобранная подача добирается', async () => {
+    const dir = join(ROOT, '.selftest-feed-b5b');
+    rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true });
+    const yday = addDaysIso(nyToday, -1), [Y1, Y2, N1] = [11, 12, 13].map(accB);
+    writeFileSync(feedFile(dir, yday), [{ k: 'seen', acc: Y1, cik: 555000, form: '4', filed: yday }, { k: 'form', acc: Y1, filed: yday, trades: [], amend: [] },
+      { k: 'seen', acc: Y2, cik: 555000, form: '4', filed: yday }].map(x => JSON.stringify(x)).join('\n') + '\n');
+    const hits = [];
+    const srv = createServer((req, res) => {
+      if (req.url.startsWith('/cgi-bin/browse-edgar')) { res.writeHead(200); res.end(atomOf(/start=0(&|$)/.test(req.url) ? [{ acc: N1, cik: 555000, filed: nyToday }, { acc: Y1, cik: 555000, filed: yday }, { acc: Y2, cik: 555000, filed: yday }] : [])); return; }
+      const m = /(\d{10}-\d{2}-\d{6})\.txt$/.exec(req.url);
+      if (m) { hits.push(m[1]); res.writeHead(200); res.end(formB(m[1], 'AAA', { day: nyToday })); return; }
+      res.writeHead(404); res.end();
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    try {
+      const r = await feedRun(dir, `http://127.0.0.1:${srv.address().port}`);
+      assert.equal(r.code, 0, r.out);
+      assert.deepEqual(hits.slice().sort(), [Y2, N1].sort(), 'вчерашняя разобранная подача не качается заново; вчерашняя неразобранная и новая — качаются');
+      const j = journalOf(dir);
+      assert.deepEqual([...j.seen.keys()], [N1], 'в журнал дня «замечена» пишется только новая');
+      assert.deepEqual([...j.forms.keys()].sort(), [Y2, N1].sort());
+    } finally { await new Promise(r => srv.close(r)); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  await okAsync('B5: лента — выход с ошибкой по времени слепоты; порог 15 минут не упирается в предел перезапусков юнита', async () => {
+    const dir = join(ROOT, '.selftest-feed-b5c');
+    rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true });
+    const srv = createServer((req, res) => { res.writeHead(503); res.end('busy'); });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    try {
+      const r = await feedRun(dir, `http://127.0.0.1:${srv.address().port}`, ['--from', '00:00', '--until', '23:59', '--interval', '0.05', '--blind-exit-min', '0']);
+      assert.equal(r.code, 1, r.out);
+      assert.equal((r.out.match(/сбой такта/g) ?? []).length, FEEDP.blindMinTicks, 'не раньше трёх сбоев подряд');
+      assert.match(r.out, /выход с ошибкой/);
+      assert.ok(journalOf(dir).stats.some(s => 'blind' in s), 'слепота записана в журнал');
+    } finally { await new Promise(r => srv.close(r)); rmSync(dir, { recursive: true, force: true }); }
+    // расчёт порога: тревога юнита — через четверть часа слепоты; цикл «слепота + перезапуск» длиннее, чем позволяет предел перезапусков
+    const unit = readFileSync(join(ROOT, 'ops', 'insider840-feed', 'insider840-feed.service'), 'utf8');
+    const num = k => Number(new RegExp(`^${k}=(\\d+)`, 'm').exec(unit)[1]);
+    assert.equal(FEEDP.blindExitMin, 15); assert.equal(FEEDP.timeoutMs, 10000); assert.equal(FEEDP.retries, 1);
+    const cycleSec = FEEDP.blindExitMin * 60 + num('RestartSec');
+    assert.ok(num('StartLimitIntervalSec') / cycleSec < num('StartLimitBurst'), `перезапусков в окне ${(num('StartLimitIntervalSec') / cycleSec).toFixed(1)} при пределе ${num('StartLimitBurst')}`);
+    assert.equal(formComplete('<SEC-DOCUMENT>x\n</SEC-DOCUMENT>\n'), true); assert.equal(formComplete('<SEC-DOCUMENT>x\n<XML>'), false);
+  });
 }
 
 rmSync(TMP, { recursive: true, force: true });

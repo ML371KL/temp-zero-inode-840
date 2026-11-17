@@ -5,12 +5,16 @@ import { existsSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { addDaysIso } from './util.mjs';
 
-export const FEED = { from: '06:00', until: '22:00', intervalSec: 45, keepDays: 14, maxTries: 6 };
+// timeoutMs и retries — запрос к SEC: 10 с и один повтор (худший случай ~22 с вместо 230); backDays — за сколько прошлых дней сборщик
+// читает журналы при старте (длинные выходные); blindExitMin — слепота, после которой сборщик выходит с ошибкой (не меньше blindMinTicks
+// сбоев подряд): тревога юнита примерно через четверть часа, перезапусков не больше четырёх в час.
+export const FEED = { from: '06:00', until: '22:00', intervalSec: 45, keepDays: 14, maxTries: 6, timeoutMs: 10000, retries: 1, backDays: 4, blindExitMin: 15, blindMinTicks: 3 };
 export const feedFile = (dir, nyDate) => join(dir, `${nyDate}.jsonl`);
 
 // Журнал JSONL, по записи в строке:
 //   run  — старт сборщика; seen — номер подачи замечен в ленте {acc, cik, form, filed, upd, t};
-//   form — полный .txt скачан и разобран {acc, filed, at, trades, amend} (строки P и S — как у живого контура);
+//   form — полный .txt скачан и разобран {acc, filed, at, rev, end, trades, amend} (строки P и S — как у живого контура;
+//          rev — ревизия разбора PARSER_REV, end — файл скачан целиком; у записей до 11.2026 этих полей нет);
 //   stat — такт опроса {t, polls, errors, forms, pending, gap}.
 // Оборванная последней строка (убили процесс посреди записи) не ломает чтение.
 export function parseFeedJournal(text) {
@@ -105,5 +109,7 @@ export function parseAtom(xml) {
   }
   return out;
 }
+// Полный .txt подачи скачан целиком: кончается закрывающим тегом документа. Оборванный ответ дал бы «разобранную» форму без сделок.
+export const formComplete = txt => /<\/SEC-DOCUMENT>\s*$/.test(String(txt ?? ''));
 // Путь полного .txt формы под Archives/ (fetchFiling добавляет https://www.sec.gov/Archives/)
 export const filingPath = (cik, acc) => `edgar/data/${cik}/${acc.replace(/-/g, '')}/${acc}.txt`;

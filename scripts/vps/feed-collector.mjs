@@ -7,12 +7,23 @@
 // Ограничения: SEC — только politeFetch с SEC_UA проекта, не чаще 2,5 запроса в секунду (запас до 10 в секунду, которые SEC разрешает
 // с адреса: в 22:03 рядом работает сборка списка); лента — до 300 записей на такт (три страницы), глубже не идём:
 // если все три страницы целиком новые, это «разрыв» (gap) и он виден в журнале — индекс подберёт пропущенное.
-// Перезапуск безопасен: замеченные и разобранные подачи читаются из журнала дня. Сбой такта не роняет сборщик; 30 подряд — выход с ошибкой.
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
+// Перезапуск безопасен: замеченные и разобранные подачи читаются из журналов последних дней. Сбой такта не роняет сборщик; слепота
+// дольше FEED.blindExitMin минут — выход с ошибкой (тревога юнита и перезапуск).
+//
+// Устойчивость (аудит форм 17.11.2026, находка 5: 16.11 шесть часов сбоев сети, слепые окна до 103 минут, ни одной тревоги):
+//  - таймаут запроса 10 с и один повтор вместо 60 с и двух: зависший запрос держал такт до 230 с;
+//  - сбой страницы ленты не отменяет скачивание уже замеченных форм (форма, замеченная за минуту до сбоя, ждала разбора 24 минуты);
+//  - несдающиеся подряд формы не затягивают такт: после FORM_FAILS_MAX сбоев подряд остаток очереди ждёт следующего такта;
+//  - первый такт дня не перекачивает вчерашние формы: замеченное и разобранное читается и из журналов прошлых дней;
+//  - выход с ошибкой — по ВРЕМЕНИ слепоты, а не по числу сбоев: такт со сбоем длится от ~22 до ~90 с плюс 45 с паузы, и «30 сбоев
+//    подряд» означало от 34 минут до полутора часов без тревоги (16.11 серия из 26 сбоев шла 103 минуты и до порога не дошла).
+//    При пороге 15 минут юнит выходит не чаще четырёх раз в час (15 мин слепоты + 30 с RestartSec), предел перезапусков юнита
+//    (StartLimitBurst=6 за час) не достигается — сборщик переживает сбой любой длины и возвращается сам.
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { politeFetch, SEC_UA } from '../lib/util.mjs';
-import { parseForm4Txt, acceptedAt, edgarBase } from '../lib/edgar.mjs';
+import { parseForm4Txt, acceptedAt, edgarBase, PARSER_REV } from '../lib/edgar.mjs';
 import { nyWall, nyToMs } from '../lib/nytime.mjs';
-import { FEED, feedFile, parseFeedJournal, pruneFeed, parseAtom, filingPath } from '../lib/feed.mjs';
+import { FEED, feedFile, loadFeed, pruneFeed, parseAtom, filingPath, formComplete } from '../lib/feed.mjs';
 
 const args = process.argv.slice(2);
 const argVal = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d; };
@@ -23,6 +34,10 @@ const INTERVAL_MS = Number(argVal('--interval', String(FEED.intervalSec))) * 100
 const ONCE = args.includes('--once');
 const DRY = args.includes('--dry-run');
 const GAP_MS = 400;                                              // ≤ 2,5 запроса в секунду к SEC
+const FORM_FAILS_MAX = 3;                                        // столько подач подряд не скачалось — остаток очереди до следующего такта
+// Порог слепоты для выхода с ошибкой, минут (--blind-exit-min — только для самотестов)
+const BLIND_EXIT_MIN = Number(argVal('--blind-exit-min', String(FEED.blindExitMin)));
+const blindExit = (failedTicks, blindMin) => failedTicks >= FEED.blindMinTicks && blindMin >= BLIND_EXIT_MIN;
 const PAGES = 3, PAGE = 100;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const log = (...a) => console.log(`[feed ${nyWall(Date.now()).slice(11)} ET]`, ...a);
@@ -32,20 +47,19 @@ if (!DRY) mkdirSync(DIR, { recursive: true });
 const dayFile = () => feedFile(DIR, nyWall(Date.now()).slice(0, 10));
 const write = rec => { if (!DRY) appendFileSync(dayFile(), JSON.stringify(rec) + '\n'); };
 
-// Состояние дня — из журнала: замеченные, разобранные, попытки скачать
+// Состояние — из журналов сегодняшнего и предыдущих дней (FEED.backDays): замеченные, разобранные, попытки скачать. Прошлые дни нужны,
+// чтобы первый такт в 06:00 не принимал вчерашние вечерние подачи, ещё стоящие в ленте, за новые (131–146 лишних скачиваний каждое
+// утро). Замеченная вчера, но не разобранная подача остаётся в очереди и добирается сегодня.
 const seen = new Map(), forms = new Set(), tries = new Map();
 {
-  const f = dayFile();
-  if (existsSync(f)) {
-    const j = parseFeedJournal(readFileSync(f, 'utf8'));
-    for (const [a, r] of j.seen) seen.set(a, r);
-    for (const a of j.forms.keys()) forms.add(a);
-  }
+  const j = loadFeed(DIR, nyWall(Date.now()).slice(0, 10), FEED.backDays);
+  for (const [a, r] of j.seen) seen.set(a, r);
+  for (const a of j.forms.keys()) forms.add(a);
 }
 const pending = () => [...seen.values()].filter(s => !forms.has(s.acc) && (tries.get(s.acc) ?? 0) < FEED.maxTries);
 
 async function get(url) {
-  const { body } = await politeFetch(url, { ua: SEC_UA, as: 'text', retries: 2, intervalMs: GAP_MS });
+  const { body } = await politeFetch(url, { ua: SEC_UA, as: 'text', retries: FEED.retries, timeoutMs: FEED.timeoutMs, intervalMs: GAP_MS });
   return body;
 }
 
@@ -59,40 +73,49 @@ async function fetchForm(s) {
   const at = acceptedAt(head);
   const filed = s.filed ?? (at ? at.slice(0, 10) : null);
   const parsed = parseForm4Txt(txt, s.acc, filed);
-  write({ k: 'form', acc: s.acc, filed, at: at ?? null, trades: parsed.trades, amend: parsed.amend });
+  // rev — ревизия разбора, end — файл подачи скачан целиком: ночная сборка берёт из журнала только формы, разобранные её же
+  // разбором и полные (live.mjs --feed-dir), остальные качает сама
+  write({ k: 'form', acc: s.acc, filed, at: at ?? null, rev: PARSER_REV, end: formComplete(txt), trades: parsed.trades, amend: parsed.amend });
   forms.add(s.acc);
   return true;
 }
 
 async function tick(stat) {
-  let gap = false;
+  let gap = false, pageErr = null;
   const backlog = stat.polls === 0;                                // первый такт запуска: накопившееся за ночь или простой — не разрыв
-  for (let page = 0; page < PAGES; page++) {
-    const entries = parseAtom(await get(feedUrl(page * PAGE)));
-    stat.polls++;
-    if (!entries.length) break;
-    const fresh = entries.filter(e => !seen.has(e.acc) && (e.form == null || e.form === '4' || e.form === '4/A'));
-    for (const e of fresh) {
-      const rec = { k: 'seen', acc: e.acc, cik: e.cik, form: e.form, filed: e.filed, upd: e.updated, t: new Date().toISOString() };
-      seen.set(e.acc, rec);
-      write(rec);
+  try {
+    for (let page = 0; page < PAGES; page++) {
+      const entries = parseAtom(await get(feedUrl(page * PAGE)));
+      stat.polls++;
+      if (!entries.length) break;
+      const fresh = entries.filter(e => !seen.has(e.acc) && (e.form == null || e.form === '4' || e.form === '4/A'));
+      for (const e of fresh) {
+        const rec = { k: 'seen', acc: e.acc, cik: e.cik, form: e.form, filed: e.filed, upd: e.updated, t: new Date().toISOString() };
+        seen.set(e.acc, rec);
+        write(rec);
+      }
+      if (!fresh.length) break;                                    // страница целиком знакома — глубже не идём
+      if (page === PAGES - 1 && fresh.length === entries.length && !backlog) gap = true;
     }
-    if (!fresh.length) break;                                    // страница целиком знакома — глубже не идём
-    if (page === PAGES - 1 && fresh.length === entries.length && !backlog) gap = true;
-  }
-  let got = 0;
+  } catch (e) { pageErr = e; }                                    // страница не ответила: замеченные раньше формы всё равно качаем
+  let got = 0, fails = 0;
   for (const s of pending()) {
-    try { if (await fetchForm(s)) got++; } catch (e) { stat.errors++; log(`подача ${s.acc}: ${e.message}`); }
+    try { if (await fetchForm(s)) got++; fails = 0; }
+    catch (e) {
+      stat.errors++; log(`подача ${s.acc}: ${e.message}`);
+      if (++fails >= FORM_FAILS_MAX) { log(`${fails} подачи подряд не скачались — остаток очереди ждёт следующего такта`); break; }
+    }
   }
   stat.forms += got;
   if (gap) { stat.gaps++; log('РАЗРЫВ: три страницы ленты целиком новые — часть подач могла выпасть, их подберёт индекс'); }
+  if (pageErr) throw pageErr;                                     // такт считается сбойным: ленту не прочитали
   return got;
 }
 
 const stat = { polls: 0, errors: 0, forms: 0, gaps: 0 };
-let failed = 0, lastStat = Date.now();
+let failed = 0, blindSince = null, lastStat = Date.now();
 pruneFeed(DIR, nyWall(Date.now()).slice(0, 10));
-write({ k: 'run', start: new Date().toISOString(), from: FROM, until: UNTIL, interval: INTERVAL_MS / 1000, v: 1 });
+write({ k: 'run', start: new Date().toISOString(), from: FROM, until: UNTIL, interval: INTERVAL_MS / 1000, v: 1, rev: PARSER_REV });
 log(`старт: журнал ${DIR}, уже замечено ${seen.size}, разобрано ${forms.size}; окно ${FROM}–${UNTIL} ET`);
 const wallDay = () => nyWall(Date.now()).slice(0, 10);
 const startMs = nyToMs(`${wallDay()}T${FROM}`), endMs = nyToMs(`${wallDay()}T${UNTIL}`);
@@ -100,12 +123,18 @@ if (!ONCE && startMs && Date.now() < startMs) { log(`рано: ждём ${FROM} 
 for (;;) {
   try {
     const n = await tick(stat);
-    failed = 0;
+    failed = 0; blindSince = null;
     if (n) log(`новых разобранных подач: ${n}; замечено ${seen.size}, разобрано ${forms.size}, ждут ${pending().length}`);
   } catch (e) {
     failed++; stat.errors++;
-    log(`сбой такта (${failed} подряд): ${e.message}`);
-    if (failed >= 30) { log('30 тактов подряд без ответа — выход с ошибкой'); process.exit(1); }
+    blindSince ??= Date.now();
+    const blindMin = (Date.now() - blindSince) / 60e3;
+    log(`сбой такта (${failed} подряд, лента не читается ${blindMin.toFixed(1)} мин): ${e.message}`);
+    if (blindExit(failed, blindMin)) {
+      write({ k: 'stat', t: new Date().toISOString(), seen: seen.size, forms: forms.size, pending: pending().length, ...stat, blind: Math.round(blindMin) });
+      log(`лента не читается ${Math.round(blindMin)} мин (${failed} тактов подряд) — выход с ошибкой`);
+      process.exit(1);
+    }
   }
   if (Date.now() - lastStat > 10 * 60e3 || ONCE) {
     write({ k: 'stat', t: new Date().toISOString(), seen: seen.size, forms: forms.size, pending: pending().length, ...stat });
