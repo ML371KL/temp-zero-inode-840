@@ -337,6 +337,21 @@ function fpiLines(day) {
   if (morning?.fpi?.warn?.length && day.date >= (morning.fpi.from ?? '9999')) out.push('Иностранные эмитенты помечены не полностью: справочник не готов.');
   return out;
 }
+// Сверка покупок дня со сторонним разбором форм (site/data/oicheck.json, scripts/oicheck.mjs). Строка в письме — только при настоящем
+// пропуске: покупка от $100 тыс. в биржевой бумаге, которая есть у OpenInsider и которой нет в строках панели. Сверка не удалась,
+// файл за другой день или пропусков нет — строки нет.
+const oiCheck = readJson(join(SITE, 'data', 'oicheck.json'), null);
+const oiAlerts = day => (oiCheck?.ok === true && day?.date && oiCheck.listFor === day.date ? (oiCheck.alerts ?? []) : []);
+function oiLine(day) {
+  const a = oiAlerts(day);
+  if (!a.length) return null;
+  return `Сверка со сторонним разбором: в данных панели нет покупок, которые видит OpenInsider (от ${money(oiCheck.minVal ?? 1e5)}), — `
+    + a.slice(0, 4).map(x => `<b>${esc(x.t)}</b> ${money(x.val)}`).join(', ') + (a.length > 4 ? ` и ещё ${a.length - 4}` : '') + '. Список мог выйти неполным.';
+}
+// То же отдельным сообщением — когда письмо за этот день уже ушло (с сервера или прошлым прогоном), а сверка нашла пропуск позже
+function oiMessage(day) {
+  return [head('🔎', 'сверка со сторонним разбором'), `Подачи за ${fmtDate(day.date)}`, '', oiLine(day), '', footer()].join('\n');
+}
 function emptyMessage(day, counter, cov) {
   const rest = restOf(day);
   const lines = [
@@ -346,6 +361,7 @@ function emptyMessage(day, counter, cov) {
   if (rest.length) lines.push(`Ещё ${plural(rest.length, 'бумага', 'бумаги', 'бумаг')} со скором 0–1 — на панели.`);
   lines.push(...fpiLines(day));
   if (cov?.status === 'partial' && cov.indexed > 0) lines.push(`Индекс разобран не полностью: ${cov.collected ?? 0} из ${cov.indexed} форм.`);
+  if (oiLine(day)) lines.push(oiLine(day));
   if (sourceNote()) lines.push(sourceNote());
   lines.push('', counterLine(counter));
   if (healthLine(morning?.health)) lines.push(healthLine(morning.health));
@@ -384,6 +400,7 @@ function morningMessage(day, counter, note = '') {
   // (проверка рычагов 17.11.2026, раздел 2)
   lines.push('', 'Только заявки на аукционы: LOO до 9:28 (лимит +10% к закрытию дня подачи) и MOC до 15:50 по Нью-Йорку. Покупка по рынку после открытия дороже аукциона на 0,3–0,5% и съедает перевес дня.', counterLine(counter));
   if (healthLine(morning?.health)) lines.push(healthLine(morning.health));
+  if (oiLine(day)) lines.push('', oiLine(day));
   if (note) lines.push('', note);
   lines.push('', footer());
   return lines.join('\n');
@@ -468,8 +485,14 @@ for (const c of healthChanges) {
   healthDue.push(c);
 }
 saveState();
+// Пропуск, найденный сверкой со сторонним разбором: ключ oi|<дата подачи>, раз на дату. Письмо за этот день ещё не ушло — строка
+// встанет в него; уже ушло — отдельное короткое сообщение.
+const oiDay = days.find(d => d.date === oiCheck?.listFor) ?? null;
+const oiId = oiDay ? `oi|${oiDay.date}` : null;
+const oiOpen = !!oiDay && oiAlerts(oiDay).length > 0 && !sent.has(oiId) && (args.includes('--any-date') || today <= nextBusinessDay(oiDay.date));
+const oiDue = oiOpen && sent.has(dayId(oiDay));
 // Уточнение по crossCheck может понадобиться и без новых списков: письмо ушло с VPS раньше, а пересчёт разошёлся с ним позже
-if (!fresh.length && morning?.crossCheck?.same !== false && !healthDue.length) { console.log('[notify] новых утренних списков нет'); process.exit(0); }
+if (!fresh.length && morning?.crossCheck?.same !== false && !healthDue.length && !oiDue) { console.log('[notify] новых утренних списков нет'); process.exit(0); }
 console.log(fresh.length || morning?.crossCheck?.same === false
   ? `[notify] новых утренних списков: ${fresh.length}${fresh.some(d => !mainOf(d).length) ? ' (в том числе пустой день)' : ''}`
   : '[notify] новых утренних списков нет');
@@ -477,7 +500,9 @@ if (healthDue.length) console.log(`[notify] смен статуса здоров
 
 // ---------- отправка ----------
 // eventId — «840|morning|дата подачи»: список, доставленный повторно, на хабе ляжет на прежнюю запись.
-const messages = fresh.map(d => ({ date: d.date, text: mainOf(d).length ? morningMessage(d, morning.counter, sourceNote()) : emptyMessage(d, morning.counter, cov), markup: undefined, id: dayId(d), eventId: '840|' + dayId(d) }));
+const messages = fresh.map(d => ({ date: d.date, text: mainOf(d).length ? morningMessage(d, morning.counter, sourceNote()) : emptyMessage(d, morning.counter, cov), markup: undefined, id: dayId(d), eventId: '840|' + dayId(d),
+  // строка сверки со сторонним разбором уходит в этом же письме — отдельное сообщение за эту дату не нужно
+  ...(oiOpen && d.date === oiDay.date ? { also: oiId } : {}) }));
 
 // Отметка в воркере: письмо за дату уже отправил другой отправитель — не повторяем, дату считаем отправленной.
 // Читается и в пробном прогоне (только чтение); при ошибке воркера письмо уходит.
@@ -510,7 +535,10 @@ for (const c of healthDue) {
   }
   messages.push({ date: null, marker: healthMarker(c), health: true, text: healthMessage(health, c), markup: undefined, id: healthId(c), eventId: '840|' + healthId(c) });
 }
-const remember = m => (m.health ? sentHealth : sent).add(m.id);
+// Сверка со сторонним разбором: письмо за этот день уже отправлено (или только что признано отправленным по отметке воркера) —
+// пропуск уходит отдельным сообщением
+if (oiOpen && sent.has(dayId(oiDay)) && !messages.some(m => m.also === oiId)) messages.push({ date: null, text: oiMessage(oiDay), markup: undefined, id: oiId, eventId: `840|${oiId}` });
+const remember = m => { (m.health ? sentHealth : sent).add(m.id); if (m.also) sent.add(m.also); };
 if (!messages.length) { saveState(); console.log('[notify] писем к отправке нет'); process.exit(0); }
 
 if (DRY) {

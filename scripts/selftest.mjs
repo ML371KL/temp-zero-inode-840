@@ -3970,5 +3970,95 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   });
 }
 
+// ==================== АУДИТ ФОРМ 17.11.2026, пакет C: ежедневная сверка со сторонним разбором (OpenInsider) ====================
+{
+  const { OI, oiUrl, parseOi, matchOi } = await import('./lib/oicheck.mjs');
+  // Строка таблицы скринера в настоящей разметке: дата подачи — ссылка на форму, в ячейке тикера — всплывающая подсказка с «>» внутри тега
+  const oiRow = ({ acc, cik = 1234, filed, tdate, t, issuer = 'Issuer Inc', insider, title = 'CEO', px, qty, val, kind = 'P - Purchase', x = '' }) =>
+    `<tr style="background:#f3fff3"><td align=right>${x}</td><td align=right><div><a href="http://www.sec.gov/Archives/edgar/data/${cik}/${acc.replace(/-/g, '')}/xslF345X03/wk-form4.xml" title="SEC Form 4" target="_blank">${filed}</a></div></td>`
+    + `<td align=right><div>${tdate}</div></td><td><b> <a href="/${t}" onmouseover="Tip('<img src=\\'https://example.org/chart?chart=${t}\\' width=\\'360px\\'>', DELAY, 1)" onmouseout="UnTip()">${t}</a></b></td>`
+    + `<td><a href="/${t}">${issuer}</a></td><td><a href="/insider/x/1">${insider}</a></td><td>${title}</td><td>${kind}</td><td align=right>$${px.toFixed(2)}</td><td align=right>+${qty.toLocaleString('en-US')}</td>`
+    + `<td align=right>100,000</td><td align=right>+5%</td><td align=right>+$${Math.round(val).toLocaleString('en-US')}</td><td></td><td></td><td></td><td></td></tr>`;
+  const D = '2026-11-12';
+  const page = rows => `<html><body><table class="tinytable"><thead><tr><th>X</th><th>Filing Date</th></tr></thead><tbody>${rows.map(oiRow).join('\n')}</tbody></table></body></html>`;
+  const P = (acc, t, sh, name, extra = {}) => ({ acc, t, T: t, sh, val: sh * 10, owners: [{ name }], ...extra });
+
+  ok('C: разбор страницы стороннего источника — номер подачи из ссылки, тикер из ячейки с подсказкой, повторы убираются', () => {
+    const r = { acc: '0000899140-26-001276', filed: `${D} 18:02:11`, tdate: '2026-11-09', t: 'COHR', insider: 'Anderson James Robert', px: 199.48, qty: 5000, val: 997400 };
+    const rows = parseOi(page([r, r, { ...r, acc: '0001104659-26-126281', t: 'BRK.B', insider: 'Doe &amp; Roe LP', qty: 100, val: 50000, px: 500 }]));
+    assert.equal(rows.length, 2, 'повтор строки убран');
+    assert.deepEqual([rows[0].acc, rows[0].t, rows[0].filed, rows[0].tdate, rows[0].qty, rows[0].val, rows[0].px, rows[0].kind], ['0000899140-26-001276', 'COHR', `${D} 18:02:11`, '2026-11-09', 5000, 997400, 199.48, 'P - Purchase']);
+    assert.equal(rows[1].t, 'BRK.B'); assert.equal(rows[1].insider, 'Doe & Roe LP');
+    assert.deepEqual(parseOi('<html><body>Service unavailable</body></html>'), [], 'нет таблицы — нет строк');
+    assert.match(oiUrl(D), /fdr=11%2F12%2F2026\+-\+11%2F12%2F2026&td=0.*&xp=1&vl=10&.*cnt=1000/);
+    assert.equal(/@|rodion/i.test(OI.ua + oiUrl(D)), false, 'в запросе нет личных данных');
+  });
+
+  ok('C: тревога — только покупка от $100 тыс. в биржевой бумаге, которой нет у панели; провалы самого источника тревоги не дают', () => {
+    const oi = parseOi(page([
+      { acc: '0000899140-26-001276', filed: `${D} 18:02:11`, tdate: '2026-11-09', t: 'COHR', insider: 'Anderson James Robert', px: 199.48, qty: 5000, val: 997400 },   // есть у панели: тот же номер подачи
+      { acc: '0000000001-26-000001', filed: `${D} 17:00:00`, tdate: '2026-11-10', t: 'DUPF', insider: 'Smith John', px: 20, qty: 10000, val: 200000 },                  // повторная подача под другим номером: тикер и акции
+      { acc: '0000000002-26-000001', filed: `${D} 17:00:00`, tdate: '2026-11-10', t: 'BH', insider: 'Biglari Sardar', px: 355, qty: 628, val: 222940 },                  // тикер другого класса: имя лица и акции
+      { acc: '0000000003-26-000001', filed: `${D} 16:30:00`, tdate: '2026-11-10', t: 'MISS', insider: 'Lost Buyer', px: 50, qty: 30000, val: 1500000 },                  // настоящий пропуск
+      { acc: '0000000004-26-000001', filed: `${D} 16:31:00`, tdate: '2026-11-10', t: 'SMAL', insider: 'Small Buyer', px: 5, qty: 4000, val: 20000 },                     // пропуск, но меньше порога
+      { acc: '0000000005-26-000001', filed: `${D} 16:32:00`, tdate: '2026-11-10', t: 'OTCX', insider: 'Otc Buyer', px: 1, qty: 500000, val: 500000 },                    // внебиржевая бумага
+      { acc: '0000000006-26-000001', filed: '2026-11-11 16:32:00', tdate: '2026-11-10', t: 'YEST', insider: 'Other Day', px: 10, qty: 50000, val: 500000 },              // другой день подачи
+      { acc: '0000000007-26-000001', filed: `${D} 16:33:00`, tdate: '2026-11-10', t: 'SALE', insider: 'Seller', px: 10, qty: 50000, val: 500000, kind: 'S - Sale' },     // не покупка
+    ]));
+    const panel = [P('0000899140-26-001276', 'COHR', 5000, 'Anderson James Robert'), P('0000000009-26-000009', 'DUPF', 10000, 'SMITH JOHN'), P('0000000010-26-000010', 'BH-A', 628, 'BIGLARI SARDAR'),
+      P('0000000011-26-000011', 'ONLY', 7000, 'Panel Only')];        // покупка, которой нет у источника (компании развития бизнеса, фонды), — не тревога
+    const res = matchOi(oi, panel, { day: D, listed: t => t !== 'OTCX' });
+    assert.deepEqual([res.oi, res.found, res.byAcc, res.byName], [6, 3, 1, 1]);
+    assert.deepEqual(res.missing.map(m => m.t), ['MISS', 'OTCX', 'SMAL']);
+    assert.deepEqual(res.alerts.map(m => [m.t, m.val, m.insider]), [['MISS', 1500000, 'Lost Buyer']]);
+    assert.equal(matchOi(oi, [], { day: '2026-11-13' }).oi, 0, 'строки другого дня не сверяются');
+  });
+
+  ok('C: шаг сборки пишет oicheck.json рядом с morning.json и не падает, когда источник недоступен; письмо — строка только при пропуске', () => {
+    const base = join(ROOT, '.selftest-oicheck'), data = join(base, 'data'), site = join(base, 'site'), htmlFile = join(base, 'oi.html');
+    rmSync(base, { recursive: true, force: true }); mkdirSync(join(site, 'data'), { recursive: true }); mkdirSync(join(data, 'state'), { recursive: true });
+    const day = nDay(-1);
+    const row = (acc, t, sh, name) => ({ acc, form: '4', code: 'P', fdate: day, tdate: day, cik: t === 'AAA' ? 1 : 2, t, sh, px: 20, val: sh * 20, sec: 'Common Stock', owners: [{ cik: 9, name, rel: 'D', title: '' }] });
+    writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [row('0000000021-26-000001', 'AAA', 20000, 'Smith John')] });
+    writeJson(join(data, 'reference', 'tickers.json'), { 1: { ticker: 'AAA', exchange: 'NYSE', name: 'Aaa' }, 2: { ticker: 'BBB', exchange: 'Nasdaq', name: 'Bbb' }, 3: { ticker: 'OTCX', exchange: 'OTC', name: 'Otc' } });
+    const morningFile = join(site, 'data', 'morning.json');
+    const putMorning = () => writeJson(morningFile, { built: isoToday(), listFor: day, params: { minVal: 1e4, minPx: 5, dvMin: 1e7, dvCost: 3e7, scoreMin: 2 }, counter: mCounter, days: [mDay(day, [mRow('AAA', 4e5)])] });
+    putMorning();
+    writeFileSync(htmlFile, page([{ acc: '0000000021-26-000001', filed: `${day} 17:00:00`, tdate: day, t: 'AAA', insider: 'Smith John', px: 20, qty: 20000, val: 400000 },
+      { acc: '0000000022-26-000001', filed: `${day} 17:05:00`, tdate: day, t: 'BBB', insider: 'Jones Mary', px: 30, qty: 40000, val: 1200000 }]));
+    const check = extra => execFileSync(process.execPath, [join(ROOT, 'scripts', 'oicheck.mjs'), '--data', data, '--site', site, ...extra], { encoding: 'utf8' });
+    const letter = dir => execFileSync(process.execPath, [join(ROOT, 'scripts', 'notify.mjs'), '--site', site, '--data', dir, '--dry-run'], { encoding: 'utf8' });
+    const seeded = name => { const d = join(base, name); mkdirSync(join(d, 'state'), { recursive: true }); writeJson(join(d, 'state', 'notify.json'), { version: 4, sentMorning: [] }); return d; };
+    try {
+      const before = readFileSync(morningFile, 'utf8');
+      assert.match(check(['--html', htmlFile]), /нет у панели 1; ПРОПУСК/);
+      const j = readJson(join(site, 'data', 'oicheck.json'));
+      assert.deepEqual([j.ok, j.listFor, j.oi, j.found, j.alerts.length, j.alerts[0].t, j.alerts[0].val], [true, day, 2, 1, 1, 'BBB', 1200000]);
+      assert.equal(readFileSync(morningFile, 'utf8'), before, 'morning.json шаг не трогает: контракт бота не меняется');
+      const out = letter(seeded('n1'));
+      assert.match(out, /Сверка со сторонним разбором: в данных панели нет покупок, которые видит OpenInsider \(от \$100.тыс\.\), — BBB \$1,2.млн\. Список мог выйти неполным\./);
+      assert.deepEqual(readJson(join(base, 'n1', 'state', 'notify.json')).sentMorning.sort(), [`morning|${day}`, `oi|${day}`].sort(), 'строка ушла в письме — отдельного сообщения не будет');
+      // письмо за день уже ушло (с сервера), а пропуск найден позже — отдельное короткое сообщение, один раз
+      const late = seeded('n2'); writeJson(join(late, 'state', 'notify.json'), { version: 4, sentMorning: [`morning|${day}`] });
+      const out2 = letter(late);
+      assert.match(out2, /сверка со сторонним разбором/); assert.match(out2, /BBB/); assert.ok(!/утренний список/.test(out2));
+      assert.ok(!/BBB/.test(letter(late)), 'повторно не шлётся');
+      // пропусков нет — в письме ни слова
+      writeFileSync(htmlFile, page([{ acc: '0000000021-26-000001', filed: `${day} 17:00:00`, tdate: day, t: 'AAA', insider: 'Smith John', px: 20, qty: 20000, val: 400000 }]));
+      check(['--html', htmlFile]);
+      assert.equal(readJson(join(site, 'data', 'oicheck.json')).alerts.length, 0);
+      assert.ok(!/сторонним разбором/.test(letter(seeded('n3'))));
+      // источник недоступен или отдал страницу без таблицы: код 0, ok: false, тревоги нет
+      writeFileSync(htmlFile, '<html><body>Service Temporarily Unavailable</body></html>');
+      check(['--html', htmlFile]);
+      assert.equal(readJson(join(site, 'data', 'oicheck.json')).ok, false);
+      assert.ok(!/сторонним разбором/.test(letter(seeded('n4'))));
+      // файла за другой день письмо не читает
+      writeJson(join(site, 'data', 'oicheck.json'), { ok: true, listFor: nDay(-9), minVal: 1e5, alerts: [{ t: 'OLD', val: 5e6 }] });
+      assert.ok(!/OLD/.test(letter(seeded('n5'))));
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);
