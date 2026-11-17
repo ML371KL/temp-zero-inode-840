@@ -12,8 +12,9 @@
 // daily.yml до сборки и письма — 28.10.2026): день ≥ сегодня−1 — «ещё не вышел», стоп; прошлый день —
 // шард сохраняется, код выхода 0, ошибка — в покрытие и state.lastError. Подача, которую не удалось
 // скачать (сеть, 5xx, лимит SEC), не теряется: она ложится в state.pending и добирается следующими прогонами.
-import { readJson, writeJson, readJsonGz, writeJsonGz, isoToday, addDaysIso, isIsoDate } from './lib/util.mjs';
-import { fetchDayIndex, fetchFiling, parseForm4Txt, uniqueFilings, secKey, SHARD_VERSION, PARSER_REV } from './lib/edgar.mjs';
+import { readJson, writeJson, readJsonGz, writeJsonGz, isoToday, addDaysIso, isIsoDate, politeFetch } from './lib/util.mjs';
+import { fetchDayIndex, fetchFiling, parseForm4Txt, uniqueFilings, secKey, edgarBase, SHARD_VERSION, PARSER_REV } from './lib/edgar.mjs';
+import { fpiFormsPath, emptyFpiForms, absorbFpiForms, parseFpiIdx, fillQuartersFor, fullIndexUrl, fullIndexText } from './lib/fpi.mjs';
 import { isWeekend, nextWeekday, missingIndexVerdict, shouldProbeNext, coverageEntry, pruneCoverage, firstUncoveredDay, windowStart } from './lib/livecal.mjs';
 import { join } from 'node:path';
 
@@ -27,6 +28,9 @@ const RETRIES = Number(argVal('--retries', '4'));
 // держит не больше ~7 запросов в секунду к SEC, а очередь окна — десятки тысяч подач.
 const REREAD_CONCURRENCY = Number(argVal('--reread-concurrency', '4'));
 const today = argVal('--today', isoToday());   // --today — только для самотестов и ручной проверки
+// Начальное наполнение справочника отчётов иностранных эмитентов (lib/fpi.mjs) из квартальных полных индексов SEC. Флаг передаёт
+// только ежедневная сборка GitHub: ночная сборка на сервере полные индексы не качает (её ждёт список), а дни подачи дописывают обе.
+const FPI_FILL = args.includes('--fpi-fill');
 const started = Date.now();
 const nowIso = () => new Date().toISOString().replace(/\.\d+Z$/, 'Z');
 const overBudget = () => Date.now() - started > BUDGET_MS;
@@ -60,6 +64,11 @@ const before = shard.trades.length;
 shard.trades = shard.trades.filter(r => r.fdate >= from);
 shard.amend = shard.amend.filter(a => a.orig >= '2000-01-01');
 if (shard.trades.length !== before) console.log(`[live] вычищено ${before - shard.trades.length} строк, покрытых датасетами`);
+
+// Кто подаёт отчёты иностранного частного эмитента (20-F, 40-F, 6-K): строки того же дневного индекса, из которого берутся формы 4
+const fpiPath = fpiFormsPath(DATA);
+const fpiRef = readJson(fpiPath, emptyFpiForms());
+let fpiDirty = false;
 
 const rowKey = r => `${r.acc}|${r.code}|${r.tdate}|${secKey(r.sec)}`;
 const byKey = new Map(shard.trades.map(r => [rowKey(r), r]));
@@ -153,7 +162,28 @@ let day = cursor ? addDaysIso(cursor, 1) : from;
 let lastCompleted = cursor;
 let daysDone = 0, filingsDone = 0;
 
+// Начальное наполнение справочника отчётов: полные индексы текущего и четырёх предыдущих кварталов (по ~5 МБ). Квартал, который не
+// скачался, повторится следующим прогоном; пока наполнение не закончено (fillDone), сборка пометку по отчётам не ставит.
+async function fillFpiForms() {
+  const want = fillQuartersFor(today);
+  for (const { y, q, key } of want) {
+    if (fpiRef.filled?.includes(key)) continue;
+    if (overBudget() || secBlocked) break;
+    try {
+      const { body } = await politeFetch(fullIndexUrl(edgarBase(), y, q), { retries: RETRIES, timeoutMs: 120000 });
+      if (!body) { console.log(`[live] справочник отчётов иностранных эмитентов: полного индекса ${key} нет — повтор в следующем прогоне`); continue; }
+      const rows = parseFpiIdx(fullIndexText(body));
+      absorbFpiForms(fpiRef, rows, rows.reduce((m, x) => (x.date > m ? x.date : m), ''));
+      (fpiRef.filled ??= []).push(key);
+      fpiDirty = true;
+      console.log(`[live] справочник отчётов иностранных эмитентов: ${key} — строк ${rows.length}, эмитентов всего ${Object.keys(fpiRef.ciks).length}`);
+    } catch (e) { console.log(`[live] справочник отчётов иностранных эмитентов: ${key} не скачан (${e.message}) — повтор в следующем прогоне`); }
+  }
+  if (!fpiRef.fillDone && want.every(x => fpiRef.filled?.includes(x.key))) { fpiRef.fillDone = true; fpiDirty = true; console.log('[live] справочник отчётов иностранных эмитентов наполнен'); }
+}
+
 function save() {
+  if (fpiDirty) { writeJson(fpiPath, fpiRef); fpiDirty = false; }
   shard.trades = [...byKey.values()];
   shard.amend = [...amendByAcc.values()];
   shard.v = SHARD_VERSION;
@@ -179,6 +209,8 @@ function save() {
 }
 
 async function run() {
+  if (FPI_FILL && !fpiRef.fillDone) await fillFpiForms();
+
   // ---------- 1. добор отложенных подач прошлых прогонов ----------
   let picked = 0, still = 0;
   for (const d of Object.keys(pending).sort()) {
@@ -218,9 +250,9 @@ async function run() {
   outer:
   while (day <= today && !secBlocked) {
     if (isWeekend(day)) { lastCompleted = day; day = addDaysIso(day, 1); continue; }
-    let entries;
+    let entries, fpi;
     try {
-      ({ entries } = await fetchDayIndex(day, { retries: RETRIES }));
+      ({ entries, fpi } = await fetchDayIndex(day, { retries: RETRIES }));
     } catch (e) {
       // Индекс не скачался после всех повторов. Прошлый день не помечаем пройденным — следующий прогон
       // спросит снова; что собрано до этого, сохраняется.
@@ -247,6 +279,7 @@ async function run() {
       lastCompleted = day; day = addDaysIso(day, 1);
       continue;
     }
+    if (absorbFpiForms(fpiRef, fpi, day)) fpiDirty = true;
     // Одна подача — по строке на эмитента и каждого подателя: качаем один раз, остальные пути — запасные
     const paths = new Map();
     for (const e of entries) (paths.get(e.acc) ?? paths.set(e.acc, []).get(e.acc)).push(e.path);
@@ -299,9 +332,10 @@ async function run() {
     // окно могло сдвинуться вперёд после загрузки квартала: дни раньше from не перечитываем
     while (d >= from && Date.now() - rStart < REREAD_BUDGET_MS && !overBudget() && !secBlocked) {
       if (isWeekend(d)) { d = addDaysIso(d, -1); rr.cursor = d; continue; }
-      let entries = null;
-      try { ({ entries } = await fetchDayIndex(d, { retries: RETRIES })); } catch (e) { console.log(`[live] перечитывание: ${d} — ${e.message}, продолжу позже`); break; }
+      let entries = null, fpi = null;
+      try { ({ entries, fpi } = await fetchDayIndex(d, { retries: RETRIES })); } catch (e) { console.log(`[live] перечитывание: ${d} — ${e.message}, продолжу позже`); break; }
       if (entries) {
+        if (absorbFpiForms(fpiRef, fpi, d)) fpiDirty = true;
         const paths = new Map();
         for (const e of entries) (paths.get(e.acc) ?? paths.set(e.acc, []).get(e.acc)).push(e.path);
         const stopNow = () => Date.now() - rStart >= REREAD_BUDGET_MS || overBudget() || secBlocked;

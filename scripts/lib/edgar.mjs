@@ -7,6 +7,7 @@
 import { politeFetch, parseTsv, secDate, num, isIsoDate } from './util.mjs';
 import { zipExtract } from './zip.mjs';
 import { rowFootnoteFlags, holdingFootnoteFlags, fnIds } from './footnotes.mjs';
+import { parseFpiIdx } from './fpi.mjs';
 
 export const SHARD_VERSION = 3;
 // Ревизия разбора уже собранных строк (сноски, даты). Рост номера НЕ сбрасывает шард и не задерживает
@@ -126,7 +127,12 @@ export function roleFlags(rel, title) {
 // Квартальный zip -> { trades, amend }. Только коды P и S, формы 4/4A, без своп-сделок.
 export function normalizeQuarterZip(zipBuf) {
   const subs = new Map();
+  // Самая ранняя дата подачи формы 3/4/5 (любой, с поправками) по эмитенту в этом квартале — для справочника «первая форма по
+  // эмитенту» (lib/fpi.mjs): эмитент без форм до закона 2026 года — новый податель.
+  const first = {};
   for (const r of parseTsv(zipExtract(zipBuf, 'SUBMISSION.tsv').toString('utf8'))) {
+    const issuer = Number(r.ISSUERCIK), filed = secDate(r.FILING_DATE);
+    if (issuer > 0 && filed && !(first[issuer] <= filed)) first[issuer] = filed;
     if (r.DOCUMENT_TYPE !== '4' && r.DOCUMENT_TYPE !== '4/A') continue;
     subs.set(r.ACCESSION_NUMBER, {
       form: r.DOCUMENT_TYPE,
@@ -249,7 +255,7 @@ export function normalizeQuarterZip(zipBuf) {
       rows: rowCount.get(acc) ?? 0,
     });
   }
-  return { v: SHARD_VERSION, trades, amend };
+  return { v: SHARD_VERSION, trades, amend, first };
 }
 
 export async function fetchQuarter(q) {
@@ -298,7 +304,8 @@ export async function fetchDayIndex(iso, { retries = 4 } = {}) {
   const url = `${edgarBase()}/Archives/edgar/daily-index/${y}/${qtr}/form.${y}${m}${d}.idx`;
   const { status, body } = await politeFetch(url, { as: 'text', retries });
   if (!body) return { status, entries: null };
-  return { status, entries: parseFormIdx(body) };
+  // fpi — строки того же индекса с отчётами иностранных частных эмитентов (20-F, 40-F, 6-K): справочник lib/fpi.mjs
+  return { status, entries: parseFormIdx(body), fpi: parseFpiIdx(body) };
 }
 
 // ---- Парсер XML Form 4 ----

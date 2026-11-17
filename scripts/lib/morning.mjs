@@ -38,6 +38,11 @@ export const MORNING = {
   daysShown: 10,        // сколько последних дней подачи отдаёт файл витрине
   stake: 1e4,          // сумма в сделке, на которую витрина пересчитывает «сумму нетто» счётчика, $
   prevMax: 365,         // окно поля prev (повтор), календарных дней
+  // Иностранные частные эмитенты (lib/fpi.mjs; решение владельца 18.11.2026): с этого дня подачи событие такого эмитента в основной
+  // список не входит (fpi: true, main: false); скор и остальные поля считаются как обычно. Дни подачи раньше не меняются вовсе.
+  // Дата — первый день подачи, чей список обе сборки (сервер и GitHub) соберут новым кодом при готовых справочниках; до выкладки
+  // здесь стоит заведомо будущая дата, её ставит ведущий перед слиянием.
+  fpiFrom: '2099-01-01',
 };
 
 // ЗДОРОВЬЕ СИГНАЛА (audit-840-health-2026-11-17/REPORT.md, раздел 3; согласовано 17.11.2026). Один показатель — сглаженный перевес
@@ -107,15 +112,18 @@ const rnd = (v, k = 4) => Math.round(v * 10 ** k) / 10 ** k;
 // самую крупную покупку не входят, но офицер и просадка берутся по всем строкам события — как в проверке.
 // Цена D0 и оборот — у ведущей (самой крупной из прошедших гейты) строки. Событие, у которого нет цены или
 // оборота на D0 (ряд не дотянул до D0 или бар младше 10), в список не попадает и считается в unpriced.
-// Возвращает { rows, unpriced }: rows — по скору, затем по сумме дня (основной список сверху); main — скор ≥ порога.
-export function buildDayFull(rows, p = MORNING) {
+// Возвращает { rows, unpriced, fpi }: rows — по скору, затем по сумме дня (основной список сверху); main — скор ≥ порога.
+// Иностранный частный эмитент (поле fpi строк входа — вердикт lib/fpi.mjs, у события он один): при fpiActive (день подачи не раньше
+// MORNING.fpiFrom) строка списка получает fpi: true и main: false, остальное считается как обычно; до этого дня строка не меняется.
+// fpi в ответе — тикеры таких событий в списке при любом fpiActive: по ним счётчик копит отдельную группу с начала хранилища открытий.
+export function buildDayFull(rows, p = MORNING, { fpiActive = false } = {}) {
   const byE = new Map();
   for (const r of rows) {
     if (r.common === false) continue;
     const k = r.cik ?? r.t;
     (byE.get(k) ?? byE.set(k, []).get(k)).push(r);
   }
-  const out = [], unpriced = [];
+  const out = [], unpriced = [], fpiTickers = [];
   for (const all of byE.values()) {
     const ok = all.filter(r => !r.drop && r.val >= p.minVal).sort((a, b) => b.val - a.val);
     if (!ok.length) continue;
@@ -135,16 +143,21 @@ export function buildDayFull(rows, p = MORNING) {
     // Бумага узнаётся рынком по ПЕРВОЙ форме дня: время приёма — самое раннее
     const at = ok.map(x => x.at).filter(Boolean).sort()[0] ?? null;
     const score = scoreOf({ val: mx, officer, dd }, p);
+    const foreign = all.some(x => x.fpi);
+    if (foreign) fpiTickers.push(lead.t);
+    const fpi = foreign && fpiActive;
     out.push({
       t: lead.t, name: lead.name, who, role, val: Math.round(val), mx: Math.round(mx), n: ok.length, at, ses: sessionOf(at),
       dd, dv: adv, px: lead.px,
-      score, main: score >= p.scoreMin, cost: costOf(adv, p),
+      score, main: score >= p.scoreMin && !fpi, cost: costOf(adv, p),
       tags: tagsOf({ role, officer, dd, val: mx }, p),
       ...(lead.prev !== undefined ? { prev: lead.prev } : {}),
+      ...(fpi ? { fpi: true } : {}),
     });
   }
+  // Порядок — прежний: скор, сумма дня, тикер. Помеченная строка остаётся на своём месте по скору (в основной список она не входит).
   out.sort((a, b) => b.score - a.score || b.val - a.val || (a.t < b.t ? -1 : 1));
-  return { rows: out, unpriced };
+  return { rows: out, unpriced, fpi: fpiTickers };
 }
 export const buildDay = (rows, p = MORNING) => buildDayFull(rows, p).rows;
 

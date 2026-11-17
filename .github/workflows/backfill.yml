@@ -52,8 +52,9 @@ jobs:
       - name: Квартальные датасеты SEC
         run: node scripts/backfill.mjs --time-budget-min 120
 
+      # --fpi-fill — начальное наполнение справочника отчётов иностранных эмитентов, если его ещё нет (как в daily.yml)
       - name: Живой хвост (после последнего датасета)
-        run: node scripts/live.mjs --time-budget-min 110
+        run: node scripts/live.mjs --time-budget-min 110 --fpi-fill
 
       - name: Цены (бэкфил без кэша)
         run: node scripts/prices.mjs --mode backfill --time-budget-min 150

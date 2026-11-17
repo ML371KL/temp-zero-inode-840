@@ -256,7 +256,9 @@ const state = readJson(statePath, {});
 
 // Основной список (оборот от $10 млн, скор от 2) — то, что уходит в письмо; остальные от $10 млн — одной строкой.
 const mainOf = day => (day?.rows ?? []).filter(x => x.main);
-const restOf = day => (day?.rows ?? []).filter(x => !x.main);
+// Вне основного списка: бумаги со скором 0–1 и, отдельно, иностранные эмитенты (строка с fpi: true — scripts/lib/fpi.mjs)
+const restOf = day => (day?.rows ?? []).filter(x => !x.main && !x.fpi);
+const fpiOf = day => (day?.rows ?? []).filter(x => x.fpi);
 const days = (morning?.days ?? []);                       // от свежего дня к старому
 
 // Следующий рабочий день после даты подачи (праздники не знаем): до его конца утренний список ещё
@@ -327,6 +329,14 @@ function trunc(s, n) { s = String(s ?? ''); return s.length > n ? s.slice(0, n -
 // Индекс разобран не полностью — это сказано в письме: «сигналов нет» по неполным данным нельзя выдавать за полное «нет».
 // Список собран по ленте EDGAR (индекса за день не было): он может быть неполным, и это сказано в письме; полный пересчёт пришлёт уточнение
 const sourceNote = () => (morning?.source === 'feed' ? '<i>Список собран по ленте EDGAR: индекс за день ещё не вышел, возможны неполные данные.</i>' : '');
+// Иностранные эмитенты дня: вне основного списка, одной строкой. Справочники пометки не готовы — об этом сказано в письме: помеченных
+// строк в таком списке нет не потому, что иностранных эмитентов не было.
+function fpiLines(day) {
+  const f = fpiOf(day), out = [];
+  if (f.length) out.push(`Вне списка, иностранные эмитенты: ${f.slice(0, 6).map(x => `<b>${esc(x.t)}</b>`).join(', ')}${f.length > 6 ? ` и ещё ${f.length - 6}` : ''}.`);
+  if (morning?.fpi?.warn?.length && day.date >= (morning.fpi.from ?? '9999')) out.push('Иностранные эмитенты помечены не полностью: справочник не готов.');
+  return out;
+}
 function emptyMessage(day, counter, cov) {
   const rest = restOf(day);
   const lines = [
@@ -334,6 +344,7 @@ function emptyMessage(day, counter, cov) {
     `Подачи за ${fmtDate(day.date)} · основной список без бумаг: оборот от ${money(morning?.params?.dvMin ?? 1e7)}, скор от ${morning?.params?.scoreMin ?? 2}`,
   ];
   if (rest.length) lines.push(`Ещё ${plural(rest.length, 'бумага', 'бумаги', 'бумаг')} со скором 0–1 — на панели.`);
+  lines.push(...fpiLines(day));
   if (cov?.status === 'partial' && cov.indexed > 0) lines.push(`Индекс разобран не полностью: ${cov.collected ?? 0} из ${cov.indexed} форм.`);
   if (sourceNote()) lines.push(sourceNote());
   lines.push('', counterLine(counter));
@@ -366,6 +377,7 @@ function morningMessage(day, counter, note = '') {
   ];
   if (main.length > TOP_N) lines.push(`и ещё ${main.length - TOP_N} — на панели`);
   if (rest.length) lines.push('', `Ещё ${plural(rest.length, 'бумага', 'бумаги', 'бумаг')} со скором 0–1 — на панели.`);
+  { const f = fpiLines(day); if (f.length) lines.push(...(rest.length ? [] : ['']), ...f); }
   // Исполнение — только аукционы: сразу после открытия цена продавца выше цены аукциона на 0,3–0,5%, покупка по рынку съедает перевес дня
   // (проверка рычагов 17.11.2026, раздел 2)
   lines.push('', 'Только заявки на аукционы: LOO до 9:28 (лимит +10% к закрытию дня подачи) и MOC до 15:50 по Нью-Йорку. Покупка по рынку после открытия дороже аукциона на 0,3–0,5% и съедает перевес дня.', counterLine(counter));

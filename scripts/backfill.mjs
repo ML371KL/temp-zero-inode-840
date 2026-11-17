@@ -5,6 +5,7 @@
 // Использование: node scripts/backfill.mjs [--data data] [--max-quarters N]
 import { readJson, writeJson, readJsonGz, writeJsonGz, isoToday } from './lib/util.mjs';
 import { fetchQuarter, quarterList, secKey, SHARD_VERSION, QUARTER_REV } from './lib/edgar.mjs';
+import { firstFormPath, mergeFirstForms } from './lib/fpi.mjs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -65,9 +66,16 @@ function readShard(y) {
   return Array.isArray(raw) ? { v: 1, trades: raw, amend: [] } : raw;
 }
 
+// Справочник «первая форма 3/4/5 по эмитенту» (lib/fpi.mjs) — из SUBMISSION.tsv тех же квартальных файлов. Квартал нужен справочнику,
+// пока его нет в списке quarters: при первой сборке и при перечитывании кварталов он строится попутно, а если файл справочника
+// пропал, кварталы скачиваются заново только ради него (шарды сделок при этом не трогаются).
+const ffPath = firstFormPath(DATA);
+const ff = readJson(ffPath, { v: 1, quarters: [], first: {} });
+
 let processed = 0;
 for (const q of wanted) {
-  if (state.done.includes(q)) continue;
+  const needTrades = !state.done.includes(q), needFirst = !(ff.quarters ?? []).includes(q);
+  if (!needTrades && !needFirst) continue;
   if (processed >= MAX) break;
   // хотя бы один квартал за прогон — иначе итерации могли бы идти без продвижения
   if (BUDGET_MS && processed > 0 && Date.now() - started > BUDGET_MS) { console.log(`[backfill] бюджет времени исчерпан после ${processed} кварталов — продолжит следующая итерация`); break; }
@@ -78,6 +86,12 @@ for (const q of wanted) {
     console.log(`[backfill] ${q}: недоступен (HTTP ${status})`);
     continue;
   }
+  if (needFirst) {
+    const earlier = mergeFirstForms(ff, q, data.first);
+    writeJson(ffPath, ff);
+    console.log(`[backfill] ${q}: первая форма по эмитенту — эмитентов в квартале ${Object.keys(data.first ?? {}).length}, новых или с более ранней датой ${earlier} (всего ${Object.keys(ff.first).length})`);
+  }
+  if (!needTrades) { processed++; continue; }
   const byYear = new Map();
   const bucket = y => {
     if (y < MIN_TRADE_YEAR || y > String(curYear + 1)) return null; // мусорные даты в формах

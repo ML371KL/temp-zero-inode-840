@@ -54,8 +54,10 @@ jobs:
       - name: Самотесты
         run: npm test
 
+      # --fpi-fill: пока справочник отчётов иностранных эмитентов (reference/fpi-forms.json, scripts/lib/fpi.mjs) не наполнен,
+      # шаг один раз скачивает полные индексы SEC за пять кварталов (по ~5 МБ); дальше справочник пополняется из дневного индекса.
       - name: Живой контур EDGAR
-        run: node scripts/live.mjs --time-budget-min 60
+        run: node scripts/live.mjs --time-budget-min 60 --fpi-fill
 
       # Инкрементально: прошлые кварталы в состоянии, перечитывается только текущий form.idx
       - name: Обновление цен

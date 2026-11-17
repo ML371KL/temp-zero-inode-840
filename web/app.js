@@ -218,6 +218,8 @@ export const MTAG = {
   deep: ['просадка >30%', 'warn', 'На дату сделки бумага ниже 52-недельного максимума больше чем на 30%'],
   big:  ['≥$1 млн', 'gray', 'Самая крупная покупка дня от $1 млн: чем крупнее сумма, тем сильнее эффект'],
 };
+// Иностранный частный эмитент (morning.json: строка fpi, счётчик counter.fpi; методика — docs/ЧТО-РАБОТАЕТ.md)
+const FPI_HINT = 'Иностранный эмитент: его инсайдеры подают формы только с марта 2026, в проверенной истории таких бумаг нет. В основной список не входит, результат считается отдельной строкой счётчика';
 const SKIP = {
   noopen: 'нет открытия — сделка пропущена', noclose: 'нет закрытия — сделка пропущена', nobench: 'нет данных по IWM или SPY — сделка пропущена',
   frozen: 'открытие ровно равно вчерашнему закрытию — котировка застыла, сделка пропущена',
@@ -373,7 +375,14 @@ function renderCounter() {
     + `<th title="${esc(`Итог всех ${s.n} сделок после издержек, если в каждую вложено по ${fmtMoney(stake)}. Это не доходность портфеля: сделки идут в разные дни, и одни и те же деньги работают снова и снова`)}">на ${esc(fmtMoney(stake))} в сделке</th></tr>`
     + row('к IWM', s.iwm, 'Эталон хеджа: Russell 2000')
     + row('к S&P', s.spy, 'Эталон рынка: SPY')
-    + '</table>';
+    + '</table>' + fpiLine(c.fpi);
+}
+// Одна строка под счётчиком: события иностранных эмитентов, которые были бы в основном списке (скор от порога), — вне списка
+function fpiLine(f) {
+  if (!f?.n) return '';
+  return `<div class="strip-empty" title="${esc(FPI_HINT)}">Иностранные эмитенты вне списка, с ${esc(fmtDate(f.from))}: `
+    + `${plural(f.n, 'сделка', 'сделки', 'сделок')} · к IWM <span class="${cls(f.iwm.mean)}">${fmtPct(f.iwm.mean, 2)}</span>`
+    + ` · после издержек <span class="${cls(f.iwm.net)}">${fmtPct(f.iwm.net, 2)}</span></div>`;
 }
 
 // Здоровье сигнала (audit-840-health-2026-11-17/REPORT.md, раздел 3.7): статус и четыре числа над счётчиком, справа — z за 250 дней.
@@ -505,7 +514,8 @@ function dayTable(rows, { past, liveOn, d1, bq }) {
     <th class="num" title="${liveOn ? 'Изменение от открытия минус изменение IWM от открытия' : 'Доходность открытие → закрытие минус доходность IWM за тот же день'}">К IWM</th>` : ''}</tr>`;
   return th + rows.map(x => {
     const who = x.nWho > 1 ? `${esc(trunc(x.who[0], 20))} <span class="sub2-inline">и ещё ${x.nWho - 1}</span>` : esc(trunc(x.who[0] ?? '—', 24));
-    const marks = (x.tags ?? []).map(t => MTAG[t] ? `<span class="pill ${MTAG[t][1]}" title="${esc(MTAG[t][2])}">${esc(MTAG[t][0])}</span>` : '').join(' ');
+    const marks = (x.tags ?? []).map(t => MTAG[t] ? `<span class="pill ${MTAG[t][1]}" title="${esc(MTAG[t][2])}">${esc(MTAG[t][0])}</span>` : '').join(' ')
+      + (x.fpi ? ` <span class="pill gray" title="${esc(FPI_HINT)}">иностр.</span>` : '');
     // Сделка пропущена — причина в подсказке; открытие и закрытие у такой строки пусты
     const lq = liveOn ? liveOf(x.t, d1) : null;
     const lchg = lq ? lq.p / lq.o - 1 : null;
@@ -558,7 +568,9 @@ function renderDay() {
   const box = $('#m-rest-box');
   box.hidden = !rest.length;
   if (rest.length) {
-    $('#m-rest-sum').textContent = `Остальные бумаги от $10 млн, скор 0–1: ${rest.length}`;
+    const nFpi = rest.filter(x => x.fpi).length;
+    $('#m-rest-sum').textContent = nFpi ? `Остальные бумаги от $10 млн: скор 0–1 — ${rest.length - nFpi}, иностранные эмитенты — ${nFpi}`
+      : `Остальные бумаги от $10 млн, скор 0–1: ${rest.length}`;
     $('#m-rest').className = 'morning' + live;
     $('#m-rest').innerHTML = dayTable(rest, ctx);
   }

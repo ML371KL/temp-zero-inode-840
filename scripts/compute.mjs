@@ -22,9 +22,10 @@ import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleT
 import { applyGates, isPlanned, isNonCommon, DROP_LABELS, UNITS_TOL } from './lib/gates.mjs';
 import { buildOwnerGroups, isPersonOwner, isFundOnly, topRole, dOwnOf } from './lib/entity.mjs';
 import { buildOwnerHistory, isRoutineCMP, isRegularSeries, inflection } from './lib/routine.mjs';
-import { readOpens, opensOf, nextTradingDay } from './lib/opens.mjs';
+import { readOpens, opensOf, nextTradingDay, OPENS_FROM } from './lib/opens.mjs';
 import { MORNING, BREADTH, HEALTH, buildDayFull, tradeResult, summarize, breadth, prevDays, signalHealth } from './lib/morning.mjs';
 import { listDayOf } from './lib/livecal.mjs';
+import { FPI, loadFpiRefs, fpiVerdict, tickersBeforeLaw, fpiStaleWarning } from './lib/fpi.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 
@@ -36,6 +37,9 @@ const SITE = argVal('--site', 'site');
 // --counter-from 2026-08-15 [--counter-dump файл.json] (все сделки счётчика построчно).
 const COUNTER_FROM = argVal('--counter-from', MORNING.liveFrom);
 const COUNTER_DUMP = argVal('--counter-dump', null);
+// С какого дня подачи события иностранных эмитентов выходят из основного списка (MORNING.fpiFrom). Переопределяется только для
+// проверки и самотестов: --fpi-from 2026-11-05 — «как было бы на живом окне».
+const FPI_FROM = argVal('--fpi-from', MORNING.fpiFrom);
 // Кто собрал файл: 'github' (ежедневная сборка) или 'vps' (сборка после индекса EDGAR). Пишется в morning.json.
 const BUILDER = argVal('--builder', process.env.MORNING_BUILDER || 'github');
 // Откуда формы дня listFor: 'index' (дневной индекс EDGAR) или 'feed' (индекса нет, список по ленте getcurrent — резерв сборки на VPS). Пишется в morning.json.
@@ -110,6 +114,21 @@ trades.sort((a, b) => a.fdate < b.fdate ? -1 : a.fdate > b.fdate ? 1 : 0);
 const buys = trades.filter(r => r.code === 'P');
 const byTicker = new Map();
 for (const r of trades) (byTicker.get(r.T) ?? byTicker.set(r.T, []).get(r.T)).push(r);
+
+// Иностранные частные эмитенты (lib/fpi.mjs): справочники первой формы и отчётов 20-F/40-F/6-K, тикеры перед законом. Справочника
+// нет или он неполон — пометок нет (или только по давности листинга), сборка идёт дальше, предупреждение уходит в morning.json.
+// Вердикт нужен только покупкам с начала хранилища открытий: с него копится отдельная группа счётчика.
+const fpiRefs = loadFpiRefs(DATA);
+const fpiBefore = fpiRefs.first ? tickersBeforeLaw(tradesAll) : null;
+for (const w of fpiRefs.warn) console.log(`[compute] иностранные эмитенты: ${w}`);
+const bar0Of = new Map();   // тикер -> дата первого бара ряда цен (давность листинга)
+const fpiMemo = new Map();
+function fpiOf(r) {
+  if (!fpiRefs.first || r.fdate < OPENS_FROM) return null;
+  const k = `${r.cik}|${r.T}|${r.fdate}`;
+  if (!fpiMemo.has(k)) fpiMemo.set(k, fpiVerdict({ cik: r.cik, ticker: r.T, fdate: r.fdate, bar0: bar0Of.get(r.T) ?? null }, fpiRefs, { ranges: symRanges, before: fpiBefore }));
+  return fpiMemo.get(k);
+}
 
 // ---------- Доступ к ценам (с вытеснением) ----------
 const priceMap = new Map();
@@ -263,9 +282,10 @@ const quality = { reassigned: 0, reassignedTickers: new Set(), noEntry: 0, unkno
 const panel = new Panel();
 panel.add('SPY', monthlyFromDaily(spy), true);
 if (iwm?.length) panel.add('IWM', monthlyFromDaily(iwm), true);
-// Тикеры, чьи цены нужны утреннему списку, счётчику и здоровью сигнала: покупки последних дней подачи (с запасом в 45 дней) и все
-// подачи с начала здоровья сигнала (HEALTH.from, 14.08.2026: статус пересчитывается от первого дня при каждой сборке)
-const leanFrom = [COUNTER_FROM, HEALTH.from, addDaysIso(today, -45)].reduce((a, b) => (a < b ? a : b));
+// Тикеры, чьи цены нужны утреннему списку, счётчику и здоровью сигнала: покупки последних дней подачи (с запасом в 45 дней), все
+// подачи с начала здоровья сигнала (HEALTH.from, 14.08.2026: статус пересчитывается от первого дня при каждой сборке) и с начала
+// хранилища открытий (OPENS_FROM: с него копится группа счётчика «иностранные эмитенты»)
+const leanFrom = [COUNTER_FROM, HEALTH.from, OPENS_FROM, addDaysIso(today, -45)].reduce((a, b) => (a < b ? a : b));
 // и бумаги прошлогодних покупок тех же эмитентов: поле prev (повтор) смотрит, прошли ли они гейты, а у строки без ряда ценовые гейты
 // не срабатывают — у эмитента, сменившего тикер, prev разошёлся бы с полной сборкой
 const leanTickers = ONLY_MORNING ? (() => {
@@ -284,6 +304,7 @@ for (const [t, rows] of byTicker) {
   // потому что ему передавался null вместо реальной длины истории. Именно так участие
   // в IPO попадало в сигнал.
   const has = n > 0;
+  if (has) bar0Of.set(t, s[0][0]);
   if (has) panel.add(t, monthlyFromDaily(s));
   if (n > 100) pricedTickers.add(t); else noPriceTickers.add(t);
   const cur = has ? s[s.length - 1][1] : null;
@@ -467,8 +488,9 @@ W('feed.json', feedRows);
 // и не должен терять старые дни.
 const opensStore = readOpens(DATA);
 const dayCand = new Map();
-// Строки-кандидаты нужны только для последних дней, для счётчика и для здоровья сигнала (с подачи HEALTH.from): старше — не копим в памяти
-const DAY_CUT = [COUNTER_FROM, HEALTH.from, addDaysIso(today, -30)].reduce((a, b) => (a < b ? a : b));
+// Строки-кандидаты нужны только для последних дней, для счётчика, для здоровья сигнала (с подачи HEALTH.from) и для группы счётчика
+// «иностранные эмитенты» (с начала хранилища открытий OPENS_FROM): старше — не копим в памяти
+const DAY_CUT = [COUNTER_FROM, HEALTH.from, OPENS_FROM, addDaysIso(today, -30)].reduce((a, b) => (a < b ? a : b));
 // Повтор (prev, scripts/lib/morning.mjs, prevDays): дни подачи каждого эмитента, в которые была покупка от $10 тыс., прошедшая гейты
 // (не-обыкновенные бумаги гейты отсеивают сами). По всей истории, а не с DAY_CUT: окно prev — год. buys упорядочены по дате подачи.
 const eventDays = new Map();
@@ -485,6 +507,7 @@ for (const r of buys) {
     val: r.val, dd: r._dd, adv: r._adv20 ?? null, px: r._px0 ?? null, at: r.at ?? null,
     drop: r._gate.ok ? null : (r._gate.drop ?? 'x'),
     prev: prevDays(eventDays.get(r.cik), r.fdate),
+    fpi: fpiOf(r),
   });
 }
 const allFdates = [...new Set(buys.map(r => r.fdate))].sort();
@@ -505,7 +528,7 @@ const dayDates = [...new Set([...allFdates, ...(listFor ? [listFor] : [])])].sor
 function dayWithResults(fd) {
   const entry = nextTradingDay(opensStore, fd);
   const done = entry !== null && entry < today;
-  const built = buildDayFull(dayCand.get(fd) ?? []);
+  const built = buildDayFull(dayCand.get(fd) ?? [], MORNING, { fpiActive: fd >= FPI_FROM });
   const rows = built.rows.map(x => {
     const out = { ...x, who: x.who.slice(0, 2), nWho: x.who.length };
     if (done) {
@@ -514,21 +537,31 @@ function dayWithResults(fd) {
     }
     return out;
   });
-  return { date: fd, entry: done ? entry : null, done, rows, ...(built.unpriced.length ? { unpriced: built.unpriced } : {}) };
+  const day = { date: fd, entry: done ? entry : null, done, rows, ...(built.unpriced.length ? { unpriced: built.unpriced } : {}) };
+  // Тикеры событий иностранных эмитентов — для счётчика; в файл не идут (до MORNING.fpiFrom день в файле не меняется вовсе)
+  Object.defineProperty(day, 'foreign', { value: new Set(built.fpi), enumerable: false });
+  return day;
 }
 // Счётчик: основной список (скор ≥2) и все от $10 млн; каждая сделка — сразу к IWM и к SPY,
 // издержки у каждой свои (оборот ≥$30 млн — 0,10% на круг, $10–30 млн — 0,15%).
 // Здоровье сигнала (scripts/lib/morning.mjs, signalHealth): все сделки списка от $10 млн с подачи HEALTH.from — те же строки и те же
 // пропуски, что у счётчика (в том числе limit: открытие выше лимита LOO бота).
-const counterTrades = { main: [], all: [] }, counterSkips = { main: {}, all: {} };
+// Иностранные эмитенты (lib/fpi.mjs) — отдельная группа fpi: события, которые были бы в основном списке (скор от порога, цена, оборот),
+// но эмитент помечен. Копится с начала хранилища открытий независимо от MORNING.fpiFrom — и там, где такие события ещё стояли в
+// основном списке, и там, где уже вынесены из него. Здоровье сигнала их с дня пометки не видит: оно меряет только основной список.
+const counterTrades = { main: [], all: [], fpi: [] }, counterSkips = { main: {}, all: {}, fpi: {} };
 const healthTrades = [];
-const resultsFrom = COUNTER_FROM < HEALTH.from ? COUNTER_FROM : HEALTH.from;
+const resultsFrom = [COUNTER_FROM, HEALTH.from, OPENS_FROM].reduce((a, b) => (a < b ? a : b));
 for (const fd of allFdates) {
   if (fd < resultsFrom) continue;
   const day = dayWithResults(fd);
   if (!day.done) continue;
   for (const row of day.rows) {
-    if (fd >= HEALTH.from && !row.skip) healthTrades.push({ day: day.entry, fd, t: row.t, main: row.main, score: row.score, cost: row.cost, r: row.r, b: row.b, ex: row.ex, exS: row.exS });
+    if (fd >= HEALTH.from && !row.skip && !row.fpi) healthTrades.push({ day: day.entry, fd, t: row.t, main: row.main, score: row.score, cost: row.cost, r: row.r, b: row.b, ex: row.ex, exS: row.exS });
+    if (day.foreign.has(row.t) && row.score >= MORNING.scoreMin) {
+      if (row.skip) counterSkips.fpi[row.skip] = (counterSkips.fpi[row.skip] ?? 0) + 1;
+      else counterTrades.fpi.push({ day: day.entry, fd, t: row.t, score: row.score, cost: row.cost, r: row.r, b: row.b, bs: row.bs, ex: row.ex, exS: row.exS });
+    }
     if (fd < COUNTER_FROM) continue;
     for (const k of row.main ? ['main', 'all'] : ['all']) {
       if (row.skip) { counterSkips[k][row.skip] = (counterSkips[k][row.skip] ?? 0) + 1; continue; }
@@ -543,6 +576,15 @@ const counterOut = {
   upTo: counterTrades.all.reduce((m, x) => (m === null || x.day > m ? x.day : m), null),
   main: { ...summarize(counterTrades.main), skips: counterSkips.main },
   all: { ...summarize(counterTrades.all), skips: counterSkips.all },
+  fpi: { from: OPENS_FROM, ...summarize(counterTrades.fpi), skips: counterSkips.fpi },
+};
+// Состояние пометки иностранных эмитентов — для витрины, письма и проверки выкладки: с какого дня действует, готовы ли справочники
+const fpiWarn = [...fpiRefs.warn];
+{ const w = fpiStaleWarning(fpiRefs, listFor); if (w) { fpiWarn.push(w); console.log(`[compute] иностранные эмитенты: ${w}`); } }
+const fpiOut = {
+  from: FPI_FROM, lawFrom: FPI.lawFrom,
+  firstForm: fpiRefs.first ? fpiRefs.first.size : null, forms: fpiRefs.forms ? fpiRefs.forms.size : null, formsAsOf: fpiRefs.formsAsOf,
+  ...(fpiWarn.length ? { warn: fpiWarn } : {}),
 };
 const morningDays = dayDates.slice(-MORNING.daysShown).reverse().map(dayWithResults);
 W('morning.json', {
@@ -550,7 +592,7 @@ W('morning.json', {
   // Для сторожа: за какую дату подачи список, когда и кем собран, как покрыт индекс (null — поля покрытия в live.json ещё нет)
   listFor, builtAt: new Date().toISOString(), builder: BUILDER, source: SOURCE, coverage,
   params: { minVal: MORNING.minVal, minPx: MORNING.minPx, dvMin: MORNING.dvMin, dvCost: MORNING.dvCost, scoreMin: MORNING.scoreMin, costHi: MORNING.costHi, costLo: MORNING.costLo, stake: MORNING.stake },
-  counter: counterOut, health: healthOut, days: morningDays,
+  counter: counterOut, health: healthOut, fpi: fpiOut, days: morningDays,
 });
 if (COUNTER_DUMP) writeJson(COUNTER_DUMP, counterTrades);
 // --health-dump файл.json — все сделки здоровья сигнала построчно (сверка с опорной таблицей исследования)

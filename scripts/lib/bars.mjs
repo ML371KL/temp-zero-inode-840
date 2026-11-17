@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { parseYahooChart, readPriceCache, writePriceCache, mergeSeries } from './prices.mjs';
 import { readOpens, writeOpens, mergeOpens, pickOpens, volumesOf, OPENS_BENCH } from './opens.mjs';
 import { readJson, writeJson, addDaysIso } from './util.mjs';
+import { FPI } from './fpi.mjs';
 
 export const BARS_CHUNK = 20;            // тикеров за вызов воркера (у воркера потолок 25 подзапросов)
 export const FULL_DAYS = 420;            // истории для бумаги без кэша: 52-недельный максимум плюс запас
@@ -14,8 +15,13 @@ const UA = 'InsiderRadar/1.0 (rodionkalmykov@gmail.com)';
 
 // С какой даты просить бары: есть кэш — с его последнего бара (с перекрытием), нет — полная история; для открытий — не позже
 // первой даты подачи, чей день входа нужен.
+// Бумага без кэша — обычно новый податель: признак «давний листинг» (lib/fpi.mjs) смотрит, есть ли у ряда бары раньше
+// FPI.listedBefore. Полная сборка качает ряд с 2014 года, и чтобы сборка на сервере видела то же самое, история для бумаги без кэша
+// начинается не позже чем за месяц до этой даты (со временем 420 дней от дня списка перестанут до неё доставать).
+const LISTED_ANCHOR = addDaysIso(FPI.listedBefore, -31);
 export function barsFrom(last, listFor, fdates = []) {
-  const base = last ? addDaysIso(last, -BACK_DAYS) : addDaysIso(listFor, -FULL_DAYS);
+  const full = addDaysIso(listFor, -FULL_DAYS);
+  const base = last ? addDaysIso(last, -BACK_DAYS) : (full < LISTED_ANCHOR ? full : LISTED_ANCHOR);
   const need = fdates.length ? addDaysIso([...fdates].sort()[0], -BACK_DAYS) : null;
   return need && need < base ? need : base;
 }
