@@ -3324,6 +3324,13 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.equal(ownerKeyOf({ owners: [verde, garcia] }), 1017608); assert.equal(ownerKeyOf({ owners: [] }), 0); assert.equal(ownerKeyOf({}), 0);
     rmSync(d, { recursive: true, force: true });
   });
+
+  ok('A6: «Preference Shares» — не обыкновенные акции', () => {
+    assert.equal(isNonCommon('Series A Preference Shares'), true);
+    assert.equal(isNonCommon('7.00% Cumulative Preference Shares'), true);
+    assert.equal(applyGates({ code: 'P', px: 25, fn: {}, sec: 'Series A Preference Shares' }, { close: 25 }).drop, 'security');
+    for (const s of ['Common Stock', 'Ordinary Shares', 'American Depositary Shares', 'Class A Common Stock']) assert.equal(isNonCommon(s), false, s);
+  });
 }
 
 rmSync(TMP, { recursive: true, force: true });

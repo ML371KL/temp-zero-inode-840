@@ -61,7 +61,9 @@ const MAX_VOLUME_MULTIPLE = 300;
 //    («Depositary Shares ... Preferred» ловится по слову preferred);
 //  · «Common Units» у MLP (например Navios Maritime Partners) — тоже обычная торгуемая
 //    единица капитала, поэтому слово units в список не входит.
-const NON_COMMON_RE = /preferred|warrant|debenture|\bnotes?\b|\bbonds?\b|\brights?\b|convertible/i;
+//  · «Preference Shares» — те же привилегированные акции в британской традиции (LILA 04.09.2026: «Series A Preference Shares»
+//    на $6,56 млн прошли как обыкновенные; аудит форм 17.11.2026).
+const NON_COMMON_RE = /preferred|preference|warrant|debenture|\bnotes?\b|\bbonds?\b|\brights?\b|convertible/i;
 export function isNonCommon(secTitle) {
   return NON_COMMON_RE.test(String(secTitle ?? ''));
 }
