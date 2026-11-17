@@ -24,6 +24,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readJson, writeJson, readJsonGz, writeJsonGz, addDaysIso, SEC_UA } from '../lib/util.mjs';
 import { fetchDayIndex, uniqueFilings, edgarBase, SHARD_VERSION } from '../lib/edgar.mjs';
 import { FEED, loadFeed, reconcile, mergeFeedRows } from '../lib/feed.mjs';
+import { coverageEntry } from '../lib/livecal.mjs';
 import { nyWall, nyToMs } from '../lib/nytime.mjs';
 import { isSecClosed, isMarketClosed } from '../lib/calendar.mjs';
 import { fetchBars, applyBars, barsFrom } from '../lib/bars.mjs';
@@ -106,9 +107,18 @@ export function liveVerdict(live, day, code, lastChance = false) {
   const cov = live?.coverage?.[day] ?? null;
   if (code || !(live?.lastDay >= day)) return { ok: false, why: `формы разобраны не до ${day} (live.mjs код ${code}, lastDay=${live?.lastDay ?? '—'}${cov?.status ? ', ' + cov.status : ''})` };
   if (cov?.status === 'not-published' || cov?.status === 'holiday') return { ok: false, why: `индекс за ${day}: ${cov.status}` };
-  if (cov?.status === 'partial' && !lastChance) return { ok: false, why: `индекс за ${day} разобран не полностью: ${cov.collected} из ${cov.indexed} форм, ждут добора ${cov.pending} (повтор)` };
+  if (cov?.status === 'partial' && !lastChance) {
+    // Подача, по которой SEC и после нескольких попыток отвечает «нет файла» (и в журнале ленты её нет), скорее всего действительно
+    // снята: ждать её до 23:30 незачем — список уходит с неполным покрытием (это видно в coverage), снятой её признает сборка через сутки.
+    const pend = Object.values(live?.pending?.[day] ?? {});
+    const gaveUp = pend.length > 0 && pend.every(p => /нет файла/.test(p.err ?? '') && (p.tries ?? 0) >= NO_FILE_TRIES);
+    if (!gaveUp) return { ok: false, why: `индекс за ${day} разобран не полностью: ${cov.collected} из ${cov.indexed} форм, ждут добора ${cov.pending} (повтор)` };
+    return { ok: true, partial: true, noFile: pend.length };
+  }
   return { ok: true, partial: cov?.status === 'partial' };
 }
+// Сколько попыток сборки ждать подачу с ответом «нет файла», прежде чем идти дальше с неполным покрытием (попытки — раз в 2 минуты)
+export const NO_FILE_TRIES = 3;
 
 // ---------- лента на весь день ----------
 const dataShard = opts => join(opts.data, 'trades', 'live.json.gz');
@@ -152,6 +162,32 @@ export function feedFallback(opts, day) {
   return info;
 }
 
+// Сколько подач дня лежит разобранными в журнале ленты
+const feedHas = (opts, day) => (opts.noFeed ? 0 : [...loadFeed(opts.feedDir, day).forms.values()].filter(f => f.filed === day).length);
+// Подачи индекса дня, которые live.mjs не смог скачать (ждут добора: сеть, лимит SEC, «нет файла»), берутся из журнала ленты, где они
+// уже разобраны тем же разбором: строки вливаются в шард, подача снимается с добора, покрытие дня пересчитывается (fromFeed — сколько
+// подач взято из ленты). До 11.2026 из ленты брались только подачи, которых НЕТ в индексе; в ночь 06.11.2026 сервер потерял 31 подачу
+// индекса, хотя 514 из 515 лежали в журнале ленты (аудит форм 17.11.2026, находка 3). Возвращает число взятых подач.
+export function feedFillPending(opts, day) {
+  const lp = join(opts.data, 'state', 'live.json'), live = readJson(lp, {});
+  const pend = live.pending?.[day];
+  if (!pend || !Object.keys(pend).length) return 0;
+  const feed = loadFeed(opts.feedDir, day);
+  const accs = Object.keys(pend).filter(a => feed.forms.get(a)?.filed === day);
+  if (!accs.length) return 0;
+  const shard = readShard(opts);
+  mergeFeedRows(shard, feed.forms, accs);
+  writeJsonGz(dataShard(opts), shard);
+  for (const a of accs) delete pend[a];
+  const c = live.coverage?.[day] ?? {};
+  const left = Object.keys(pend).length;
+  live.coverage = { ...(live.coverage ?? {}), [day]: { ...c, ...coverageEntry({ indexed: c.indexed ?? 0, collected: (c.collected ?? 0) + accs.length, pending: left, gone: c.gone ?? 0, at: c.at, error: left ? c.error : null }),
+    fromFeed: (c.fromFeed ?? 0) + accs.length } };
+  if (!left) { delete live.pending[day]; delete live.coverage[day].error; if (!Object.keys(live.pending).length) delete live.pending; }
+  writeJson(lp, live, true);
+  return accs.length;
+}
+
 const lastBar = (data, t) => { const s = readPriceCache(data, t); return s?.length ? s[s.length - 1][0] : null; };
 
 // Одна попытка. Возвращает { ok, why?, retry? }. ctx.stage хранит завершённые шаги между попытками.
@@ -162,13 +198,17 @@ export async function attempt(opts, day, ctx) {
 
   if (!opts.noIndexCheck && !st.index) {
     const av = await indexAvailable(day);
-    if (av === false) {
+    if (av === false && !ctx.lastChance) return fail(`индекс EDGAR за ${day} ещё не опубликован`);
+    if (av !== true && ctx.lastChance) {
       // До последней попытки ждём индекс. На последней, если лента накопила подачи дня, — список по ленте: хуже индекса, но лучше тишины.
-      if (!ctx.lastChance) return fail(`индекс EDGAR за ${day} ещё не опубликован`);
-      const have = opts.noFeed ? 0 : [...loadFeed(opts.feedDir, day).forms.values()].filter(f => f.filed === day).length;
-      if (!have) return fail(`индекса EDGAR за ${day} нет, а лента не накопила подач дня — собрать нечем`);
-      ctx.source = 'feed';
-      log(`индекса за ${day} нет — список по ленте (${have} подач)`);
+      // То же, когда SEC не отвечает вовсе (av === null: сбой сети, как 16.11.2026): формы дня уже лежат разобранными в журнале ленты,
+      // а шаг форм на последней попытке только съел бы оставшееся время (аудит форм 17.11.2026, находка 5).
+      const have = feedHas(opts, day);
+      if (av === false && !have) return fail(`индекса EDGAR за ${day} нет, а лента не накопила подач дня — собрать нечем`);
+      if (have) {
+        ctx.source = 'feed';
+        log(`${av === false ? `индекса за ${day} нет` : 'SEC не отвечает'} — список по ленте (${have} подач)`);
+      }
     }
     st.index = true;
   }
@@ -182,10 +222,21 @@ export async function attempt(opts, day, ctx) {
     // Фоновое перечитывание окна (рост PARSER_REV) здесь не нужно: копия data каждый прогон свежая, прогресс всё равно пропадёт,
     // а список ждёт. Окно перечитывают прогоны на GitHub без нового дня.
     const code = await node('scripts/live.mjs', ['--data', opts.data, '--time-budget-min', '25', '--reread-budget-min', '0'], { env });
+    // Подачи индекса, которые не скачались, — из журнала ленты (там они уже разобраны)
+    if (!opts.noFeed) {
+      try { const n = feedFillPending(opts, day); if (n) log(`из журнала ленты взято ${n} подач индекса, которые не удалось скачать`); }
+      catch (e) { log('журнал ленты: добор не удался (не критично):', e.message); }
+    }
     const v = liveVerdict(readJson(join(opts.data, 'state', 'live.json'), {}), day, code, ctx.lastChance);
-    if (!v.ok) return fail(v.why);
-    if (v.partial) log('индекс разобран не полностью — последняя попытка, идём как есть (недобор виден в coverage)');
-    st.live = true;
+    if (v.ok) {
+      if (v.noFile) log(`по ${v.noFile} подачам индекса SEC ${NO_FILE_TRIES} попытки подряд отвечает «нет файла», в журнале ленты их нет — идём дальше с неполным покрытием`);
+      else if (v.partial) log('индекс разобран не полностью — последняя попытка, идём как есть (недобор виден в coverage)');
+      st.live = true;
+    } else if (ctx.lastChance && feedHas(opts, day)) {
+      // Шаг форм не удался и на последней попытке (индекс не скачался, сбой сети посреди дня) — список по ленте вместо «НЕ СОБРАНО»
+      ctx.source = 'feed';
+      log(`формы дня не собраны (${v.why}) — последняя попытка, список по ленте`);
+    } else return fail(v.why);
   }
   // Лента на весь день: сверка с индексом (подачи, которых нет в индексе, добавляются) или, без индекса, весь список из ленты
   if (!st.feed && !opts.noFeed) {

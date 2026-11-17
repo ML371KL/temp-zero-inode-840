@@ -3746,6 +3746,86 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.ok(num('StartLimitIntervalSec') / cycleSec < num('StartLimitBurst'), `перезапусков в окне ${(num('StartLimitIntervalSec') / cycleSec).toFixed(1)} при пределе ${num('StartLimitBurst')}`);
     assert.equal(formComplete('<SEC-DOCUMENT>x\n</SEC-DOCUMENT>\n'), true); assert.equal(formComplete('<SEC-DOCUMENT>x\n<XML>'), false);
   });
+
+  // ---------- B2а, B4: журнал ленты — запас для подач, которые не скачались, и для ночи, когда SEC не отвечает ----------
+  const mb = await import('./vps/morning-build.mjs');
+
+  ok('B2а: подачи индекса, которые не скачались, берутся из журнала ленты; покрытие дня пересчитывается', () => {
+    const work = join(ROOT, '.selftest-feedfill'), data = join(work, 'repo'), feedDir = join(work, 'feed'), D = '2026-11-06';
+    rmSync(work, { recursive: true, force: true }); mkdirSync(feedDir, { recursive: true });
+    const row = (acc, t) => ({ acc, form: '4', code: 'P', tdate: '2026-11-05', fdate: D, sec: 'Common Stock', sh: 1000, px: 20, val: 20000, t, cik: 555000, owners: [] });
+    writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, trades: [row('A-1', 'AAA')], amend: [] });
+    writeJson(join(data, 'state', 'live.json'), { lastDay: D, coverage: { [D]: { status: 'partial', indexed: 4, collected: 1, pending: 3, at: 'x', error: 'сеть' } },
+      pending: { [D]: { 'B-1': { paths: ['p'], tries: 1, err: 'нет файла (404)' }, 'C-1': { paths: ['p'], tries: 1, err: 'HTTP 503' }, 'E-1': { paths: ['p'], tries: 1, err: 'нет файла (404)' } } } });
+    writeFileSync(feedFile(feedDir, D), [{ k: 'form', acc: 'B-1', filed: D, trades: [row('B-1', 'BBB')], amend: [] }, { k: 'form', acc: 'C-1', filed: D, trades: [], amend: [{ acc: 'C-1', orig: D }] },
+      { k: 'form', acc: 'E-1', filed: '2026-11-05', trades: [row('E-1', 'EEE')], amend: [] }].map(x => JSON.stringify(x)).join('\n') + '\n');
+    assert.equal(mb.feedFillPending({ data, feedDir }, D), 2, 'B-1 и C-1 есть в ленте за этот день; E-1 в ленте числится за другой день — не берётся');
+    const live = readJson(join(data, 'state', 'live.json')), c = live.coverage[D];
+    assert.deepEqual([c.status, c.indexed, c.collected, c.pending, c.fromFeed], ['partial', 4, 3, 1, 2]);
+    assert.deepEqual(Object.keys(live.pending[D]), ['E-1']);
+    assert.deepEqual(readJsonGz(join(data, 'trades', 'live.json.gz')).trades.map(r => r.t).sort(), ['AAA', 'BBB']);
+    assert.equal(mb.feedFillPending({ data, feedDir }, D), 0, 'повтор ничего не меняет');
+    // последняя подача находится в ленте — день полный
+    writeFileSync(feedFile(feedDir, D), JSON.stringify({ k: 'form', acc: 'E-1', filed: D, trades: [row('E-1', 'EEE')], amend: [] }) + '\n', { flag: 'a' });
+    assert.equal(mb.feedFillPending({ data, feedDir }, D), 1);
+    const done = readJson(join(data, 'state', 'live.json'));
+    assert.deepEqual([done.coverage[D].status, done.coverage[D].collected, done.coverage[D].pending, done.coverage[D].fromFeed, done.coverage[D].error], ['complete', 4, 0, 3, undefined]);
+    assert.equal(done.pending, undefined);
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  ok('B1/B2а: сборка на сервере не ждёт до 23:30 подачу, по которой SEC три попытки подряд отвечает «нет файла»', () => {
+    const D = '2026-11-06', cov = { [D]: { status: 'partial', indexed: 3, collected: 2, pending: 1 } };
+    const st = (tries, err = 'нет файла (404)') => ({ lastDay: D, coverage: cov, pending: { [D]: { B: { paths: [], tries, err } } } });
+    assert.equal(liveVerdict(st(1), D, 0).ok, false); assert.equal(liveVerdict(st(2), D, 0).ok, false);
+    assert.deepEqual(liveVerdict(st(mb.NO_FILE_TRIES), D, 0), { ok: true, partial: true, noFile: 1 });
+    assert.equal(liveVerdict(st(9, 'HTTP 503'), D, 0).ok, false, 'сбой сети ждём до последней попытки');
+    assert.deepEqual(liveVerdict(st(1), D, 0, true), { ok: true, partial: true }, 'последняя попытка — как раньше');
+  });
+
+  // Ночь, когда SEC не отвечает: данные фикстуры без подачи L1 в шарде (она только в журнале ленты), бары — через подставной воркер
+  const feedNight = async (name, secHandler) => {
+    const work = join(ROOT, name), data = join(work, 'repo'), feedDir = join(work, 'feed');
+    rmSync(work, { recursive: true, force: true });
+    for (const d of ['trades', 'reference', 'prices', 'state']) cpSync(join(TMP, d), join(data, d), { recursive: true });
+    rmSync(join(data, 'prices', '_opens.json.gz'), { force: true });
+    const shardPath = join(data, 'trades', 'live.json.gz'), shard = readJsonGz(shardPath);
+    const l1 = shard.trades.filter(r => r.acc === 'L1');
+    shard.trades = shard.trades.filter(r => r.acc !== 'L1'); writeJsonGz(shardPath, shard);
+    writeJson(join(data, 'state', 'live.json'), { schema: SHARD_VERSION, from: addDaysIso(recentF, -30), lastDay: addDaysIso(recentF, -1), parserRev: PARSER_REV });
+    mkdirSync(feedDir, { recursive: true });
+    writeFileSync(feedFile(feedDir, recentF), [{ k: 'seen', acc: 'L1', cik: 222, form: '4', filed: recentF }, { k: 'form', acc: 'L1', filed: recentF, at: `${recentF}T17:21`, trades: l1, amend: [] }].map(x => JSON.stringify(x)).join('\n') + '\n');
+    const d0 = bizDays('2015-01-01', today).filter(d => d <= recentF).at(-1);
+    for (const sym of ['SPY', 'IWM', 'LIVA']) writePriceCache(data, sym, readPriceCache(data, sym).filter(r => r[0] < d0));
+    const over = { LIVA: { [d1L]: [50, 51] }, IWM: { [d1L]: [100, 100.5] }, SPY: { [d1L]: [100, 101] } };
+    const src = { LIVA: livaSeries, IWM: bizDays('2015-01-01', today).map(d => [d, 100, 100, 1e6]), SPY: bizDays('2015-01-01', today).map(d => [d, 100, 100, 1e6]) };
+    const api = await fakeWorker({ charts: Object.fromEntries(Object.entries(src).map(([sym, s]) => [sym, from => chartOf(s.filter(r => r[0] >= from), over[sym])])) });
+    const sec = createServer(secHandler);
+    await new Promise(r => sec.listen(0, '127.0.0.1', r));
+    const keep = { base: process.env.EDGAR_BASE, back: process.env.POLITE_BACKOFF_MS };
+    process.env.EDGAR_BASE = `http://127.0.0.1:${sec.address().port}`; process.env.POLITE_BACKOFF_MS = '2';
+    try {
+      const code = await morningMain(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', recentF, '--no-sync', '--feed-dir', feedDir, '--once', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+      return { code, puts: api.calls.morningPuts.map(x => JSON.parse(x)), l1 };
+    } finally {
+      for (const [k, v] of [['EDGAR_BASE', keep.base], ['POLITE_BACKOFF_MS', keep.back]]) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
+      await api.close(); await new Promise(r => sec.close(r)); rmSync(work, { recursive: true, force: true });
+    }
+  };
+  const feedListOk = (r, why) => {
+    assert.equal(r.code, 1, why + ': список доставлен, но не по индексу — тревога');
+    assert.equal(r.puts.length, 1, why);
+    const sent = r.puts[0];
+    assert.equal(sent.source, 'feed'); assert.equal(sent.listFor, recentF); assert.equal(sent.coverage.source, 'feed');
+    const row = sent.days.find(d => d.date === recentF).rows[0], ref = R('morning.json').days.find(d => d.date === recentF).rows[0];
+    for (const k of ['t', 'val', 'mx', 'score', 'main', 'dv', 'px', 'cost', 'tags']) assert.deepEqual(row[k], ref[k], `${why}: поле ${k} по ленте то же, что по индексу`);
+  };
+  await okAsync('B4: SEC не отвечает до последней попытки — список по ленте (раньше резерв включался только при неопубликованном индексе)', async () => {
+    feedListOk(await feedNight('.selftest-feed-b4a', req => req.socket.destroy()), 'SEC недоступна');
+  });
+  await okAsync('B4: индекс есть, но шаг форм не удался и на последней попытке — список по ленте вместо «НЕ СОБРАНО»', async () => {
+    feedListOk(await feedNight('.selftest-feed-b4b', (req, res) => { if (req.method === 'HEAD') { res.writeHead(200); res.end(); } else { res.writeHead(503); res.end('busy'); } }), 'шаг форм не удался');
+  });
 }
 
 rmSync(TMP, { recursive: true, force: true });
