@@ -4387,5 +4387,117 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   });
 }
 
+// Правка 1: ночная сборка сервера перекачивает бар D0 всем бумагам дня, бар дня входа — строкам вчерашнего списка, бары бенчмарков — всегда
+{
+  const mb = await import('./vps/morning-build.mjs');
+
+  await okAsync('пачка 2, правка 1: в ветке data бары дня записаны до закрытия торгов — список сервера всё равно равен полному пересчёту по закрытым барам (цена, оборот, просадка, результаты вчерашних сделок)', async () => {
+    const base = join(ROOT, '.selftest-openbar-vps'), full = join(base, 'full'), work = join(base, 'vps'), data = join(work, 'repo');
+    rmSync(base, { recursive: true, force: true });
+    const days = bizDays('2024-01-02', today), D = days.filter(d => d <= addDaysIso(today, -6)).at(-1), iD = days.indexOf(D), PD = days[iD - 1], TD = days[iD - 2];
+    // Закрытый бар D: цена 52, объём 3 млн; тот же бар в середине сессии: цена 51, объём 1 млн. Объёмы через день 3 и 1 млн — медиана
+    // оборота за 20 баров зависит от бара D (как у BLX 17.11.2026: $10,3 млн по недозакрытому бару против $12,1 млн). Два месяца
+    // назад бумага стоила 60 — от этого максимума считается просадка на день сделки (у бумаги дня сделка в день подачи).
+    const ser = (closed, upTo = today) => days.filter(d => d <= upTo).map((d, i) => (d === D
+      ? [d, closed ? 52 : 51, closed ? 52 : 51, closed ? 3e6 : 1e6] : [d, i <= iD - 40 ? 60 : 50, i <= iD - 40 ? 60 : 50, (iD - i) % 2 === 0 ? 3e6 : 1e6]));
+    const bench = (closed, upTo = today) => days.filter(d => d <= upTo).map(d => [d, d === D ? (closed ? 101 : 100.4) : 100, d === D ? (closed ? 101 : 100.4) : 100, 1e6]);
+    const overOf = closed => ({ DAYA: { [D]: [50.5, closed ? 52 : 51] }, PRVA: { [D]: [50.5, closed ? 52 : 51] }, IWM: { [D]: [100, closed ? 101 : 100.4] }, SPY: { [D]: [100, closed ? 101 : 100.4] } });
+    const seriesOf = (sym, closed, upTo) => (sym === 'IWM' || sym === 'SPY' ? bench(closed, upTo) : ser(closed, upTo));
+    const gotOf = (closed, upTo) => new Map(['SPY', 'IWM', 'DAYA', 'PRVA'].map(sym => [sym, parseYahooChart(chartOf(seriesOf(sym, closed, upTo), overOf(closed)[sym]))]));
+    const seed = (dirTo, closed, upTo) => {
+      mkdirSync(join(dirTo, 'state'), { recursive: true });
+      writeJson(join(dirTo, 'reference', 'tickers.json'), { 444: { ticker: 'DAYA', exchange: 'NYSE', name: 'Day A Corp' }, 445: { ticker: 'PRVA', exchange: 'NYSE', name: 'Prev A Corp' } });
+      writeJsonGz(join(dirTo, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [
+        T({ acc: 'OV1', cik: 444, t: 'DAYA', fdate: D, tdate: D, owners: ceo, code: 'P', sh: 5000, px: 51, val: 255000, own: 1e5 }),
+        T({ acc: 'OV2', cik: 445, t: 'PRVA', fdate: PD, tdate: TD, owners: ceo, code: 'P', sh: 5000, px: 50, val: 250000, own: 1e5 }),
+      ] });
+      writeJson(join(dirTo, 'state', 'live.json'), { schema: SHARD_VERSION, lastDay: D, coverage: { [D]: { status: 'complete', indexed: 1, collected: 1, pending: 0, at: 'x' } } });
+      applyBars(dirTo, gotOf(closed, upTo), { opensNeeds: { PRVA: [PD], DAYA: [D] }, updated: upTo });
+    };
+    const compute = (dataDir, site, extra = []) => execFileSync(process.execPath, [join(ROOT, 'scripts', 'compute.mjs'), '--data', dataDir, '--site', site, '--only-morning', ...extra], { stdio: 'pipe' });
+    const dayOf = (m, date) => m.days.find(d => d.date === date);
+    const rowOf = (m, date, t) => dayOf(m, date).rows.find(r => r.t === t);
+    const LISTK = ['val', 'mx', 'n', 'score', 'main', 'dv', 'px', 'dd', 'cost', 'tags'], RESK = ['o', 'c', 'r', 'b', 'bs', 'ex', 'exS', 'skip'];
+    try {
+      seed(full, true, today);                                   // полный пересчёт: все бары закрытые
+      compute(full, join(base, 'site-full'));
+      const ref = readJson(join(base, 'site-full', 'data', 'morning.json'));
+      seed(data, false, D);                                      // копия сервера в 22:03: ветку data последним писал прогон GitHub в торговые часы
+      const planFile = join(base, 'plan-stale.json');
+      compute(data, join(base, 'site-stale'), ['--plan', planFile]);
+      const stale = readJson(join(base, 'site-stale', 'data', 'morning.json'));
+      // без перекачки сервер считал бы по недозакрытым барам — это и была находка ночи 17→18.11.2026
+      const a = rowOf(ref, D, 'DAYA'), b = rowOf(stale, D, 'DAYA');
+      assert.deepEqual([a.px, a.dv, b.px, b.dv], [52, 100000000, 51, 50500000], 'цена и оборот по закрытому и по недозакрытому бару');
+      assert.notEqual(a.dd, b.dd, 'просадка от максимума тоже другая');
+      assert.deepEqual([rowOf(ref, PD, 'PRVA').c, rowOf(stale, PD, 'PRVA').c], [52, 51], 'закрытие дня входа вчерашней сделки');
+      assert.notEqual(rowOf(ref, PD, 'PRVA').ex, rowOf(stale, PD, 'PRVA').ex);
+      // план: бар D0 у бумаги дня есть, поэтому в bars её нет, но она стоит в fresh.bars; строка вчерашнего дня — в fresh.opens
+      const plan = readJson(planFile);
+      assert.deepEqual([plan.d0, plan.bars, plan.opens], [D, {}, {}]);
+      assert.deepEqual(plan.fresh, { bars: ['DAYA'], opens: { PRVA: [PD] } });
+      // сборка сервера: воркер отдаёт закрытые бары
+      const closedCharts = Object.fromEntries(['SPY', 'IWM', 'DAYA', 'PRVA'].map(sym => [sym, from => chartOf(seriesOf(sym, true, today).filter(r => r[0] >= from), overOf(true)[sym])]));
+      const api = await fakeWorker({ charts: closedCharts });
+      try {
+        const code = await morningMain(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--once', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+        assert.equal(code, 0);
+        const asked = sym => api.calls.bars.filter(x => x.sym === sym).map(x => x.from).sort()[0];
+        for (const sym of ['SPY', 'IWM', 'DAYA', 'PRVA']) assert.ok(asked(sym) && asked(sym) <= addDaysIso(D, -3), `${sym}: бар D0 перекачан с перекрытием (запрос с ${asked(sym)})`);
+        assert.deepEqual(readPriceCache(data, 'DAYA').find(r => r[0] === D), [D, 52, 52, 3e6], 'в копии данных бар D0 теперь закрытый');
+        const sent = JSON.parse(api.calls.morningPuts[0]);
+        assert.equal(sent.listFor, D);
+        for (const k of LISTK) assert.deepEqual(rowOf(sent, D, 'DAYA')[k], a[k], `список дня, поле ${k}: сервер = полный пересчёт`);
+        for (const k of [...LISTK, ...RESK]) assert.deepEqual(rowOf(sent, PD, 'PRVA')[k], rowOf(ref, PD, 'PRVA')[k], `вчерашний список, поле ${k}: сервер = полный пересчёт`);
+        assert.deepEqual(sent.health, ref.health, 'здоровье сигнала считается по тем же результатам');
+      } finally { await api.close(); }
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('пачка 2, правка 1: источник цен не ответил — до последней попытки сборка ждёт, на последней идёт с барами из ветки data и пишет об этом; уже перекачанное повторно не просит', async () => {
+    const base = join(ROOT, '.selftest-openbar-vps2'), work = join(base, 'vps'), data = join(work, 'repo');
+    rmSync(base, { recursive: true, force: true });
+    const days = bizDays('2024-01-02', today), D = days.filter(d => d <= addDaysIso(today, -6)).at(-1), PD = days[days.indexOf(D) - 1];
+    const flat = (upTo = D) => days.filter(d => d <= upTo).map(d => [d, 100, 100, 1e6]);
+    const got = new Map(['SPY', 'IWM', 'DAYA'].map(sym => [sym, parseYahooChart(chartOf(flat()))]));
+    mkdirSync(join(data, 'state'), { recursive: true });
+    writeJson(join(data, 'reference', 'tickers.json'), { 444: { ticker: 'DAYA', exchange: 'NYSE', name: 'Day A Corp' } });
+    writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [T({ acc: 'OV3', cik: 444, t: 'DAYA', fdate: D, tdate: PD, owners: ceo, code: 'P', sh: 5000, px: 100, val: 500000, own: 1e5 })] });
+    writeJson(join(data, 'state', 'live.json'), { schema: SHARD_VERSION, lastDay: D, coverage: { [D]: { status: 'complete', indexed: 1, collected: 1, pending: 0, at: 'x' } } });
+    applyBars(data, got, { updated: D });
+    const chart = from => chartOf(flat(today).filter(r => r[0] >= from));
+    const opts = api => mb.parseArgs(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--dry-run', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+    const lines = [], orig = console.log;
+    console.log = (...x) => { lines.push(x.join(' ')); };
+    let api = await fakeWorker({ charts: {} });                                     // воркер на месте, источник цен не отдаёт ничего
+    try {
+      mkdirSync(work, { recursive: true });
+      // не последняя попытка: бенчмарки не перекачаны — повтор, хотя бары за D в копии есть
+      let r = await mb.attempt(opts(api), D, { stage: {}, lastChance: false, summary: null });
+      assert.equal(r.ok, false); assert.match(r.why, /бары бенчмарков не получены/);
+      // последняя попытка: идём с тем, что есть, и говорим об этом; список собран
+      const ctx = { stage: {}, lastChance: true, summary: null };
+      r = await mb.attempt(opts(api), D, ctx);
+      assert.equal(r.ok, true, r.why);
+      assert.ok(lines.some(l => /последняя попытка, идём как есть\): бары бенчмарков не получены/.test(l)), 'предупреждение о бенчмарках');
+      assert.ok(lines.some(l => /бар не перекачан у 1 бумаг \(DAYA\)/.test(l)), 'предупреждение о бумаге дня');
+      assert.equal(ctx.summary.rows, 1);
+      await api.close();
+      // источник отвечает: вторая попытка того же запуска не просит заново то, что уже перекачано
+      api = await fakeWorker({ charts: { SPY: chart, IWM: chart, DAYA: chart } });
+      const ctx2 = { stage: {}, lastChance: false, summary: null };
+      r = await mb.attempt(opts(api), D, ctx2);
+      assert.equal(r.ok, true, r.why);
+      assert.deepEqual([...ctx2.refreshed], ['DAYA']);
+      const fetched = () => lines.filter(l => /докачка баров \(проход 1\)/.test(l)).at(-1);
+      assert.match(fetched(), /, 1 — перекачка бара, уже лежащего в данных\)/);
+      ctx2.stage.bars = false; ctx2.stage.built = false;                              // как при повторе после сбоя позднего шага
+      r = await mb.attempt(opts(api), D, ctx2);
+      assert.equal(r.ok, true, r.why);
+      assert.match(fetched(), /, 0 — перекачка бара, уже лежащего в данных\)/, 'перекачка бара D0 — один раз за запуск');
+    } finally { console.log = orig; await api.close(); rmSync(base, { recursive: true, force: true }); }
+  });
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);

@@ -9,8 +9,10 @@
 //   1. индекс EDGAR за день D опубликован (form.ГГГГММДД.idx)          — нет: ждём; D — праздник SEC: выходим без тревоги
 //   2. ветка data (анонимный shallow-fetch открытого репозитория)      — в $STATE/repo, каждый раз чистое дерево
 //   3. scripts/live.mjs: формы дня D                                   — SEC с VPS, ~0,2 с на форму
-//   4. бары SPY и IWM за D и открытия дня входа                         — через воркер /bars (Yahoo с адреса VPS не трогаем)
-//   5. compute --only-morning --plan: у каких бумаг дня нет бара D0     — докачка через воркер /bars (бумаги без кэша — со всей историей)
+//   4. бары SPY и IWM за D и открытия дня входа                         — через воркер /bars (Yahoo с адреса VPS не трогаем); перекачиваются всегда
+//   5. compute --only-morning --plan: бары D0 бумаг дня и бары дня      — докачка через воркер /bars (бумаги без кэша — со всей историей); бар,
+//      входа у строк вчерашнего списка                                    уже лежащий в копии данных, перекачивается тоже: в ветку data его
+//                                                                         мог записать прогон GitHub до закрытия торгов
 //   6. compute --only-morning --builder vps                             — morning.json (листинг, счётчик)
 //   7. PUT воркеру /morning                                             — панель берёт файл оттуда, если он свежее страницы
 //   8. письмо (если в env есть TELEGRAM_*)                              — scripts/notify.mjs --sender vps; дубль исключает отметка в воркере
@@ -213,6 +215,8 @@ export function feedFillPending(opts, day, { lastChance = false } = {}) {
 }
 
 const lastBar = (data, t) => { const s = readPriceCache(data, t); return s?.length ? s[s.length - 1][0] : null; };
+// Дата не позже cap: у перекачиваемого ряда запрос должен начинаться с перекрытием до дня cap, даже если кэш ушёл дальше него
+const notAfter = (iso, cap) => (iso && cap && iso > cap ? cap : iso);
 
 // Одна попытка. Возвращает { ok, why?, retry? }. ctx.stage хранит завершённые шаги между попытками.
 export async function attempt(opts, day, ctx) {
@@ -281,17 +285,21 @@ export async function attempt(opts, day, ctx) {
     st.feed = true;
   }
 
-  // Бары бенчмарков: по ним определяются D0 и день входа. Нужны, пока нет бара за D у SPY или открытий за D в хранилище.
+  // Бары бенчмарков: по ним определяются D0 и день входа, по их открытию и закрытию считаются результаты вчерашних сделок к IWM и SPY.
+  // Перекачиваются всегда, даже когда бар за D и открытия за D в копии данных есть: ветка data хранит то, что записал последний прогон
+  // GitHub, а он мог идти до закрытия торгов (ночь 17→18.11.2026 — бары 17.11 по состоянию на 15:28). Сборка на сервере идёт после
+  // закрытия. have — бары за D в копии уже лежат: если источник не ответил, на последней попытке идём с ними (как до правки), а не
+  // остаёмся без списка.
   if (!st.bench) {
     const store = readOpens(opts.data);
-    const need = (lastBar(opts.data, 'SPY') ?? '') < day || OPENS_BENCH.some(b => !opensOf(store, b, day));
-    if (need) {
-      const from = barsFrom(lastBar(opts.data, 'SPY'), day);
-      const r = await fetchBars(opts.workerUrl, opts.token, OPENS_BENCH.map(sym => ({ sym, from })));
-      const failed = Object.keys(r.failed);
-      if (failed.length || r.limited) return fail(`бары бенчмарков не получены: ${failed.map(s => `${s} (${r.failed[s]})`).join(', ') || 'лимит'}`);
-      log('бенчмарки:', JSON.stringify(applyBars(opts.data, r.got, { updated: day })));
-    }
+    const have = (lastBar(opts.data, 'SPY') ?? '') >= day && OPENS_BENCH.every(b => opensOf(store, b, day));
+    const from = barsFrom(notAfter(lastBar(opts.data, 'SPY'), day), day);
+    const r = await fetchBars(opts.workerUrl, opts.token, OPENS_BENCH.map(sym => ({ sym, from })));
+    const failed = Object.keys(r.failed);
+    const why = failed.length || r.limited ? `бары бенчмарков не получены: ${failed.map(s => `${s} (${r.failed[s]})`).join(', ') || 'лимит'}` : null;
+    if (why && !(have && ctx.lastChance)) return fail(why);
+    if (why) log(`ВНИМАНИЕ (последняя попытка, идём как есть): ${why} — остаются бары из ветки data, они могли быть записаны до закрытия торгов`);
+    else log('бенчмарки:', JSON.stringify(applyBars(opts.data, r.got, { updated: day })));
     st.bench = true;
   }
 
@@ -309,26 +317,40 @@ export async function attempt(opts, day, ctx) {
         if (!v.ok) return fail(v.why);
         if (v.warn) log('ВНИМАНИЕ (последняя попытка, идём как есть):', v.warn);
       }
-      const names = [...new Set([...Object.keys(plan.bars), ...Object.keys(plan.opens)])];
+      // Перекачка того, что в копии данных уже есть (plan.fresh): бар D0 бумаг дня и открытие с закрытием дня входа D0 у строк прошедших
+      // дней. В обычную ночь последний прогон GitHub шёл до открытия рынка: бара D0 нет ни у кого, и всё это докачивается и так. После
+      // прогона GitHub в торговые часы бар есть, но недозакрытый — сервер считал по нему цену, оборот, просадку и результаты вчерашних
+      // сделок. Перекачка — только в первом проходе и только того, что в этом запуске ещё не перекачано (ctx.refreshed).
+      const done = (ctx.refreshed ??= new Set());
+      const freshBars = pass === 1 ? (plan.fresh?.bars ?? []).filter(sym => !done.has(sym)) : [];
+      const freshOpens = pass === 1 ? Object.fromEntries(Object.entries(plan.fresh?.opens ?? {}).filter(([sym]) => !done.has(sym))) : {};
+      const opensNeeds = { ...freshOpens, ...plan.opens };
+      const names = [...new Set([...Object.keys(plan.bars), ...Object.keys(opensNeeds), ...freshBars])];
+      const refresh = [...new Set([...freshBars, ...Object.keys(freshOpens)])];
       // Минимумы дня сделок из форм дня (plan.lows, ключ — тикер формы): тот же ответ источника цен, запрос должен начинаться за
       // неделю до первой даты сделки. Чаще всего это те же бумаги, что без бара D0; тикер формы, которого среди них нет, просится
       // отдельно и в кэш цен не пишется.
       const lowNeeds = plan.lows ?? {};
       const lowFrom = sym => (lowNeeds[sym]?.length ? addDaysIso([...lowNeeds[sym]].sort()[0], -LOWS_BACK_DAYS) : null);
       const early = (a, b) => (b && b < a ? b : a);
-      const items = names.map(sym => ({ sym, from: early(barsFrom(plan.bars[sym] ? plan.bars[sym].last : lastBar(opts.data, sym), day, plan.opens[sym] ?? []), lowFrom(sym)) }));
+      // У перекачиваемой бумаги кэш кончается на D0 или позже: запрос начинается с перекрытием до D0, а не от последнего бара кэша
+      const lastOf = sym => (plan.bars[sym] ? plan.bars[sym].last : notAfter(lastBar(opts.data, sym), plan.d0));
+      const items = names.map(sym => ({ sym, from: early(barsFrom(lastOf(sym), day, opensNeeds[sym] ?? []), lowFrom(sym)) }));
       const lowOnly = Object.keys(lowNeeds).filter(sym => !names.includes(sym));
       for (const sym of lowOnly) items.push({ sym, from: lowFrom(sym) });
       if (items.length) {
-        log(`докачка баров (проход ${pass}): ${items.length} бумаг (${Object.keys(plan.bars).length} без бара D0, ${Object.keys(plan.opens).length} с открытиями, ${Object.keys(lowNeeds).length} с минимумами дня)`);
+        log(`докачка баров (проход ${pass}): ${items.length} бумаг (${Object.keys(plan.bars).length} без бара D0, ${Object.keys(plan.opens).length} с открытиями, ${Object.keys(lowNeeds).length} с минимумами дня, ${refresh.length} — перекачка бара, уже лежащего в данных)`);
         const r = await fetchBars(opts.workerUrl, opts.token, items);
-        const stat = applyBars(opts.data, new Map([...r.got].filter(([sym]) => names.includes(sym))), { opensNeeds: plan.opens, updated: day });
+        const stat = applyBars(opts.data, new Map([...r.got].filter(([sym]) => names.includes(sym))), { opensNeeds, updated: day });
+        for (const sym of refresh) if (r.got.has(sym)) done.add(sym);
         const lowsAdded = applyLows(opts.data, r.got, lowNeeds);
         // Бумага, которой у Yahoo нет вовсе (missing), — не сбой: повтор ничего не даст. Сбой — когда воркер или Yahoo не ответили.
         // Минимумы дня у тикера формы, которого нет среди бумаг списка, необязательны: без них гейт работает по прежнему правилу.
         const transient = Object.keys(r.failed).filter(sym => names.includes(sym));
         log('бары:', JSON.stringify({ ...stat, missing: stat.missing.length, transient: transient.length, limited: r.limited, lows: lowsAdded }));
         if (transient.length && !ctx.lastChance) return fail(`бары не получены: ${transient.slice(0, 8).join(', ')}${transient.length > 8 ? '…' : ''}`);
+        const kept = transient.filter(sym => refresh.includes(sym));
+        if (kept.length) log(`ВНИМАНИЕ (последняя попытка, идём как есть): бар не перекачан у ${kept.length} бумаг (${kept.slice(0, 8).join(', ')}${kept.length > 8 ? '…' : ''}) — у них остаётся бар из ветки data, он мог быть записан до закрытия торгов`);
       }
       if (pass === 1 && !plan.opensPending) break;
       if (pass === 2) break;

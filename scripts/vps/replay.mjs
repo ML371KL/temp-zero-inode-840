@@ -8,6 +8,11 @@
 // открытий убраны даты с D0. Эталон — lean-compute на тех же формах, но с полными барами. Подставной воркер отдаёт бары из полного кэша
 // (ответ Yahoo chart тем же видом, что у настоящего воркера). Сравниваются строки списка дня D (состав, скор, сумма, оборот, цена,
 // издержки, пометки) и результаты дня D−1 (открытие, закрытие, к IWM и к SPY). Живой SEC и Yahoo не трогаются.
+//
+// --stale DIR — ночь после прогона GitHub в торговые часы: DIR — копия ветки data, в которой бары дня D0 записаны до закрытия торгов
+// (как снимок 17.11.2026 15:28 ET). Бары D0 и записи открытий за D0 не срезаются, а подкладываются из DIR — тем бумагам, у которых
+// они там есть (SPY, IWM, бумаги дня D и предыдущего дня подачи); остальным срезаются, как обычно. Сборка «как на сервере» обязана
+// перекачать подложенное и совпасть с эталоном по закрытым барам.
 import { createServer } from 'node:http';
 import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, statSync, readdirSync } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
@@ -25,7 +30,8 @@ const val = (n, d = null) => { const i = argv.indexOf(n); return i >= 0 ? argv[i
 const FULL = resolve(val('--full', ''));
 const DAYS = (val('--days', '') || '').split(',').filter(Boolean);
 const WORK = resolve(val('--work', join(CODE, '..', '_replay-840')));
-if (!existsSync(join(FULL, 'trades')) || !DAYS.length) { console.log('использование: node scripts/vps/replay.mjs --full DATA --days Д1,Д2 [--work DIR] [--keep]'); process.exit(2); }
+const STALE = val('--stale') ? resolve(val('--stale')) : null;
+if (!existsSync(join(FULL, 'trades')) || !DAYS.length || (STALE && !existsSync(join(STALE, 'prices')))) { console.log('использование: node scripts/vps/replay.mjs --full DATA --days Д1,Д2 [--work DIR] [--keep] [--stale DIR]'); process.exit(2); }
 
 const run = (script, args) => new Promise(r => {
   const p = spawn(process.execPath, ['--max-old-space-size=4096', join(CODE, script), ...args], { cwd: CODE, stdio: ['ignore', 'ignore', 'inherit'] });
@@ -126,10 +132,28 @@ for (const D of DAYS) {
   const d0 = spy.map(r => r[0]).filter(d => d <= D).at(-1);
   const tick = new Set(['SPY', 'IWM']);
   for (const f of readdirSync(join(data, 'trades')).filter(x => x.endsWith('.json.gz'))) for (const r of readJsonGz(join(data, 'trades', f), { trades: [] }).trades ?? []) if (r.fdate === D && r.t) tick.add(r.t);
-  for (const t of tick) if (existsSync(priceCachePath(data, t))) { const s = readPriceCache(data, t); writePriceCache(data, t, s.filter(r => r[0] < d0)); }
+  // --stale: бар D0 из снимка с недозакрытыми барами — бумагам дня D, предыдущего дня подачи (их день входа — D0) и бенчмаркам
+  let planted = 0, plantedOpens = 0;
+  const staleBar = t => (STALE && existsSync(priceCachePath(STALE, t)) ? (readPriceCache(STALE, t) ?? []).find(r => r[0] === d0) ?? null : null);
+  if (STALE) {
+    const fds = new Set();
+    for (const f of readdirSync(join(data, 'trades')).filter(x => x.endsWith('.json.gz'))) for (const r of readJsonGz(join(data, 'trades', f), { trades: [] }).trades ?? []) if (r.fdate < D) fds.add(r.fdate);
+    const prevD = [...fds].sort().at(-1);
+    for (const f of readdirSync(join(data, 'trades')).filter(x => x.endsWith('.json.gz'))) for (const r of readJsonGz(join(data, 'trades', f), { trades: [] }).trades ?? []) if (r.fdate === prevD && r.t) tick.add(r.t);
+  }
+  for (const t of tick) if (existsSync(priceCachePath(data, t))) {
+    const s = readPriceCache(data, t), b = staleBar(t);
+    if (b) planted++;
+    writePriceCache(data, t, [...s.filter(r => r[0] < d0), ...(b ? [b] : [])]);
+  }
   const st = readOpens(data);
   for (const t of Object.keys(st.t)) for (const d of Object.keys(st.t[t])) if (d >= d0) delete st.t[t][d];
+  if (STALE) {
+    const so = readOpens(STALE);
+    for (const t of Object.keys(so.t)) if (so.t[t][d0]) { (st.t[t] ??= {})[d0] = so.t[t][d0]; plantedOpens++; }
+  }
   writeOpens(data, st, d0);
+  if (STALE) console.log(`${D}: подложено недозакрытых баров D0 ${planted} (из ${tick.size} бумаг), записей открытий за D0 ${plantedOpens}`);
   // минимумы дня сделок из форм дня D: слой пополняет только сборка GitHub, на сервере в 22:03 их ещё нет (--keep-lows — оставить, как было до 11.2026)
   if (!argv.includes('--keep-lows')) {
     const drop = new Set();

@@ -602,15 +602,21 @@ if (HEALTH_DUMP) writeJson(HEALTH_DUMP, healthTrades);
 const fmtHealth = h => (h ? `${h.status} с ${h.since}, по ${h.asOf}: m ${(h.m * 100).toFixed(3)}%, z ${h.z}, S_W ${h.sw}, сделок ${h.n}` : 'нет данных');
 // План докачки для сборки на VPS: у каких тикеров дня listFor нет бара D0 (и с какой даты качать) и каким строкам прошедших
 // дней не хватает открытия/закрытия дня входа. Пусто — докачивать нечего.
+// fresh — что перекачать, хотя в копии данных оно есть: бар D0 у бумаг дня listFor (fresh.bars) и открытие с закрытием дня входа
+// у строк прошедших дней, чей день входа — D0 (fresh.opens: по ним считаются результаты вчерашних сделок). Бар в ветке data мог
+// быть записан до закрытия торгов (прогон GitHub в торговые часы, ночь 17→18.11.2026); сборка на сервере идёт после закрытия и
+// перекачивает его всегда (scripts/vps/morning-build.mjs).
 if (PLAN) {
   const d0 = listFor ? d0Of(listFor) : null;
   const bars = {}, opens = {}, lows = {};
+  const fresh = { bars: [], opens: {} };
   if (listFor && d0) {
     for (const r of buys) {
       if (r.fdate !== listFor || !(r.val >= MORNING.minVal) || isNonCommon(r.sec)) continue;
       const s = series(r.T);
       const last = s?.length ? s[s.length - 1][0] : null;
       if (!s?.some(x => x[0] === d0)) bars[r.T] = { last };   // нужен именно бар D0 (кэш мог уйти и дальше него)
+      else if (!fresh.bars.includes(r.T)) fresh.bars.push(r.T);
     }
   }
   // Минимумы дня сделок из форм дня listFor, которых нет в слое reference/lows.csv.gz: ключ слоя — тикер ФОРМЫ и дата сделки (как у
@@ -625,11 +631,14 @@ if (PLAN) {
   }
   for (const day of morningDays) {
     if (!day.done) continue;
-    for (const row of day.rows) if (row.skip === 'noopen' || row.skip === 'noclose') (opens[row.t] ??= []).push(day.date);
+    for (const row of day.rows) {
+      if (row.skip === 'noopen' || row.skip === 'noclose') (opens[row.t] ??= []).push(day.date);
+      else if (d0 && day.entry === d0) (fresh.opens[row.t] ??= []).push(day.date);
+    }
   }
   // opensPending: день listFor уже «прошёл» (его D+1 в хранилище открытий есть) и в нём есть бумаги без бара D0 — их открытия станут видны только после
   // докачки баров (второй проход плана). В боевой сборке день listFor ещё не прошёл, и второго прохода нет.
-  writeJson(PLAN, { listFor, d0, bars, opens, lows, opensPending: !!(morningDays[0]?.done && morningDays[0]?.unpriced?.length) });
+  writeJson(PLAN, { listFor, d0, bars, opens, lows, fresh, opensPending: !!(morningDays[0]?.done && morningDays[0]?.unpriced?.length) });
 }
 if (ONLY_MORNING) {
   console.log(`[compute] --only-morning: список за ${listFor}, бумаг от $10 млн ${morningDays[0]?.rows.length ?? 0}, без цены на D0 ${morningDays[0]?.unpriced?.length ?? 0}`);
