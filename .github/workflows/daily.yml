@@ -26,7 +26,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Страж расписания. Событие schedule у GitHub опаздывает на часы (03–04 утра по Нью-Йорку в октябре 2026, 07:26 — 17.11.2026)
+  # и сползает к приёму списка ботом (08:30) и к открытию рынка. Прогон по расписанию, начатый в торговый день позже 08:10 и до
+  # закрытия торгов, пропускается: задача update не выполняется вовсе — ни снимка в ветку data, ни публикации Pages, ни писем;
+  # сам прогон завершается успешно. Ручной запуск и запуск от слияния стражем не ограничены (их защищает prices.mjs: бар
+  # незакрытого дня не записывается). Правило — scripts/lib/session.mjs, scheduleGuard; сбой самого стража прогон не останавливает.
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.guard.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Страж расписания
+        id: guard
+        continue-on-error: true
+        run: node scripts/schedule-guard.mjs --event "${{ github.event_name }}"
+
   update:
+    needs: guard
+    # !cancelled(): задача идёт и тогда, когда страж упал (вывода skip нет); пропуск — только при явном skip=true
+    if: ${{ !cancelled() && needs.guard.outputs.skip != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 170
     environment:

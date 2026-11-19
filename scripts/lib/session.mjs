@@ -1,4 +1,4 @@
-// Торговая сессия биржи во времени сборки: закрыт ли дневной бар.
+// Торговая сессия биржи во времени сборки: закрыт ли дневной бар и можно ли страховочному прогону GitHub работать.
 //
 // Источник цен отдаёт бар текущего дня с самого открытия: в нём цена последней сделки вместо закрытия и объём на эту минуту.
 // Прогон GitHub в торговые часы клал такой бар в ветку data, а ночная сборка сервера считала по нему цену, оборот и просадку
@@ -11,6 +11,7 @@ import { marketCloseEt } from './calendar.mjs';
 
 export const SESSION = {
   settleMin: 10,          // запас после закрытия сессии, минут: аукцион закрытия и поздние отчёты о сделках
+  guardFrom: '08:10',     // страховочный прогон GitHub по расписанию, начатый в торговый день позже этого времени, не работает
 };
 
 // Момент (мс UTC), с которого бар дня day считается закрытым; null — биржа в этот день не торгует, бара не будет
@@ -35,4 +36,20 @@ export function dropOpenBars(res, openDay) {
   const series = res.series.filter(before);
   return { ...res, series, cut: res.series.length - series.length,
     ...(res.ohlc ? { ohlc: res.ohlc.filter(before) } : {}), ...(res.lows ? { lows: res.lows.filter(before) } : {}) };
+}
+
+// Страховочный прогон daily.yml по расписанию GitHub (событие schedule, по плану 22:40–23:40 по Нью-Йорку) опаздывает на часы:
+// 03–04 утра в октябре 2026, 07:26 — 17.11.2026. Сползая дальше, он попал бы на приём списка ботом (08:30) и на торговую сессию.
+// Прогон по расписанию, начатый в торговый день позже SESSION.guardFrom и до закрытия бара дня, завершается сразу, ничего не меняя.
+// Ручной запуск и запуск от слияния этим не ограничены: их защищает запрет записи незакрытого бара (dropOpenBars).
+// -> { skip, why }
+export function scheduleGuard(eventName, nowMs = Date.now(), p = SESSION) {
+  const wall = nyWall(nowMs), day = wall.slice(0, 10), hm = wall.slice(11, 16);
+  if (eventName !== 'schedule') return { skip: false, why: `событие ${eventName || '—'}: ограничение действует только на расписание GitHub` };
+  const closed = barClosedAtMs(day, p);
+  if (closed === null) return { skip: false, why: `${day} — биржа не торгует, ${hm} по Нью-Йорку` };
+  if (hm <= p.guardFrom) return { skip: false, why: `${hm} по Нью-Йорку — не позже ${p.guardFrom}` };
+  const until = nyWall(closed).slice(11, 16);
+  if (nowMs >= closed) return { skip: false, why: `${hm} по Нью-Йорку — торги дня закрыты с ${until}` };
+  return { skip: true, why: `прогон по расписанию GitHub начат в ${hm} по Нью-Йорку торгового дня ${day} — позже ${p.guardFrom} и до закрытия торгов (${until}): завершаюсь без изменений` };
 }

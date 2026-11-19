@@ -4328,5 +4328,64 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   });
 }
 
+// Правка 3: страховочный прогон daily.yml по расписанию GitHub не работает с 08:10 по Нью-Йорку до закрытия торгов (lib/session.mjs, schedule-guard.mjs)
+{
+  const { scheduleGuard, SESSION } = await import('./lib/session.mjs');
+  const g = (ev, wall) => scheduleGuard(ev, nyToMs(wall)).skip;
+
+  ok('пачка 2, правка 3: прогон по расписанию, начатый в торговый день позже 08:10 и до закрытия торгов, пропускается; остальные — нет', () => {
+    assert.equal(SESSION.guardFrom, '08:10');
+    // как опаздывало расписание до сих пор: 03–04 утра в октябре, 07:26 — 17.11.2026; по плану — 22:40 (зима) и 23:40 (лето)
+    for (const w of ['2026-10-15T03:40', '2026-11-17T07:26', '2026-11-18T08:10', '2026-11-18T22:40', '2026-07-01T23:40', '2026-11-18T00:10'])
+      assert.equal(g('schedule', w), false, w);
+    for (const w of ['2026-11-18T08:11', '2026-11-18T08:30', '2026-11-18T09:30', '2026-11-18T12:00', '2026-11-18T15:59', '2026-11-18T16:09', '2026-07-01T10:00'])
+      assert.equal(g('schedule', w), true, w);
+    assert.equal(g('schedule', '2026-11-18T16:10'), false, 'торги закрыты: бары дня уже закрытые');
+    assert.equal(g('schedule', '2026-11-21T10:00'), false, 'суббота');
+    assert.equal(g('schedule', '2026-11-26T10:00'), false, 'праздник биржи (SEC тоже закрыта)');
+    assert.equal(g('schedule', '2026-04-03T10:00'), false, 'Страстная пятница: биржа закрыта');
+    assert.equal(g('schedule', '2026-11-27T13:05'), true, 'сокращённый день: до закрытия с запасом');
+    assert.equal(g('schedule', '2026-11-27T13:10'), false, 'сокращённый день: после закрытия');
+    for (const ev of ['workflow_dispatch', 'push', '', undefined]) assert.equal(g(ev, '2026-11-18T12:00'), false, `событие ${ev}: ограничения нет`);
+    assert.match(scheduleGuard('schedule', nyToMs('2026-11-18T09:41')).why, /начат в 09:41 по Нью-Йорку торгового дня 2026-11-18 — позже 08:10 и до закрытия торгов \(16:10\)/);
+  });
+
+  ok('пачка 2, правка 3: шаг стража — решение в GITHUB_OUTPUT, код выхода всегда 0; сбой стража прогон не останавливает', () => {
+    const out = join(TMP, 'guard-output.txt');
+    const run = (argv, env = {}) => {
+      rmSync(out, { force: true });
+      const text = execFileSync(process.execPath, [join(ROOT, 'scripts', 'schedule-guard.mjs'), ...argv], { encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: out, GITHUB_ACTIONS: '', ...env } });
+      return { text, skip: readFileSync(out, 'utf8') };
+    };
+    let r = run(['--event', 'schedule', '--now', '2026-11-18T09:41:00-05:00']);
+    assert.equal(r.skip, 'skip=true\n'); assert.match(r.text, /ПРОПУСК: прогон по расписанию GitHub начат в 09:41/);
+    r = run(['--event', 'schedule', '--now', '2026-11-18T07:26:00-05:00']);
+    assert.equal(r.skip, 'skip=false\n'); assert.match(r.text, /работаем/);
+    assert.equal(run(['--event', 'workflow_dispatch', '--now', '2026-11-18T09:41:00-05:00']).skip, 'skip=false\n', 'ручной запуск не ограничен');
+    assert.equal(run(['--event', 'push', '--now', '2026-11-18T09:41:00-05:00']).skip, 'skip=false\n', 'запуск от слияния не ограничен');
+    assert.equal(run(['--now', '2026-11-18T09:41:00-05:00'], { GITHUB_EVENT_NAME: 'schedule' }).skip, 'skip=true\n', 'событие берётся и из окружения GitHub');
+    r = run(['--event', 'schedule', '--now', 'не-время']);
+    assert.equal(r.skip, 'skip=false\n', 'ошибка стража — прогон идёт'); assert.match(r.text, /страж не сработал/);
+    assert.match(run(['--event', 'schedule', '--now', '2026-11-18T09:41:00-05:00'], { GITHUB_ACTIONS: 'true' }).text, /::notice::Прогон пропущен/);
+  });
+
+  ok('пачка 2, правка 3: в daily.yml вся работа (снимок в ветку data, публикация Pages, письма) — в задаче update, а она не идёт при skip=true стража', () => {
+    const y = readFileSync(join(ROOT, '.github', 'workflows', 'daily.yml'), 'utf8').replace(/\r/g, '');
+    const jobs = y.slice(y.indexOf('\njobs:\n'));
+    const names = [...jobs.matchAll(/^ {2}([a-z_-]+):\n/gm)].map(m => m[1]);
+    assert.deepEqual(names, ['guard', 'update'], 'задач две: страж и обновление');
+    const guard = jobs.slice(jobs.indexOf('\n  guard:\n'), jobs.indexOf('\n  update:\n')), update = jobs.slice(jobs.indexOf('\n  update:\n'));
+    assert.match(guard, /outputs:\n {6}skip: \$\{\{ steps\.guard\.outputs\.skip \}\}/);
+    assert.match(guard, /id: guard\n {8}continue-on-error: true\n {8}run: node scripts\/schedule-guard\.mjs --event "\$\{\{ github\.event_name \}\}"/);
+    assert.ok(!/git push|upload-pages-artifact|deploy-pages|notify\.mjs|prices\.mjs|compute\.mjs/.test(guard), 'страж ничего не меняет');
+    assert.match(update, /^\n {2}update:\n {4}needs: guard\n(?: {4}#.*\n)* {4}if: \$\{\{ !cancelled\(\) && needs\.guard\.outputs\.skip != 'true' \}\}\n/);
+    for (const step of ['Снапшот на ветку data', 'Артефакт Pages', 'Публикация Pages', 'Telegram-уведомления (необязательно)', 'Обновление цен', 'Живой контур EDGAR', 'Вычисления и payload'])
+      assert.ok(update.includes(`- name: ${step}\n`), `шаг «${step}» — в задаче update`);
+    // очередь общая с бэкфилом и расписание — как были
+    assert.match(y, /concurrency:\n {2}group: insider-radar-data\n {2}cancel-in-progress: false/);
+    assert.match(y, /- cron: "40 3 \* \* 2-6"/);
+  });
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);
