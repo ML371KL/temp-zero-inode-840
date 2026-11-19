@@ -9,6 +9,9 @@
 //                      покупками с даты --since (по умолчанию OPENS_FROM); кэш цен, справочники
 //                      и состояние не трогаются — для локального прогона и разовой догрузки
 // Открытия и закрытия дней входа пишутся в том же проходе из того же ответа Yahoo (lib/opens.mjs).
+// Бар торгового дня, который ещё не закрыт (до 16:10 по Нью-Йорку, в сокращённый день — до 13:10), не пишется ни в кэш, ни в
+// открытия: прогон в торговые часы оставлял в ветке data цену и объём середины сессии (lib/session.mjs). --now ISO — подставные
+// часы для проверки.
 // Использование: node scripts/prices.mjs --mode daily|backfill [--data data] [--time-budget-min N]
 import { readJson, writeJson, isoToday, addDaysIso } from './lib/util.mjs';
 import { fetchTickerRef } from './lib/edgar.mjs';
@@ -16,6 +19,7 @@ import { OPENS_FROM, OPENS_BENCH, readOpens, writeOpens, pickOpens, mergeOpens, 
 import { fetchYahooDaily, fetchStooqDaily, readPriceCache, writePriceCache, hasPriceCache, listedThrough } from './lib/prices.mjs';
 import { fetchSymbolRanges, writeSymbolRanges, loadSymbolRanges } from './lib/symbols.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker, exchangeCounts } from './lib/universe.mjs';
+import { openBarDay, dropOpenBars } from './lib/session.mjs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -28,6 +32,10 @@ const FROM = '2014-01-01'; // запас в 2 года до 2016 — для пр
 
 const OPENS_ONLY = args.includes('--opens-only');
 const OPENS_SINCE = argVal('--since', OPENS_FROM);
+// Часы для правила незакрытого бара: момент проверки — получение ответа по каждой бумаге (прогон может перейти через закрытие)
+const NOW_FIXED = argVal('--now', null) ? Date.parse(argVal('--now', null)) : null;
+if (NOW_FIXED !== null && !Number.isFinite(NOW_FIXED)) throw new Error('--now: нужен момент времени в ISO, например 2026-11-18T11:00:00-05:00');
+const nowMs = () => NOW_FIXED ?? Date.now();
 
 // Свежий справочник тикеров сохраняется для compute. В режиме --opens-only берётся имеющийся:
 // локальный прогон ничего в каталоге данных, кроме файла открытий, менять не должен.
@@ -57,7 +65,7 @@ const splits = readJson(splitsPath, {});
 let stooqDown = false; // per-run: челлендж может исчезнуть, проверяем каждый прогон заново
 
 const { trades } = loadAllTrades(DATA);
-const today = isoToday();
+const today = NOW_FIXED !== null ? new Date(NOW_FIXED).toISOString().slice(0, 10) : isoToday();
 const recentCut = addDaysIso(today, -760); // ~25 месяцев: открытые 24м окна бэктеста
 
 // Кандидаты: тикеры эмитентов с покупками P (вся вселенная кроме OTC)
@@ -129,6 +137,13 @@ if (LIMIT > 0) list = list.slice(0, LIMIT); // дымовые прогоны
 console.log(`[prices] режим ${MODE}: кандидатов ${list.length}`);
 
 let ok = 0, kept = 0, miss = 0, budgetOut = false;
+let openCut = 0, openCutDay = null;   // сколько рядов пришло с баром незакрытого дня (бар не записан)
+// Бар незакрытого торгового дня из ответа убирается до записи: ряд, пары открытий и минимумы (lib/session.mjs)
+const closedOnly = res => {
+  const day = openBarDay(nowMs()), out = dropOpenBars(res, day);
+  if (out !== res) { openCut++; openCutDay = day; }
+  return out;
+};
 let staleQueued = MODE !== 'daily' || OPENS_ONLY;   // устаревшие ряды встают в очередь после основного прохода
 // Гигиена ценового слоя: сколько рядов отвергнуто как чужой инструмент и сколько
 // одиночных «залётных» баров снято фильтром. Числа уходят в _quality.json и в meta.json,
@@ -152,6 +167,7 @@ for (let qi = 0; qi < list.length || !staleQueued; qi++) {
     quality.rejectedMeta[t] = res.rejected;
     console.log(`[prices] ${t}: ответ не про американскую бумагу (${res.rejected}) — ряд отвергнут`);
   }
+  res = closedOnly(res);
   if (OPENS_ONLY) {
     if (res.ohlc) { mergeOpens(opens, t, pickOpens(res.ohlc, all.get(t)?.fd, { all: OPENS_BENCH.includes(t), vol: volumesOf(res.series) })); ok++; }
     else miss++;
@@ -163,7 +179,7 @@ for (let qi = 0; qi < list.length || !staleQueued; qi++) {
     try {
       const s = await fetchStooqDaily(t, FROM);
       if (s.down) { stooqDown = true; console.log('[prices] stooq: антибот-челлендж, резерв недоступен'); }
-      else if (s.series) res = s;
+      else if (s.series) res = closedOnly(s);
     } catch { /* резерв необязателен */ }
   }
   if (res.series) {
@@ -197,6 +213,7 @@ for (let qi = 0; qi < list.length || !staleQueued; qi++) {
 writeOpens(DATA, opens, today);
 const nOpens = Object.values(opens.t).reduce((a, d) => a + Object.keys(d).length, 0);
 console.log(`[prices] открытия: ${Object.keys(opens.t).length} тикеров, ${nOpens} записей`);
+if (openCut) console.log(`[prices] торги ${openCutDay} ещё не закрыты: бар этого дня не записан у ${openCut} рядов (появится в прогоне после закрытия)`);
 if (OPENS_ONLY) {
   console.log(`[prices] --opens-only: обработано ${ok}, нет данных ${miss}, бюджет ${budgetOut ? 'ИСЧЕРПАН' : 'ок'}`);
   process.exit(0);

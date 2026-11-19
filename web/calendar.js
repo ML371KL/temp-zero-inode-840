@@ -64,3 +64,18 @@ export function isMarketClosed(day) {
   const w = dow(day);
   return w === 0 || w === 6 || nyseHolidays(Number(day.slice(0, 4))).has(day);
 }
+
+// Сокращённые дни NYSE — основная сессия закрывается в 13:00 по Нью-Йорку: пятница после Дня благодарения, 24 декабря и 3 июля,
+// когда это будний торговый день (не выходной и не сам праздник по переносу: 03.07.2026 и 24.12.2027 — праздничные пятницы).
+// Нужны сборке, чтобы знать, когда дневной бар закрыт (scripts/lib/session.mjs). Разовые закрытия биржи (траур) сюда не входят.
+export function nyseEarlyCloses(year) {
+  const hol = nyseHolidays(year);
+  const out = new Set([addDaysIso(nth(year, 11, 4, 4), 1)]);
+  for (const d of [iso(year, 7, 3), iso(year, 12, 24)]) { const w = dow(d); if (w >= 1 && w <= 5 && !hol.has(d)) out.add(d); }
+  return out;
+}
+// Закрытие основной сессии по Нью-Йорку: '16:00', в сокращённый день — '13:00'; null — биржа в этот день не торгует
+export function marketCloseEt(day) {
+  if (isMarketClosed(day)) return null;
+  return nyseEarlyCloses(Number(day.slice(0, 4))).has(day) ? '13:00' : '16:00';
+}

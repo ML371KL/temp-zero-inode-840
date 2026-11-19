@@ -4214,5 +4214,119 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   });
 }
 
+// ==================== ВТОРАЯ ПАЧКА ПО АУДИТУ ФОРМ, 11.2026 (audit-840-forms-2026-11-17/fixes2) ====================
+// Правка 2: бар незакрытого торгового дня не пишется в кэш цен и в открытия дня входа (lib/session.mjs, prices.mjs)
+{
+  const { openBarDay, barClosedAtMs, dropOpenBars, SESSION } = await import('./lib/session.mjs');
+  const at = wall => nyToMs(wall);
+
+  ok('пачка 2, правка 2: сокращённые дни биржи — пятница после Дня благодарения, 24 декабря и 3 июля, когда это торговый будний день', () => {
+    const { nyseEarlyCloses, marketCloseEt } = buildCalendar;
+    assert.deepEqual([...nyseEarlyCloses(2026)].sort(), ['2026-11-27', '2026-12-24'], '03.07.2026 — праздничная пятница (День независимости в субботу)');
+    assert.deepEqual([...nyseEarlyCloses(2025)].sort(), ['2025-07-03', '2025-11-28', '2025-12-24']);
+    assert.deepEqual([...nyseEarlyCloses(2027)].sort(), ['2027-11-26'], '03.07.2027 — суббота, 24.12.2027 — праздничная пятница');
+    assert.deepEqual([...nyseEarlyCloses(2023)].sort(), ['2023-07-03', '2023-11-24'], '24.12.2023 — воскресенье');
+    assert.deepEqual([...nyseEarlyCloses(2024)].sort(), ['2024-07-03', '2024-11-29', '2024-12-24']);
+    assert.equal(marketCloseEt('2026-11-18'), '16:00');
+    assert.equal(marketCloseEt('2026-11-27'), '13:00');
+    for (const d of ['2026-11-26', '2026-11-21', '2026-07-03', '2026-04-03']) assert.equal(marketCloseEt(d), null, d);
+    assert.equal(webCalendar.marketCloseEt, marketCloseEt, 'календарь сборки и страницы — один модуль');
+  });
+
+  ok('пачка 2, правка 2: бар дня закрыт с 16:10 по Нью-Йорку, в сокращённый день — с 13:10; до того день считается незакрытым', () => {
+    assert.equal(SESSION.settleMin, 10);
+    assert.equal(barClosedAtMs('2026-11-18'), Date.parse('2026-11-18T21:10:00Z'), 'зимнее время: 16:10 ET = 21:10 UTC');
+    assert.equal(barClosedAtMs('2026-07-01'), Date.parse('2026-07-01T20:10:00Z'), 'летнее время: 16:10 ET = 20:10 UTC');
+    assert.equal(barClosedAtMs('2026-11-27'), Date.parse('2026-11-27T18:10:00Z'), 'сокращённый день: 13:10 ET');
+    assert.equal(barClosedAtMs('2026-11-26'), null, 'День благодарения: биржа не торгует');
+    for (const w of ['2026-11-18T00:05', '2026-11-18T07:30', '2026-11-18T09:29', '2026-11-18T11:00', '2026-11-18T15:59', '2026-11-18T16:09'])
+      assert.equal(openBarDay(at(w)), '2026-11-18', w);
+    for (const w of ['2026-11-18T16:10', '2026-11-18T16:15', '2026-11-18T22:03', '2026-11-18T23:59'])
+      assert.equal(openBarDay(at(w)), null, w);
+    assert.equal(openBarDay(at('2026-11-21T11:00')), null, 'суббота');
+    assert.equal(openBarDay(at('2026-11-26T11:00')), null, 'праздник биржи');
+    assert.equal(openBarDay(at('2026-11-27T12:30')), '2026-11-27', 'сокращённый день, торги идут');
+    assert.equal(openBarDay(at('2026-11-27T13:09')), '2026-11-27', 'сокращённый день: до закрытия с запасом');
+    assert.equal(openBarDay(at('2026-11-27T13:10')), null, 'сокращённый день: бар закрыт');
+    assert.equal(openBarDay(at('2026-07-01T15:00')), '2026-07-01'); assert.equal(openBarDay(at('2026-07-01T16:10')), null);
+  });
+
+  ok('пачка 2, правка 2: из ответа источника срезаются ряд, открытия и минимумы незакрытого дня; закрытый ответ не меняется', () => {
+    const days = bizDays('2026-10-01', '2026-11-18'), D = '2026-11-18', P = '2026-11-17';
+    const ser = days.map((d, i) => [d, 100 + (i % 7) * 0.5, 100 + (i % 7) * 0.5, d === D ? 4e5 : 1e6]);
+    const res = parseYahooChart(chartOf(ser, { [D]: [101, 99] }));
+    res.lows = ser.map(r => [r[0], r[1] - 1]);
+    assert.equal(res.series.at(-1)[0], D); assert.equal(res.ohlc.at(-1)[0], D);
+    const cut = dropOpenBars(res, openBarDay(at(`${D}T11:00`)));
+    assert.equal(cut.series.at(-1)[0], P); assert.equal(cut.ohlc.at(-1)[0], P); assert.equal(cut.lows.at(-1)[0], P); assert.equal(cut.cut, 1);
+    assert.equal(res.series.at(-1)[0], D, 'исходный ответ не тронут');
+    assert.equal(dropOpenBars(res, openBarDay(at(`${D}T16:15`))), res, 'после закрытия ответ тот же');
+    assert.equal(dropOpenBars(cut, D), cut, 'бара дня в ответе нет — срезать нечего (утренний прогон)');
+    assert.deepEqual(dropOpenBars({ missing: true }, D), { missing: true });
+    // запись, как в prices.mjs: кэш и открытие дня входа для покупки с подачей накануне
+    const L = join(TMP, 'openbar');
+    const write = r => { writePriceCache(L, 'AAA', r.series); const st = readOpens(L); mergeOpens(st, 'AAA', pickOpens(r.ohlc, [P], { vol: new Map(r.series.map(x => [x[0], x[3]])) })); writeOpens(L, st, D); };
+    write(cut);
+    assert.equal(readPriceCache(L, 'AAA').at(-1)[0], P, '11:00 — бара дня в кэше нет');
+    assert.equal(opensOf(readOpens(L), 'AAA', D), null, '11:00 — открытия дня входа нет');
+    write(dropOpenBars(parseYahooChart(chartOf(ser.map(r => (r[0] === D ? [D, 105, 105, 1e6] : r)), { [D]: [101, 105] })), openBarDay(at(`${D}T16:15`))));
+    assert.deepEqual(readPriceCache(L, 'AAA').at(-1), [D, 105, 105, 1e6], '16:15 — бар дня записан закрытым');
+    assert.deepEqual(opensOf(readOpens(L), 'AAA', D).slice(0, 2), [101, 105]);
+  });
+
+  // Прогон prices.mjs целиком: источник цен и справочник SEC подставные (подмена fetch модулем --import), часы — --now
+  await okAsync('пачка 2, правка 2: прогон обновления цен в 11:00 по Нью-Йорку не оставляет бара дня, в 16:15 — оставляет, в сокращённый день — по его закрытию', async () => {
+    const base = join(ROOT, '.selftest-openbar');
+    rmSync(base, { recursive: true, force: true }); mkdirSync(base, { recursive: true });
+    const stub = join(base, 'stub.mjs');
+    writeFileSync(stub, [
+      "import { readFileSync } from 'node:fs';",
+      "const fx = () => JSON.parse(readFileSync(process.env.STUB_FIXTURE, 'utf8'));",
+      "const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { 'content-type': 'application/json' } });",
+      'globalThis.fetch = async url => {',
+      '  const u = new URL(String(url)), f = fx();',
+      "  if (u.hostname === 'www.sec.gov') return json(f.tickers);",
+      "  const m = u.pathname.startsWith('/v8/finance/chart/') ? decodeURIComponent(u.pathname.slice('/v8/finance/chart/'.length)) : null;",
+      "  return m && f.charts[m] ? json(f.charts[m]) : new Response('', { status: 404 });",
+      '};',
+    ].join('\n') + '\n');
+    const run = (L, now, fixture) => {
+      const fx = join(base, 'fixture.json');
+      writeJson(fx, fixture);
+      return new Promise(resolve => execFile(process.execPath, ['--import', pathToFileURL(stub).href, join(ROOT, 'scripts', 'prices.mjs'), '--mode', 'daily', '--data', L, '--now', now],
+        { encoding: 'utf8', env: { ...process.env, POLITE_BACKOFF_MS: '2', STUB_FIXTURE: fx } }, (err, so, se) => resolve({ code: err ? (err.code ?? 1) : 0, out: so + se })));
+    };
+    const tickers = { fields: ['cik', 'name', 'ticker', 'exchange'], data: [[1, 'AAA Inc', 'AAA', 'NYSE']] };
+    // day — торговый день прогона, prev — день подачи покупки (её день входа — day); бар дня — середины сессии (fin = false) или закрытый
+    const scene = (name, day, prev) => {
+      const L = join(base, name);
+      const days = bizDays('2026-08-03', day).filter(d => !isMarketClosed(d));
+      const ser = fin => days.map((d, i) => (d === day ? [d, fin ? 105 : 99, fin ? 105 : 99, fin ? 1e6 : 4e5] : [d, 100 + (i % 7) * 0.5, 100 + (i % 7) * 0.5, 1e6]));
+      const charts = fin => Object.fromEntries(['SPY', 'IWM', 'AAA'].map(s => [s, chartOf(ser(fin), { [day]: [101, fin ? 105 : 99] })]));
+      writeJsonGz(join(L, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [T({ acc: 'OB1', cik: 1, t: 'AAA', fdate: prev, tdate: prev, owners: ceo, code: 'P', sh: 1000, px: 100, val: 1e5, own: 1e5 })] });
+      return { L, charts, last: sym => readPriceCache(L, sym).at(-1), open: sym => opensOf(readOpens(L), sym, day) };
+    };
+    try {
+      const a = scene('wed', '2026-11-18', '2026-11-17');
+      let r = await run(a.L, '2026-11-18T11:00:00-05:00', { tickers, charts: a.charts(false) });
+      assert.equal(r.code, 0, r.out);
+      for (const s of ['SPY', 'IWM', 'AAA']) { assert.equal(a.last(s)[0], '2026-11-17', `${s}: бар незакрытого дня в кэш не записан`); assert.equal(a.open(s), null, `${s}: открытия незакрытого дня нет`); }
+      assert.match(r.out, /торги 2026-11-18 ещё не закрыты: бар этого дня не записан у 3 рядов/);
+      r = await run(a.L, '2026-11-18T16:15:00-05:00', { tickers, charts: a.charts(true) });
+      assert.equal(r.code, 0, r.out);
+      for (const s of ['SPY', 'IWM', 'AAA']) { assert.deepEqual(a.last(s), ['2026-11-18', 105, 105, 1e6], s); assert.deepEqual(a.open(s).slice(0, 2), [101, 105], s); }
+      assert.ok(!/ещё не закрыты/.test(r.out));
+      // сокращённый день (пятница после Дня благодарения): 12:30 — нет, 13:05 — запас ещё не вышел, 13:15 — да
+      const b = scene('short', '2026-11-27', '2026-11-25');
+      r = await run(b.L, '2026-11-27T12:30:00-05:00', { tickers, charts: b.charts(false) });
+      assert.equal(r.code, 0, r.out); assert.equal(b.last('AAA')[0], '2026-11-25'); assert.equal(b.open('IWM'), null);
+      r = await run(b.L, '2026-11-27T13:05:00-05:00', { tickers, charts: b.charts(true) });
+      assert.equal(b.last('AAA')[0], '2026-11-25', '13:05 — запас после закрытия ещё не вышел');
+      r = await run(b.L, '2026-11-27T13:15:00-05:00', { tickers, charts: b.charts(true) });
+      assert.deepEqual(b.last('AAA'), ['2026-11-27', 105, 105, 1e6]); assert.deepEqual(b.open('AAA').slice(0, 2), [101, 105]);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);
