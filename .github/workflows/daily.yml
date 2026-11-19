@@ -34,6 +34,8 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # Сбой самой задачи (например, не скачался код) прогон не красит и не останавливает: update идёт без ограничения
+    continue-on-error: true
     outputs:
       skip: ${{ steps.guard.outputs.skip }}
     steps:

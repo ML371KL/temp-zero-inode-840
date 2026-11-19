@@ -4376,6 +4376,7 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.deepEqual(names, ['guard', 'update'], 'задач две: страж и обновление');
     const guard = jobs.slice(jobs.indexOf('\n  guard:\n'), jobs.indexOf('\n  update:\n')), update = jobs.slice(jobs.indexOf('\n  update:\n'));
     assert.match(guard, /outputs:\n {6}skip: \$\{\{ steps\.guard\.outputs\.skip \}\}/);
+    assert.match(guard, /\n {4}continue-on-error: true\n/, 'сбой задачи-стража прогон не красит');
     assert.match(guard, /id: guard\n {8}continue-on-error: true\n {8}run: node scripts\/schedule-guard\.mjs --event "\$\{\{ github\.event_name \}\}"/);
     assert.ok(!/git push|upload-pages-artifact|deploy-pages|notify\.mjs|prices\.mjs|compute\.mjs/.test(guard), 'страж ничего не меняет');
     assert.match(update, /^\n {2}update:\n {4}needs: guard\n(?: {4}#.*\n)* {4}if: \$\{\{ !cancelled\(\) && needs\.guard\.outputs\.skip != 'true' \}\}\n/);
