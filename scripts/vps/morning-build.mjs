@@ -217,6 +217,13 @@ export function feedFillPending(opts, day, { lastChance = false } = {}) {
 const lastBar = (data, t) => { const s = readPriceCache(data, t); return s?.length ? s[s.length - 1][0] : null; };
 // Дата не позже cap: у перекачиваемого ряда запрос должен начинаться с перекрытием до дня cap, даже если кэш ушёл дальше него
 const notAfter = (iso, cap) => (iso && cap && iso > cap ? cap : iso);
+// Потребности в открытиях { тикер: [даты подач] } из двух источников: даты одной бумаги объединяются, а не замещаются — бумага может
+// стоять и во вчерашнем списке (перекачка дня входа D0), и в более раннем дне без открытия
+export function unionNeeds(a = {}, b = {}) {
+  const out = {};
+  for (const src of [a, b]) for (const [sym, dates] of Object.entries(src)) out[sym] = [...new Set([...(out[sym] ?? []), ...dates])].sort();
+  return out;
+}
 
 // Одна попытка. Возвращает { ok, why?, retry? }. ctx.stage хранит завершённые шаги между попытками.
 export async function attempt(opts, day, ctx) {
@@ -324,7 +331,7 @@ export async function attempt(opts, day, ctx) {
       const done = (ctx.refreshed ??= new Set());
       const freshBars = pass === 1 ? (plan.fresh?.bars ?? []).filter(sym => !done.has(sym)) : [];
       const freshOpens = pass === 1 ? Object.fromEntries(Object.entries(plan.fresh?.opens ?? {}).filter(([sym]) => !done.has(sym))) : {};
-      const opensNeeds = { ...freshOpens, ...plan.opens };
+      const opensNeeds = unionNeeds(freshOpens, plan.opens);
       const names = [...new Set([...Object.keys(plan.bars), ...Object.keys(opensNeeds), ...freshBars])];
       const refresh = [...new Set([...freshBars, ...Object.keys(freshOpens)])];
       // Минимумы дня сделок из форм дня (plan.lows, ключ — тикер формы): тот же ответ источника цен, запрос должен начинаться за
@@ -349,7 +356,10 @@ export async function attempt(opts, day, ctx) {
         const transient = Object.keys(r.failed).filter(sym => names.includes(sym));
         log('бары:', JSON.stringify({ ...stat, missing: stat.missing.length, transient: transient.length, limited: r.limited, lows: lowsAdded }));
         if (transient.length && !ctx.lastChance) return fail(`бары не получены: ${transient.slice(0, 8).join(', ')}${transient.length > 8 ? '…' : ''}`);
-        const kept = transient.filter(sym => refresh.includes(sym));
+        // Не перекачано — всё, чего нет в ответе: и то, по чему воркер ответил ошибкой, и то, до чего он не дошёл (после отказа по
+        // лимиту fetchBars остальные пачки не шлёт и в failed их не пишет, а перекачиваемые бумаги стоят в конце запроса)
+        const kept = refresh.filter(sym => !r.got.has(sym));
+        if (kept.length && !ctx.lastChance) return fail(`бары не перекачаны (воркер ответил лимитом): ${kept.slice(0, 8).join(', ')}${kept.length > 8 ? '…' : ''}`);
         if (kept.length) log(`ВНИМАНИЕ (последняя попытка, идём как есть): бар не перекачан у ${kept.length} бумаг (${kept.slice(0, 8).join(', ')}${kept.length > 8 ? '…' : ''}) — у них остаётся бар из ветки data, он мог быть записан до закрытия торгов`);
       }
       if (pass === 1 && !plan.opensPending) break;

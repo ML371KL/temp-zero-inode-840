@@ -4580,5 +4580,69 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   });
 }
 
+// Правка 1, доводка по независимому ревью: даты открытий объединяются; отказ воркера по лимиту не оставляет бумаги без перекачки молча
+{
+  const mb = await import('./vps/morning-build.mjs');
+
+  ok('пачка 2, правка 1 (ревью): бумага и во вчерашнем списке, и в раннем дне без открытия — даты подач объединяются, перекачка дня входа не теряется', () => {
+    assert.deepEqual(mb.unionNeeds({ X: ['2026-11-16'], Y: ['2026-11-16'] }, { X: ['2026-11-10'], Z: ['2026-11-12'] }),
+      { X: ['2026-11-10', '2026-11-16'], Y: ['2026-11-16'], Z: ['2026-11-12'] });
+    assert.deepEqual(mb.unionNeeds({ X: ['2026-11-16'] }, { X: ['2026-11-16'] }), { X: ['2026-11-16'] });
+    assert.deepEqual(mb.unionNeeds(), {}); assert.deepEqual(mb.unionNeeds({ X: ['2026-11-16'] }), { X: ['2026-11-16'] });
+    // запись открытия дня входа для обеих дат подачи: без объединения вторая не перезаписывалась бы
+    const ohlc = [['2026-11-10', 10, 10], ['2026-11-11', 11, 11.5], ['2026-11-16', 12, 12], ['2026-11-17', 13, 13.5]];
+    assert.deepEqual(Object.keys(pickOpens(ohlc, mb.unionNeeds({ X: ['2026-11-16'] }, { X: ['2026-11-10'] }).X)).sort(), ['2026-11-11', '2026-11-17']);
+  });
+
+  await okAsync('пачка 2, правка 1 (ревью): воркер ответил лимитом и не дошёл до части бумаг — повтор, на последней попытке — список с предупреждением; повтор просит только остаток', async () => {
+    const base = join(ROOT, '.selftest-openbar-limit'), work = join(base, 'vps'), data = join(work, 'repo');
+    rmSync(base, { recursive: true, force: true });
+    const days = bizDays('2024-01-02', today), D = days.filter(d => d <= addDaysIso(today, -6)).at(-1), PD = days[days.indexOf(D) - 1];
+    const syms = Array.from({ length: 25 }, (_, i) => `L${String(i + 1).padStart(2, '0')}A`);
+    const flat = (upTo = D) => days.filter(d => d <= upTo).map(d => [d, 100, 100, 1e6]);
+    mkdirSync(join(data, 'state'), { recursive: true });
+    writeJson(join(data, 'reference', 'tickers.json'), Object.fromEntries(syms.map((t, i) => [600 + i, { ticker: t, exchange: 'NYSE', name: t + ' Corp' }])));
+    writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [],
+      trades: syms.map((t, i) => T({ acc: 'LM' + i, cik: 600 + i, t, fdate: D, tdate: PD, owners: ceo, code: 'P', sh: 5000, px: 100, val: 500000, own: 1e5 })) });
+    writeJson(join(data, 'state', 'live.json'), { schema: SHARD_VERSION, lastDay: D, coverage: { [D]: { status: 'complete', indexed: 25, collected: 25, pending: 0, at: 'x' } } });
+    applyBars(data, new Map(['SPY', 'IWM', ...syms].map(sym => [sym, parseYahooChart(chartOf(flat()))])), { updated: D });
+    // воркер: бенчмарки отдаёт всегда; в режиме лимита на первую пачку бумаг отвечает и ставит limited — до остальных сборка не доходит
+    let limit = true;
+    const calls = [];
+    const srv = createServer((req, res) => {
+      const u = new URL(req.url, 'http://x');
+      const send = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+      if (u.pathname !== '/bars') return send(404, {});
+      const parts = (u.searchParams.get('symbols') ?? '').split(',').map(p => p.split(':'));
+      calls.push(parts.map(p => p[0]));
+      const bars = Object.fromEntries(parts.map(([sym, from]) => [sym, chartOf(flat(today).filter(r => r[0] >= from))]));
+      send(200, { ok: true, bars, failed: {}, limited: limit && !parts.some(p => p[0] === 'SPY') });
+    });
+    await new Promise(r => srv.listen(0, '127.0.0.1', r));
+    const opts = mb.parseArgs(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--dry-run', '--interval', '1'],
+      { PAPER_URL: `http://127.0.0.1:${srv.address().port}`, PAPER_TOKEN: 'tok' });
+    const lines = [], orig = console.log;
+    console.log = (...x) => { lines.push(x.join(' ')); };
+    const fetched = () => lines.filter(l => /докачка баров \(проход 1\)/.test(l)).at(-1);
+    try {
+      mkdirSync(work, { recursive: true });
+      const ctx = { stage: {}, lastChance: false, summary: null };
+      let r = await mb.attempt(opts, D, ctx);
+      assert.equal(r.ok, false); assert.match(r.why, /бары не перекачаны \(воркер ответил лимитом\): L21A, L22A, L23A, L24A, L25A/);
+      assert.match(fetched(), /, 25 — перекачка бара/); assert.equal(ctx.refreshed.size, 20, 'первая пачка перекачана');
+      // следующая попытка того же запуска: воркер отвечает — перекачивается только остаток
+      limit = false;
+      r = await mb.attempt(opts, D, ctx);
+      assert.equal(r.ok, true, r.why); assert.match(fetched(), /, 5 — перекачка бара/); assert.equal(ctx.refreshed.size, 25);
+      // последняя попытка при том же лимите: список выходит, в журнале — у каких бумаг бар не перекачан
+      limit = true;
+      const last = { stage: {}, lastChance: true, summary: null };
+      r = await mb.attempt(opts, D, last);
+      assert.equal(r.ok, true, r.why); assert.equal(last.summary.rows, 25);
+      assert.ok(lines.some(l => /бар не перекачан у 5 бумаг \(L21A, L22A, L23A, L24A, L25A\)/.test(l)), 'предупреждение называет бумаги, до которых воркер не дошёл');
+    } finally { console.log = orig; await new Promise(r => srv.close(r)); rmSync(base, { recursive: true, force: true }); }
+  });
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);
