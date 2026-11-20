@@ -15,6 +15,8 @@
 //                                                                         мог записать прогон GitHub до закрытия торгов
 //   6. compute --only-morning --builder vps                             — morning.json (листинг, счётчик)
 //   7. PUT воркеру /morning                                             — панель берёт файл оттуда, если он свежее страницы
+//      к отправляемому тексту прикладывается сводка бота ib840      — блок bot для страницы (scripts/lib/botsplit.mjs, файл
+//      «что дал каждый контур», если бот её написал                   --bot-split); список не меняется, неудача вставки — не сбой
 //   8. письмо (если в env есть TELEGRAM_*)                              — scripts/notify.mjs --sender vps; дубль исключает отметка в воркере
 //  Лента на весь день (feed-collector.mjs, отдельный юнит): после шага 3 индекс сверяется с лентой — подачи, которые лента видела, а индекс нет,
 //  добавляются в список (coverage.feed); нет индекса до последней попытки — список по ленте с пометкой source: "feed" и ошибкой выхода (тревога).
@@ -32,6 +34,7 @@ import { isSecClosed, isMarketClosed } from '../lib/calendar.mjs';
 import { fetchBars, applyBars, applyLows, barsFrom, LOWS_BACK_DAYS } from '../lib/bars.mjs';
 import { OPENS_BENCH, readOpens, opensOf } from '../lib/opens.mjs';
 import { readPriceCache } from '../lib/prices.mjs';
+import { BOT_SPLIT_FILE, attachBotSplitFile } from '../lib/botsplit.mjs';
 
 const CODE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -51,6 +54,8 @@ export function parseArgs(argv, env = process.env) {
     repoUrl: env.DATA_REPO_URL || 'https://github.com/ML371KL/temp-zero-inode-840.git',
     workerUrl: (env.PAPER_URL || 'https://radar840-quotes.financehub.workers.dev').replace(/\/$/, ''),
     token: env.PAPER_TOKEN || '',
+    // сводка бота ib840 «что дал каждый контур» (scripts/lib/botsplit.mjs): прикладывается к списку при отправке в воркер
+    botSplit: val('--bot-split', env.BOT_SPLIT_FILE || BOT_SPLIT_FILE),
     letters: !!(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID),
     env,
   };
@@ -391,7 +396,11 @@ export async function attempt(opts, day, ctx) {
 
   if (!st.published && !opts.dry) {
     if (!opts.token) return fail('PAPER_TOKEN не задан: список некуда отправить');
-    const body = readFileSync(join(opts.site, 'data', 'morning.json'), 'utf8');
+    // Файл списка на диске остаётся как есть; блок bot (сводка бота для страницы) добавляется только в отправляемый текст.
+    // Не приложилась — список уходит без неё: attachBotSplitFile исключений не бросает и сам список не меняет.
+    const bs = attachBotSplitFile(readFileSync(join(opts.site, 'data', 'morning.json'), 'utf8'), opts.botSplit);
+    log(bs.note);
+    const body = bs.text;
     try {
       const r = await fetch(`${opts.workerUrl}/morning`, { method: 'PUT', body, headers: { Authorization: `Bearer ${opts.token}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
       if (r.status === 409) log('воркер хранит версию новее — наша не принята (это не сбой)');
