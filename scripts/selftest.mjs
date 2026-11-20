@@ -19,7 +19,7 @@ import { isSecClosed, isMarketClosed } from './lib/calendar.mjs';
 import * as buildCalendar from './lib/calendar.mjs';
 import * as webCalendar from '../web/calendar.js';
 import { missedSecDays, staleState, DEADLINE_NY_HOUR, STALE_MIN_MISSED } from '../web/stale.js';
-import { cleanBotSplit, pickBotSplit, botRows, botExecLine } from '../web/botsplit.js';
+import { cleanBotSplit, pickBotSplit, botSplitFresh, botRows, botExecLine, botBlockHtml } from '../web/botsplit.js';
 import { attachBotSplit, attachBotSplitFile, BOT_SPLIT_FILE, BOT_SPLIT_MAX_BYTES } from './lib/botsplit.mjs';
 import { main as morningMain, liveVerdict, reconcileStage, d0Verdict } from './vps/morning-build.mjs';
 import { parseFeedJournal, loadFeed, pruneFeed, feedFile, reconcile, mergeFeedRows, parseAtom, filingPath } from './lib/feed.mjs';
@@ -38,6 +38,7 @@ import { loadAllTrades, issuerCategory } from './lib/universe.mjs';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 process.env.MORNING_URL = 'http://127.0.0.1:9';        // отметки писем (notify.mjs) в тестах не уходят в боевой воркер
 delete process.env.PAPER_TOKEN;
+process.env.BOT_SPLIT_FILE = join(ROOT, '.selftest-нет-сводки-бота.json');   // сводка бота в тестах — только там, где её кладёт сам тест
 let passed = 0;
 function ok(name, fn) {
   try { fn(); passed++; }
@@ -2327,7 +2328,7 @@ await okAsync('бары VPS: запрос к воркеру пачками, то
 });
 
 // --- сборка на VPS целиком против подставного воркера: копия данных фикстуры, у LIVA/SPY/IWM срезаны бары D0, всё докачивается ---
-function fakeWorker({ charts = {}, morning = null, markers = {} } = {}) {
+function fakeWorker({ charts = {}, morning = null, markers = {}, rejectBot = 0 } = {}) {
   const calls = { morningPuts: [], markerPuts: [], bars: [] };
   const state = { morning, markers: { ...markers } };
   const server = createServer((req, res) => {
@@ -2346,6 +2347,7 @@ function fakeWorker({ charts = {}, morning = null, markers = {} } = {}) {
       if (u.pathname === '/morning' && req.method === 'GET') return state.morning ? send(200, state.morning) : send(404, { error: 'нет' });
       if (u.pathname === '/morning' && req.method === 'PUT') {
         if (auth !== 'Bearer tok') return send(401, { error: 'нужен токен' });
+        if (rejectBot && 'bot' in JSON.parse(raw)) { calls.rejected = (calls.rejected ?? 0) + 1; return send(rejectBot, { error: 'тело слишком велико' }); }
         calls.morningPuts.push(raw); state.morning = JSON.parse(raw); return send(200, { ok: true, listFor: state.morning.listFor });
       }
       if (u.pathname === '/bars') {
@@ -2369,46 +2371,63 @@ function fakeWorker({ charts = {}, morning = null, markers = {} } = {}) {
 // ---------- блок «Бот: что дал каждый контур» (web/botsplit.js, scripts/lib/botsplit.mjs) ----------
 // Сводку пишет бот ib840 (числа сделок и доходности в долях); сборка VPS прикладывает её к списку для воркера, страница рисует.
 const BS_NOW = Date.parse('2026-11-20T22:10:00Z');
-const bsGroup = (n, net) => ({ n, net: n ? net : null, sum: n ? Math.round(n * net * 1e6) / 1e6 : 0 });
+const bsR = x => Math.round(x * 1e6) / 1e6;
+const bsGroup = (n, net) => ({ n, net: n ? net : null, sum: n ? bsR(n * net) : 0 });
 const bsSplit = (over = {}, b = {}) => {
-  const main = { ...bsGroup(11, 0.0031), days: 4, stock: 0.0052, hedge: -0.0021 };
+  const main = over.main ?? { ...bsGroup(11, 0.0031), days: 4, stock: 0.0052, hedge: -0.0021 };
   const rule = b.rule ?? bsGroup(0, 0), trial = b.trial ?? bsGroup(0, 0);
+  const tn = main.n + rule.n + trial.n, ts = bsR(main.sum + rule.sum + trial.sum);
   return {
-    v: 1, built: '2026-11-20T22:05:00Z', stage: 'live', since: '2026-11-16', upTo: '2026-11-19', days: 4, ruleScore: 3, main,
+    v: 1, built: '2026-11-20T22:05:00Z', stage: 'live', since: '2026-11-16', upTo: '2026-11-19', days: 4, ruleScore: 3,
     b: { mode: 'off', stopped: false, signals: 0, would: 0, orders: 0, filled: 0, slip: null, delay: null, ...b, rule, trial },
-    total: { n: main.n + rule.n + trial.n, net: 0.003, sum: Math.round((main.sum + rule.sum + trial.sum) * 1e6) / 1e6 }, ...over,
+    total: { n: tn, net: tn ? bsR(ts / tn) : null, sum: ts }, ...over, main,
   };
 };
+const bsEmpty = () => bsSplit({ since: null, upTo: null, days: 0, main: { ...bsGroup(0, 0), days: 0, stock: null, hedge: null } });
 ok('сводка бота: белый список полей — наружу идут только известные числа, даты и режим; лишнее отбрасывается, неверное снимает блок целиком', () => {
   const good = bsSplit();
   const clean = cleanBotSplit(good);
   assert.deepEqual(clean, { ...good, built: '2026-11-20T22:05:00.000Z' });
   // лишние поля (номер счёта, суммы, тикеры) до страницы не доходят — ни на верхнем уровне, ни внутри групп
   const dirty = bsSplit({ account: 'U1234567', equity: 28799, trades: [{ t: 'KOD', usd: 5000 }] }, { note: '<script>', rule: { ...bsGroup(2, 0.01), usd: 300 } });
-  dirty.main.notional = 55000;
+  dirty.main.notional = 55000; dirty.__proto__ = { leak: 'U7654321' };
   const txt = JSON.stringify(cleanBotSplit(dirty));
-  for (const bad of ['U1234567', '28799', 'KOD', '5000', 'script', 'usd', 'notional', '55000']) assert.ok(!txt.includes(bad), bad);
+  for (const bad of ['U1234567', 'U7654321', '28799', 'KOD', '5000', 'script', 'usd', 'notional', '55000', 'leak']) assert.ok(!txt.includes(bad), bad);
   assert.deepEqual(Object.keys(cleanBotSplit(dirty).b.rule), ['n', 'net', 'sum']);
-  // любое поле не того вида — блока нет вовсе
+  // любое поле не того вида или не сходящиеся числа — блока нет вовсе
   const broken = [
-    [null, 'не объект'], [[], 'не объект'], [{ ...good, v: 2 }, 'версия'], [{ ...good, stage: 'paper' }, 'этап'], [{ ...good, built: 'вчера' }, 'built'],
-    [{ ...good, since: '16.11.2026' }, 'since'], [{ ...good, upTo: null }, 'upTo'], [{ ...good, days: -1 }, 'days'], [{ ...good, days: 1.5 }, 'days'],
-    [{ ...good, ruleScore: 9 }, 'ruleScore'], [{ ...good, main: { ...good.main, net: 5 } }, 'main'], [{ ...good, main: { ...good.main, net: '0.01' } }, 'main'],
-    [{ ...good, main: { ...good.main, n: 0 } }, 'main'], [{ ...good, main: { ...good.main, hedge: 'x' } }, 'main'], [{ ...good, total: { n: 11 } }, 'total'],
-    [{ ...good, total: { ...good.total, n: 12 } }, 'не сумма'], [{ ...good, b: { ...good.b, mode: 'live' } }, 'b'], [{ ...good, b: { ...good.b, stopped: 'нет' } }, 'b'],
-    [{ ...good, b: { ...good.b, orders: '3' } }, 'b.orders'], [{ ...good, b: { ...good.b, slip: 0.5 } }, 'b.slip'], [{ ...good, b: { ...good.b, delay: -1 } }, 'b.delay'],
-    [{ ...good, b: { ...good.b, rule: { n: 1, net: null, sum: 0 } } }, 'b.rule'], [{ ...good, main: { ...good.main, sum: Infinity } }, 'main'],
+    [null, 'не объект'], [[], 'не объект'], ['строка', 'не объект'], [{ ...good, v: 2 }, 'версия'], [{ ...good, stage: 'paper' }, 'этап'],
+    [{ ...good, built: 'вчера' }, 'built'], [{ ...good, built: '1' }, 'built'], [{ ...good, built: 'split 5' }, 'built'], [{ ...good, built: 20261120 }, 'built'],
+    [{ ...good, since: '16.11.2026' }, 'since'], [{ ...good, since: ['2026-11-16'] }, 'since'], [{ ...good, since: { toString: 'x' } }, 'since'],
+    [{ ...good, since: '2026-13-45' }, 'since'], [{ ...good, upTo: null }, 'upTo'], [{ ...good, upTo: '2026-11-19<b>' }, 'upTo'],
+    [{ ...good, since: '2026-11-20' }, 'since позже upTo'], [{ ...good, days: -1 }, 'days'], [{ ...good, days: 1.5 }, 'days'], [{ ...good, days: '4' }, 'days'],
+    [{ ...good, ruleScore: 9 }, 'ruleScore'], [{ ...good, main: { ...good.main, net: 5 } }, 'main'], [{ ...good, main: { ...good.main, net: '0.0031' } }, 'main'],
+    [{ ...good, main: { ...good.main, n: 0 } }, 'main'], [{ ...good, main: { ...good.main, hedge: 'x' } }, 'main'], [{ ...good, main: { ...good.main, stock: null } }, 'main'],
+    [{ ...good, main: { ...good.main, days: 5 } }, 'main'], [{ ...good, main: { ...good.main, sum: Infinity } }, 'main'], [{ ...good, main: { ...good.main, sum: 0.5 } }, 'main'],
+    [{ ...good, total: { n: 11 } }, 'total'], [{ ...good, total: { ...good.total, sum: 500 } }, 'total'], [{ ...good, total: bsGroup(12, 0.003) }, 'total.n не сумма'],
+    [{ ...good, total: bsGroup(11, 0.004) }, 'total.sum не сумма'], [{ ...good, b: { ...good.b, mode: 'live' } }, 'b'], [{ ...good, b: { ...good.b, stopped: 'нет' } }, 'b'],
+    [{ ...good, b: [] }, 'b'], [{ ...good, b: { ...good.b, orders: '3' } }, 'b.orders'], [{ ...good, b: { ...good.b, orders: 2, filled: 9 } }, 'исполнено больше'],
+    [{ ...good, b: { ...good.b, signals: 1, would: 2 } }, 'исполнено больше'], [{ ...good, b: { ...good.b, slip: 0.5 } }, 'b.slip'], [{ ...good, b: { ...good.b, delay: -1 } }, 'b.delay'],
+    [{ ...good, b: { ...good.b, rule: { n: 1, net: null, sum: 0 } } }, 'b.rule'], [{ ...good, b: { ...good.b, rule: { n: 0, net: null, sum: 0.01 } } }, 'b.rule'],
+    [{ ...good, b: { ...good.b, trial: { n: NaN, net: null, sum: 0 } } }, 'b.rule'],
   ];
   for (const [raw, text] of broken) {
     const why = {};
     assert.equal(cleanBotSplit(raw, why), null, text); assert.ok(why.text.includes(text), `${text}: ${why.text}`);
   }
   // пустая книга: дат нет — это верная сводка
-  const empty = bsSplit({ since: null, upTo: null, days: 0, main: { ...bsGroup(0, 0), days: 0, stock: null, hedge: null }, total: bsGroup(0, 0) });
-  assert.equal(cleanBotSplit(empty).total.n, 0);
+  assert.equal(cleanBotSplit(bsEmpty()).total.n, 0);
+  // день «хедж был, сделок не было»: сумма основного правила и итога без сделок — допустима, у контура — нет
+  const loose = bsSplit({ main: { n: 0, net: null, sum: -0.002, days: 0, stock: null, hedge: null } });
+  assert.deepEqual([cleanBotSplit(loose).main.sum, cleanBotSplit(loose).total.sum], [-0.002, -0.002]);
+  // сводка из будущего и старше десяти дней свежей не считается
+  assert.equal(botSplitFresh(clean, BS_NOW), true);
+  assert.equal(botSplitFresh(cleanBotSplit(bsSplit({ built: '2026-11-23T00:00:00Z' })), BS_NOW), false, 'из будущего');
+  assert.equal(botSplitFresh(cleanBotSplit(bsSplit({ built: '2026-11-10T22:00:00Z' })), BS_NOW), false, 'старше 10 дней');
+  assert.equal(botSplitFresh(null, BS_NOW), false);
 });
 ok('сводка бота: вставка в список не меняет ни одного его байта и не бросает исключений — неудача возвращает исходный текст', () => {
-  const morning = JSON.stringify({ listFor: '2026-11-19', builtAt: '2026-11-20T03:05:00Z', builder: 'vps', days: [{ date: '2026-11-19', rows: [{ t: 'AAA', px: 10.10, dv: 3.0e7 }] }], counter: { from: '2026-10-27' } }, null, 1) + '\n';
+  const morning = JSON.stringify({ listFor: '2026-11-19', builtAt: '2026-11-20T03:05:00Z', builder: 'vps', days: [{ date: '2026-11-19', rows: [{ t: 'AAA', px: 10.10, dv: 3.0e7, note: 'скобка } в строке' }] }], counter: { from: '2026-10-27' } }, null, 1) + '\n \n';
   const r = attachBotSplit(morning, JSON.stringify(bsSplit()), BS_NOW);
   assert.equal(r.attached, true, r.note); assert.match(r.note, /живых дней 4, сделок 11/);
   const sent = JSON.parse(r.text);
@@ -2417,20 +2436,27 @@ ok('сводка бота: вставка в список не меняет ни
   assert.equal(r.text.replace(ins, ''), morning, 'кроме вставленного блока, текст списка тот же до байта');
   assert.equal(r.text.indexOf(ins), morning.lastIndexOf('}'), 'блок стоит перед последней скобкой');
   const keeps = [
-    [JSON.stringify(bsSplit({ built: '2026-11-01T22:05:00Z' })), 'старше'], ['{не json', 'не JSON'], ['', 'пуста'], [' '.repeat(20000), 'пуста'],
-    [JSON.stringify({ ...bsSplit(), pad: 'x'.repeat(BOT_SPLIT_MAX_BYTES) }), 'больше'], [JSON.stringify(bsSplit({ v: 7 })), 'версия'], [undefined, 'пуста'],
+    [JSON.stringify(bsSplit({ built: '2026-11-01T22:05:00Z' })), 'старше'], [JSON.stringify(bsSplit({ built: '2027-01-01T00:00:00Z' })), 'старше'],
+    ['{не json', 'не JSON'], ['', 'пуста'], [' '.repeat(20000), 'пуста'], [undefined, 'пуста'],
+    [JSON.stringify({ ...bsSplit(), pad: 'x'.repeat(BOT_SPLIT_MAX_BYTES) }), 'больше'], [JSON.stringify(bsSplit({ v: 7 })), 'версия'],
+    [JSON.stringify(bsSplit({ since: ['2026-11-16'] })), 'since'],
   ];
   for (const [split, text] of keeps) {
     const k = attachBotSplit(morning, split, BS_NOW);
     assert.equal(k.attached, false, text); assert.equal(k.text, morning, text); assert.ok(k.note.includes(text), `${text}: ${k.note}`);
   }
   // список с уже стоящим блоком, список-не-объект, испорченный текст списка — исходный текст, без исключения
-  for (const m of [JSON.stringify({ a: 1, bot: {} }), '[1,2]', 'мусор', '{}', '']) {
+  for (const m of [JSON.stringify({ a: 1, bot: {} }), '[1,2]', 'мусор', '{}', '', '"}"']) {
     const k = attachBotSplit(m, JSON.stringify(bsSplit()), BS_NOW);
     assert.equal(k.attached, false, m); assert.equal(k.text, m);
   }
+  // файл: нет файла, каталог на его месте, слишком большой файл — список как есть
   const none = attachBotSplitFile(morning, join(ROOT, 'нет-такого-каталога', 'split.json'), BS_NOW);
   assert.equal(none.attached, false); assert.equal(none.text, morning); assert.match(none.note, /сводки бота нет/);
+  const dir = attachBotSplitFile(morning, join(ROOT, 'web'), BS_NOW);
+  assert.equal(dir.attached, false); assert.equal(dir.text, morning); assert.match(dir.note, /не обычный файл/);
+  const big = attachBotSplitFile(morning, join(ROOT, 'scripts', 'selftest.mjs'), BS_NOW);
+  assert.equal(big.attached, false); assert.equal(big.text, morning); assert.match(big.note, /больше/);
   assert.equal(BOT_SPLIT_FILE, '/var/lib/ib840-public/split.json');
 });
 await okAsync('сводка бота: настоящий обработчик воркера принимает список с блоком bot и отдаёт его странице без изменений', async () => {
@@ -2443,6 +2469,33 @@ await okAsync('сводка бота: настоящий обработчик в
   const got = await (await call('GET')).json();
   assert.equal(got.listFor, '2026-11-19'); assert.deepEqual(got.bot, cleanBotSplit(bsSplit()));
   assert.deepEqual(pickBotSplit([{ listFor: '2026-11-19' }, got], BS_NOW), got.bot, 'страница берёт сводку из ответа воркера, даже если список показывает со своей копии');
+});
+await okAsync('сводка бота: воркер не принял список с блоком — тут же повтор без блока; прочие отказы воркера — сбой, как раньше', async () => {
+  const { sendMorning, parseArgs: mbArgs } = await import('./vps/morning-build.mjs');
+  const work = join(ROOT, '.selftest-botsend');
+  rmSync(work, { recursive: true, force: true }); mkdirSync(work, { recursive: true });
+  const splitFile = join(work, 'split.json'), disk = MJ('2026-11-19', '2026-11-20T03:05:00Z') + '\n';
+  writeFileSync(splitFile, JSON.stringify(bsSplit({ built: new Date().toISOString() })));
+  const run = async (opt, env = {}) => {
+    const api = await fakeWorker(opt);
+    try { return { res: await sendMorning(mbArgs([], { PAPER_URL: api.base, PAPER_TOKEN: 'tok', BOT_SPLIT_FILE: splitFile, ...env }), disk), calls: api.calls }; }
+    finally { await api.close(); }
+  };
+  try {
+    const a = await run({});
+    assert.deepEqual(a.res, { ok: true }); assert.equal(a.calls.morningPuts.length, 1); assert.ok('bot' in JSON.parse(a.calls.morningPuts[0]));
+    for (const code of [413, 400]) {
+      const b = await run({ rejectBot: code });
+      assert.deepEqual(b.res, { ok: true }, 'отказ списку с блоком — не сбой');
+      assert.equal(b.calls.rejected, 1); assert.deepEqual(b.calls.morningPuts, [disk], 'второй раз ушёл файл списка как есть');
+    }
+    const c = await run({ rejectBot: 500 });
+    assert.equal(c.res.ok, false); assert.match(c.res.why, /HTTP 500/); assert.equal(c.calls.morningPuts.length, 0, 'при сбое воркера повтора без блока нет');
+    const d = await run({}, { PAPER_TOKEN: 'wrong' });
+    assert.equal(d.res.ok, false); assert.match(d.res.why, /HTTP 401/);
+    const e = await run({}, { BOT_SPLIT_FILE: join(work, 'нет.json') });
+    assert.deepEqual(e.res, { ok: true }); assert.deepEqual(e.calls.morningPuts, [disk], 'без сводки — файл списка как есть');
+  } finally { rmSync(work, { recursive: true, force: true }); }
 });
 ok('сводка бота: строки блока — основное правило, контур B, приёмка отдельно, итог; деньги — сумма долей на сумму сделки', () => {
   const off = cleanBotSplit(bsSplit());
@@ -2462,21 +2515,69 @@ ok('сводка бота: строки блока — основное прав
   assert.deepEqual([r2[2].label, r2[2].n, Math.round(r2[2].money)], ['Контур B · приёмка', 1, -40]);
   assert.equal(r2[3].n, 15); assert.equal(Math.round(r2[3].money), 341 + 180 - 40);
   assert.equal(botExecLine(on), 'Контур B: исполнено заявок 4 из 5 · исполнение к цене продавца +0.021% · от приёма формы до заявки — медиана 41 с');
+  // первые дни приёмки: сделки только со скором 2 — строка правила говорит, что речь о правиле, а не «сделок нет» вообще
+  const trialOnly = cleanBotSplit(bsSplit({}, { mode: 'on', signals: 5, would: 3, orders: 3, filled: 2, trial: bsGroup(2, 0.001) }));
+  assert.equal(botRows(trialOnly, 1e4)[1].text, 'по правилу (скор от 3) сделок пока нет');
+  // контур со сделками, но сейчас не работает — состояние видно в строке под таблицей
+  const stopped = cleanBotSplit(bsSplit({}, { mode: 'on', stopped: true, signals: 9, would: 4, orders: 4, filled: 4, rule: bsGroup(4, -0.005) }));
+  assert.equal(botRows(stopped, 1e4)[1].text, null);
+  assert.match(botExecLine(stopped), /^Контур B: сейчас остановлен живой проверкой · исполнено заявок 4 из 4/);
+  assert.equal(botExecLine(cleanBotSplit(bsSplit({}, { mode: 'off', rule: bsGroup(4, 0.005) }))), 'Контур B: сейчас выключен');
   // пустая книга: во всех строках текст, не числа
-  const empty = cleanBotSplit(bsSplit({ since: null, upTo: null, days: 0, main: { ...bsGroup(0, 0), days: 0, stock: null, hedge: null }, total: bsGroup(0, 0) }));
-  assert.deepEqual(botRows(empty, 1e4).map(r => r.text), ['сделок пока нет', 'выключен', 'сделок пока нет']);
-  // выбор сводки: самая свежая годная; устаревшая и испорченная не берутся
+  assert.deepEqual(botRows(cleanBotSplit(bsEmpty()), 1e4).map(r => r.text), ['сделок пока нет', 'выключен', 'сделок пока нет']);
+  // день «хедж был, сделок не было»: текст и деньги вместе
+  const loose = botRows(cleanBotSplit(bsSplit({ main: { n: 0, net: null, sum: -0.002, days: 0, stock: null, hedge: null } })), 1e4);
+  assert.deepEqual([loose[0].text, Math.round(loose[0].money), Math.round(loose[2].money)], ['сделок пока нет', -20, -20]);
+  // выбор сводки: самая свежая годная; устаревшая и испорченная не берутся, исключений нет
   const fresh = bsSplit({ built: '2026-11-20T22:05:00Z' }), older = bsSplit({ built: '2026-11-19T22:05:00Z' });
   assert.equal(pickBotSplit([{ bot: older }, { bot: fresh }, { bot: { v: 1 } }, {}], BS_NOW).built, '2026-11-20T22:05:00.000Z');
-  assert.equal(pickBotSplit([{ bot: bsSplit({ built: '2026-11-01T00:00:00Z' }) }, { bot: 'x' }, null], BS_NOW), null);
-  assert.equal(pickBotSplit([], BS_NOW), null); assert.equal(pickBotSplit(undefined, BS_NOW), null);
+  assert.equal(pickBotSplit([{ bot: bsSplit({ built: '2026-11-01T00:00:00Z' }) }, { bot: 'x' }, null, { bot: bsSplit({ since: ['2026-11-16'] }) }, { bot: bsSplit({ upTo: { toString: 'x' } }) }], BS_NOW), null);
+  assert.equal(pickBotSplit([], BS_NOW), null); assert.equal(pickBotSplit(undefined, BS_NOW), null); assert.equal(pickBotSplit('строка', BS_NOW), null);
 });
-ok('сводка бота: страница рисует блок через web/botsplit.js и прячет его, когда сводки нет', () => {
+ok('сводка бота: образец, записанный самим ботом (ib840/public.py), проходит белый список — договор полей и сверок сходится', () => {
+  // три живых дня: три основные сделки; день «хедж был, покупки не исполнились»; день со сделкой правила и сделкой приёмки
+  const sample = {"v": 1, "built": "2026-11-20T06:57:26Z", "stage": "live", "since": "2026-11-16", "upTo": "2026-11-18", "days": 3, "ruleScore": 3, "main": {"n": 4, "net": 0.001639, "sum": 0.006556, "days": 2, "stock": 0.00295, "hedge": -0.001311}, "b": {"mode": "on", "stopped": false, "signals": 0, "would": 0, "orders": 0, "filled": 0, "slip": 0.0002, "delay": null, "rule": {"n": 1, "net": 0.0071, "sum": 0.0071}, "trial": {"n": 1, "net": -0.0033, "sum": -0.0033}}, "total": {"n": 6, "net": 0.001726, "sum": 0.010356}};
+  const why = {}, c = cleanBotSplit(sample, why);
+  assert.ok(c, why.text);
+  assert.deepEqual(botRows(c, 1e4).map(r => [r.key, r.n, Math.round(r.money)]), [['main', 4, 66], ['rule', 1, 71], ['trial', 1, -33], ['total', 6, 104]]);
+});
+ok('сводка бота: разметка блока исполняется без браузера — всё из сводки экранируется, пустых и «NaN» ячеек нет', () => {
+  const f = {
+    esc: s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
+    cls: v => (v === null || v === undefined ? '' : v > 0 ? 'pos' : v < 0 ? 'neg' : ''),
+    fmtDate: iso => iso.split('-').reverse().join('.'), fmtPct: (v, d) => (v * 100).toFixed(d) + '%', fmtMoney: v => '$' + v,
+    sgnMoney: v => (v === null ? '—' : (v > 0 ? '+' : v < 0 ? '-' : '') + '$' + Math.abs(Math.round(v))), plural: (n, a, b, c) => `${n} ${n === 1 ? a : n < 5 ? b : c}`,
+    guideUrl: 'https://example.org/"guide"<x>',
+  };
+  const on = cleanBotSplit(bsSplit({}, { mode: 'on', signals: 9, would: 5, orders: 5, filled: 4, slip: 0.00021, delay: 41.4, rule: bsGroup(3, 0.006), trial: bsGroup(1, -0.004) }));
+  const html = botBlockHtml(on, 1e4, f);
+  assert.equal((html.match(/<tr/g) ?? []).length, 5, 'заголовок и четыре строки');
+  assert.match(html, /<b>Бот: что дал каждый контур<\/b> с 16\.11\.2026 · по 19\.11\.2026 · 4 живых дня · факт счёта, после комиссий/);
+  assert.match(html, /<tr><td class="lab" title="[^"]+">Основное правило<\/td><td>11<\/td><td class="pos">0\.31%<\/td><td class="pos">\+\$341<\/td><\/tr>/);
+  assert.match(html, /<td class="lab" title="[^"]+">Контур B · приёмка<\/td><td>1<\/td><td class="neg">-0\.40%<\/td><td class="neg">-\$40<\/td>/);
+  assert.match(html, /<tr class="sum"><td class="lab" title="Все сделки бота вместе">Итого<\/td><td>15<\/td>/);
+  assert.match(html, /<div class="strip-empty">Контур B: исполнено заявок 4 из 5 · /);
+  assert.ok(html.includes('href="https://example.org/&quot;guide&quot;&lt;x&gt;#бот-что-дал-каждый-контур"'), 'адрес руководства экранирован');
+  for (const bad of ['undefined', 'NaN', 'null', '[object']) assert.ok(!html.includes(bad), bad);
+  // без сделок: текст вместо чисел, строки об исполнении нет
+  const off = botBlockHtml(cleanBotSplit(bsSplit()), 1e4, f);
+  assert.match(off, /<td class="note" colspan="3">выключен<\/td>/); assert.ok(!off.includes('strip-empty'));
+  const empty = botBlockHtml(cleanBotSplit(bsEmpty()), 1e4, f);
+  assert.match(empty, /<\/b> · живых дней пока нет · факт счёта/); assert.equal((empty.match(/colspan="3"/g) ?? []).length, 3);
+  // день «хедж был, сделок не было»: текст и сумма в одной строке
+  const loose = botBlockHtml(cleanBotSplit(bsSplit({ main: { n: 0, net: null, sum: -0.002, days: 0, stock: null, hedge: null } })), 1e4, f);
+  assert.match(loose, /<td class="note" colspan="2">сделок пока нет<\/td><td class="neg">-\$20<\/td>/);
+  for (const h of [off, empty, loose]) for (const bad of ['undefined', 'NaN', 'null', '[object']) assert.ok(!h.includes(bad), bad);
+});
+ok('сводка бота: страница рисует блок через web/botsplit.js, прячет его без сводки, и сбой блока не трогает таблицу дня', () => {
   const app = readFileSync(join(ROOT, 'web', 'app.js'), 'utf8'), html = readFileSync(join(ROOT, 'web', 'index.html'), 'utf8');
-  assert.match(app, /import \{ pickBotSplit, botRows, botExecLine \} from '\.\/botsplit\.js';/);
-  assert.match(app, /best\.bot = pickBotSplit\(got, Date\.now\(\)\);/, 'сводка берётся из любого ответа, где она есть');
+  assert.match(app, /import \{ pickBotSplit, botBlockHtml \} from '\.\/botsplit\.js';/);
+  assert.match(app, /try \{ best\.bot = pickBotSplit\(got, Date\.now\(\)\); \} catch \{ best\.bot = null; \}/, 'сводка берётся из любого ответа; её сбой не срывает список');
+  assert.match(app, /const box = \$\('#m-bot'\);\s+if \(!box\) return;/, 'нет блока в разметке (старая index.html из кэша) — не ошибка');
   assert.match(app, /if \(!b\) \{ box\.hidden = true; box\.innerHTML = ''; return; \}/);
-  assert.match(app, /renderCounter\(\);\s+renderBot\(\);/);
+  assert.match(app, /function renderBotSafe\(\) \{\s+try \{ renderBot\(\); \}\s+catch/);
+  assert.match(app, /renderCounter\(\);\s+renderBotSafe\(\);/);
+  assert.ok(!/^\s*renderBot\(\);/m.test(app), 'renderBot вызывается только через renderBotSafe');
   assert.match(html, /<div class="strip" id="m-bot" hidden><\/div>/);
   assert.match(readFileSync(join(ROOT, 'web', 'style.css'), 'utf8'), /\.strip\[hidden\] \{ display: none; \}/);
   // модуль страницы ничего не импортирует: в браузере нет node:fs

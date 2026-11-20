@@ -1,7 +1,7 @@
 // Инсайдерский радар — логика интерфейса. ES-модуль, без зависимостей.
 import { PriceChart, fmtPrice, fmtInt, fmtMoney, fmtPct, fmtDate } from './charts.js';
 import { staleState } from './stale.js';
-import { pickBotSplit, botRows, botExecLine } from './botsplit.js';
+import { pickBotSplit, botBlockHtml } from './botsplit.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -246,7 +246,7 @@ async function fetchMorning() {
   const best = got.sort((a, b) => (b.listFor ?? '').localeCompare(a.listFor ?? '') || (b.builtAt ?? '').localeCompare(a.builtAt ?? ''))[0];
   // Сводка бота «что дал каждый контур» едет только в списке VPS (воркер): берётся из любого ответа, где она есть и годна,
   // даже когда сам список показывается со страницы.
-  best.bot = pickBotSplit(got, Date.now());
+  try { best.bot = pickBotSplit(got, Date.now()); } catch { best.bot = null; }
   return best;
 }
 async function loadMorning() {
@@ -382,29 +382,24 @@ function renderCounter() {
     + row('к S&P', s.spy, 'Эталон рынка: SPY')
     + '</table>' + fpiLine(c.fpi);
 }
-// Одна строка под счётчиком: события иностранных эмитентов, которые были бы в основном списке (скор от порога), — вне списка
 // Бот: что дал каждый контур. Факт живого счёта бота ib840 с его первого живого дня: основное правило (с ногой хеджа),
-// контур B и итог — число сделок, результат на сделку после издержек и итог в пересчёте на ту же сумму в сделке, что у
-// живого счётчика. Сумм счёта в сводке нет; методика — в руководстве (GUIDE_URL, раздел «Бот: что дал каждый контур»).
+// контур B и итог — число сделок, результат на сделку после комиссий и итог в пересчёте на ту же сумму в сделке, что у
+// живого счётчика. Сумм счёта в сводке нет; разметка и строки — web/botsplit.js, методика — в руководстве (GUIDE_URL).
 function renderBot() {
-  const b = state.morning?.bot, box = $('#m-bot');
+  const box = $('#m-bot');
+  if (!box) return;                      // старая index.html из кэша при новой app.js: блока в разметке ещё нет
+  const b = state.morning?.bot;
   if (!b) { box.hidden = true; box.innerHTML = ''; return; }
-  const stake = state.morning.params?.stake ?? 1e4;
-  const head = `<div class="strip-head"><b>Бот: что дал каждый контур</b>`
-    + (b.days ? ` с ${esc(fmtDate(b.since))} · по ${esc(fmtDate(b.upTo))} · ${plural(b.days, 'живой день', 'живых дня', 'живых дней')}` : ' · живых дней пока нет')
-    + ` · факт счёта, после комиссий · <a href="${GUIDE_URL}#бот-что-дал-каждый-контур" target="_blank" rel="noopener">как считается</a></div>`;
-  const row = r => `<tr${r.key === 'total' ? ' class="sum"' : ''}><td class="lab" title="${esc(r.hint)}">${esc(r.label)}</td>`
-    + (r.text !== null ? `<td class="note" colspan="3">${esc(r.text)}</td>`
-      : `<td>${r.n}</td><td class="${cls(r.net)}">${fmtPct(r.net, 2)}</td><td class="${cls(r.money)}">${sgnMoney(r.money)}</td>`) + '</tr>';
-  const exec = botExecLine(b);
+  box.innerHTML = botBlockHtml(b, state.morning.params?.stake ?? 1e4, { esc, cls, fmtDate, fmtPct, fmtMoney, sgnMoney, plural, guideUrl: GUIDE_URL });
   box.hidden = false;
-  box.innerHTML = head + `<table class="strip-t bot-t"><tr><th></th><th title="Закрытые сделки живого счёта">сделок</th>`
-    + `<th title="Средний результат сделки после комиссий, в долях суммы сделки">на сделку</th>`
-    + `<th title="${esc(`Итог всех сделок строки, если в каждую вложено по ${fmtMoney(stake)} — мера вклада, а не прибыль счёта: размер позиций бота у контуров разный и сюда не входит`)}">на ${esc(fmtMoney(stake))} в сделке</th></tr>`
-    + botRows(b, stake).map(row).join('') + '</table>'
-    + (exec ? `<div class="strip-empty">${esc(exec)}</div>` : '');
+}
+// Блок бота — дополнение к списку: его сбой не должен оставить вкладку без таблицы дня
+function renderBotSafe() {
+  try { renderBot(); }
+  catch (e) { console.warn('блок бота не нарисован:', e); const box = $('#m-bot'); if (box) { box.hidden = true; box.innerHTML = ''; } }
 }
 
+// Одна строка под счётчиком: события иностранных эмитентов, которые были бы в основном списке (скор от порога), — вне списка
 function fpiLine(f) {
   if (!f?.n) return '';
   return `<div class="strip-empty" title="${esc(FPI_HINT)}">Иностранные эмитенты вне списка, с ${esc(fmtDate(f.from))}: `
@@ -506,7 +501,7 @@ function dayNote(day, rows, liveOn = false) {
 function renderMorning() {
   renderHealth();
   renderCounter();
-  renderBot();
+  renderBotSafe();
   renderSurge();
   const days = state.morning.days;
   // Выбор даты: десять последних дат подачи, число бумаг выбранного списка в подписи

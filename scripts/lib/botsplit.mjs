@@ -44,7 +44,10 @@ export function attachBotSplit(morningText, splitText, nowMs = Date.now()) {
 export function attachBotSplitFile(morningText, file = BOT_SPLIT_FILE, nowMs = Date.now()) {
   let splitText;
   try {
-    if (statSync(file).size > BOT_SPLIT_MAX_BYTES) return { text: morningText, attached: false, note: 'сводка бота больше ' + BOT_SPLIT_MAX_BYTES + ' байт' };
+    const st = statSync(file);
+    // только обычный файл: канал (FIFO) или устройство на этом месте подвесили бы чтение, а с ним и отправку списка
+    if (!st.isFile()) return { text: morningText, attached: false, note: `сводки бота нет (${file}: не обычный файл)` };
+    if (st.size > BOT_SPLIT_MAX_BYTES) return { text: morningText, attached: false, note: 'сводка бота больше ' + BOT_SPLIT_MAX_BYTES + ' байт' };
     splitText = readFileSync(file, 'utf8');
   } catch (e) {
     return { text: morningText, attached: false, note: `сводки бота нет (${file}: ${e?.code ?? e?.message ?? e})` };

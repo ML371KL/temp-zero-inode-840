@@ -55,7 +55,7 @@ export function parseArgs(argv, env = process.env) {
     workerUrl: (env.PAPER_URL || 'https://radar840-quotes.financehub.workers.dev').replace(/\/$/, ''),
     token: env.PAPER_TOKEN || '',
     // сводка бота ib840 «что дал каждый контур» (scripts/lib/botsplit.mjs): прикладывается к списку при отправке в воркер
-    botSplit: val('--bot-split', env.BOT_SPLIT_FILE || BOT_SPLIT_FILE),
+    botSplit: val('--bot-split', env.BOT_SPLIT_FILE || process.env.BOT_SPLIT_FILE || BOT_SPLIT_FILE),
     letters: !!(env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID),
     env,
   };
@@ -235,6 +235,27 @@ export function unionNeeds(a = {}, b = {}) {
 }
 
 // Одна попытка. Возвращает { ok, why?, retry? }. ctx.stage хранит завершённые шаги между попытками.
+// Отправка списка в воркер. К тексту прикладывается сводка бота ib840 «что дал каждый контур» (блок bot для страницы,
+// scripts/lib/botsplit.mjs): файл списка на диске остаётся как есть, блок добавляется только в отправляемый текст.
+// Не приложилась — список уходит без неё. Воркер не принял список с блоком (предел размера, проверка полей) — тут же
+// повтор без блока: список важнее сводки. { ok } или { ok: false, why }.
+export async function sendMorning(opts, disk) {
+  const bs = attachBotSplitFile(disk, opts.botSplit);
+  log(bs.note);
+  for (const body of bs.attached ? [bs.text, disk] : [disk]) {
+    const last = body === disk;
+    try {
+      const r = await fetch(`${opts.workerUrl}/morning`, { method: 'PUT', body, headers: { Authorization: `Bearer ${opts.token}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
+      if (r.status === 409) log('воркер хранит версию новее — наша не принята (это не сбой)');
+      else if (!r.ok && !last && (r.status === 400 || r.status === 413)) { log(`воркер не принял список со сводкой бота (HTTP ${r.status}) — отправляю без неё`); continue; }
+      else if (!r.ok) return { ok: false, why: `воркер /morning: HTTP ${r.status} ${(await r.text()).slice(0, 200)}` };
+      else log('отправлено в воркер:', (await r.text()).slice(0, 200));
+    } catch (e) { return { ok: false, why: `воркер /morning: ${e.message}` }; }
+    break;
+  }
+  return { ok: true };
+}
+
 export async function attempt(opts, day, ctx) {
   const env = { ...process.env, ...opts.env, MORNING_SENDER: 'vps', MORNING_URL: opts.workerUrl };
   const st = ctx.stage;
@@ -396,17 +417,8 @@ export async function attempt(opts, day, ctx) {
 
   if (!st.published && !opts.dry) {
     if (!opts.token) return fail('PAPER_TOKEN не задан: список некуда отправить');
-    // Файл списка на диске остаётся как есть; блок bot (сводка бота для страницы) добавляется только в отправляемый текст.
-    // Не приложилась — список уходит без неё: attachBotSplitFile исключений не бросает и сам список не меняет.
-    const bs = attachBotSplitFile(readFileSync(join(opts.site, 'data', 'morning.json'), 'utf8'), opts.botSplit);
-    log(bs.note);
-    const body = bs.text;
-    try {
-      const r = await fetch(`${opts.workerUrl}/morning`, { method: 'PUT', body, headers: { Authorization: `Bearer ${opts.token}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
-      if (r.status === 409) log('воркер хранит версию новее — наша не принята (это не сбой)');
-      else if (!r.ok) return fail(`воркер /morning: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
-      else log('отправлено в воркер:', (await r.text()).slice(0, 200));
-    } catch (e) { return fail(`воркер /morning: ${e.message}`); }
+    const sent = await sendMorning(opts, readFileSync(join(opts.site, 'data', 'morning.json'), 'utf8'));
+    if (!sent.ok) return fail(sent.why);
     st.published = true;
   }
 
