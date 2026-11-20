@@ -3666,8 +3666,9 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       for (const t of Object.keys(full.rows)) assert.deepEqual([lean.rows[t].fpi ?? null, lean.rows[t].main, lean.rows[t].score], [full.rows[t].fpi ?? null, full.rows[t].main, full.rows[t].score], t + ': сборка на сервере = полная');
       assert.equal(full.m.fpi.from, FB); assert.equal(full.m.fpi.firstForm, 2); assert.equal(full.m.fpi.forms, 2); assert.equal(full.m.fpi.warn, undefined);
       assert.deepEqual(full.m.counter.fpi.from, '2026-08-01');
-      // дата по умолчанию (заглушка в будущем): ни одна строка не меняется
-      run('off', []);
+      // день подачи раньше --fpi-from: ни одна строка не меняется. До 24.11.2026 здесь стояла дата по умолчанию (MORNING.fpiFrom, тогда
+      // «заглушка в будущем»); с этого дня FB (последний будний день не позже today − 6) её догоняет, и тест падал бы — дата задана явно
+      run('off', ['--fpi-from', '2099-01-01']);
       const off = read('off');
       for (const t of Object.keys(off.rows)) { assert.equal('fpi' in off.rows[t], false); assert.equal(off.rows[t].main, true); }
       for (const t of Object.keys(off.rows)) for (const k of ['val', 'mx', 'score', 'dv', 'px', 'cost', 'tags', 'prev']) assert.deepEqual(off.rows[t][k], full.rows[t][k], `${t}.${k}: от пометки не зависит`);
