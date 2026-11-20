@@ -454,6 +454,7 @@ if (INTRADAY_REF) {
   const out = buildIntradayRef({
     forDay: INTRADAY_FOR, spy, universe: INTRADAY_UNIVERSE, ref, symRanges, series, splits: allSplits, lowsMap, unitsMismatch,
     drawdownAt, dollarVolumeAt, fpiRefs, fpiBefore, trades, history, ownerGroups,
+    formsThrough: readJson(join(DATA, 'state', 'live.json'), null)?.lastDay ?? null,
   });
   writeJson(INTRADAY_REF, out);
   console.log(`[compute] справочник D−1: бары по ${out.asOf}, день сигнала ${out.for}, бумаг ${out.n} (без свежего бара ${out.skipped.stale}, ниже запаса ${out.skipped.thin}, без ряда ${out.skipped.noCache})${out.fpiWarn.length ? '; ИНОСТРАННЫЕ ЭМИТЕНТЫ: ' + out.fpiWarn.join('; ') : ''}`);

@@ -2,12 +2,19 @@
 // утреннего списка (morning-build.mjs, 22:03 ET) не зависит и её каталог не трогает.
 //
 //   node scripts/vps/intraday-ref.mjs [--state /var/lib/insider840-signals] [--max-min 90] [--interval 300] [--once] [--force]
-//        [--no-sync] [--no-bars] [--data DIR] [--now ISO] [--min-tickers 300]
+//        [--no-sync] [--no-bars] [--data DIR] [--now ISO] [--min-tickers 300] [--forms-from DIR] [--no-forms-from]
 //
 // Что делает (попытки каждые --interval секунд, не дольше --max-min минут; завершённые шаги не повторяются):
-//   1. asOf — последний торговый день с закрытым баром, день сигнала — следующий торговый день. Справочник на этот день по этим
-//      барам уже лежит — выход без работы (таймеров два: 23:52 и 07:00 ET, второй — повтор, если ночью не получилось).
-//   2. ветка data — своя копия в $STATE/build/repo (анонимный shallow-fetch, чистое дерево).
+//   1. asOf — последний торговый день с закрытым баром, день сигнала — следующий торговый день. Годный справочник на этот день
+//      уже лежит (refReady: те же бары, формы по последний рабочий день SEC, справочники иностранных эмитентов готовы, вселенная
+//      полная) — выход без работы; негодный или неполный — пересборка (таймеров два: 23:52 и 07:00 ET; утренний работает не
+//      дольше 45 минут — до предполёта бота).
+//   2. ветка data — своя копия в $STATE/build/repo (анонимный shallow-fetch, чистое дерево). Формы в ней должны быть разобраны по
+//      последний рабочий день SEC перед днём сигнала (state/live.json, lastDay): по ним поправки 4/A и синхронные подачи дня
+//      сигнала находят исходные строки. Ветку data пишет только прогон GitHub; если он опоздал, живой шард и его состояние берутся
+//      из копии ночной сборки списка на этом же сервере (--forms-from, по умолчанию /var/lib/insider840-morning/repo: она разбирает
+//      формы дня сама в 22:03). Свежих форм нет нигде — повтор; на последней попытке справочник собирается как есть, и процесс
+//      сигналов выключит день (off, stale_forms).
 //   3. вселенная: бумаги справочника SEC на биржах с кэшем цен, оборотом от $20 млн и ценой от $4 на последнем баре кэша
 //      (запас к порогам сигнала $30 млн и $5), плюс SPY и IWM.
 //   4. бары вселенной через воркер /bars (Yahoo с адреса VPS не трогаем) с перекрытием не меньше BARS_BACK_DAYS дней: в ветке data
@@ -17,10 +24,11 @@
 //   5. compute --only-morning --intraday-ref: справочник считает сам compute своими функциями (цена, оборот, просадка, признаки
 //      отсевов, пометка иностранных эмитентов). Его morning.json остаётся в рабочем каталоге и никуда не уходит.
 //   6. проверка и атомарная установка $STATE/ref/<день сигнала>.json (читает процесс сигналов signal-watch.mjs).
-// Выход 0 — справочник на месте; 1 — не собран (тревога юнита): в этот день процесс сигналов запишет off, контур бота молчит.
+// Выход 0 — годный справочник на месте; 1 — не собран или собран негодным (формы устарели, справочники иностранных эмитентов не
+// готовы) — тревога юнита: в такой день процесс сигналов запишет off, контур бота молчит.
 // В ветку data и в воркер шаг ничего не пишет. Код берётся из клона репозитория (обновляет только install.sh).
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, unlinkSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readJson, writeJson, addDaysIso } from '../lib/util.mjs';
@@ -30,7 +38,7 @@ import { fetchBars, applyBars, applyLows, BACK_DAYS } from '../lib/bars.mjs';
 import { readPriceCache, turnover20 } from '../lib/prices.mjs';
 import { loadTickerRef, plausibleTicker, ALLOWED_EXCHANGES } from '../lib/universe.mjs';
 import { OPENS_BENCH } from '../lib/opens.mjs';
-import { SIGNAL, refDays } from '../lib/intraday.mjs';
+import { SIGNAL, refDays, refProblem, prevSecDay } from '../lib/intraday.mjs';
 
 const CODE = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -43,6 +51,7 @@ export const REF = {
   freshShare: 0.97,        // доля вселенной, по которой источник цен ответил, с которой справочник считается полным
   freshShareLast: 0.8,     // на последней попытке хватит и этого (остальные бумаги сигнала не дадут)
   keepDays: 10,            // сколько справочников хранить
+  morningMaxMin: 45,       // утренний повтор (запуск с 04:00 до 12:00 ET) работает не дольше: в 08:20 стартует торговый день бота
   pauseMs: 1500,           // пауза между пачками по 20 бумаг у воркера: вселенная — около 85 пачек, спешить некуда
 };
 
@@ -56,6 +65,7 @@ export function parseArgs(argv, env = process.env) {
     maxMin: Number(val('--max-min', '90')), interval: Number(val('--interval', '300')),
     once: flag('--once'), force: flag('--force'), noSync: flag('--no-sync'), noBars: flag('--no-bars'),
     now: val('--now', null), minTickers: Number(val('--min-tickers', String(REF.minTickers))),
+    formsFrom: flag('--no-forms-from') ? null : resolve(val('--forms-from', join(env.MORNING_STATE || '/var/lib/insider840-morning', 'repo'))),
     repoUrl: env.DATA_REPO_URL || 'https://github.com/ML371KL/temp-zero-inode-840.git',
     workerUrl: (env.PAPER_URL || 'https://radar840-quotes.financehub.workers.dev').replace(/\/$/, ''),
     token: env.PAPER_TOKEN || '',
@@ -120,6 +130,29 @@ export function closedOnly(res, asOf, nowMs) {
   return r;
 }
 
+// По какой день в копии данных разобраны формы; если ветка data отстала от последнего рабочего дня SEC, а копия ночной сборки
+// списка на этом сервере свежее — её живой шард и состояние разбора кладутся в нашу копию. Возвращает день (или null).
+export function freshForms(opts, need) {
+  const lastOf = dir => readJson(join(dir, 'state', 'live.json'), null)?.lastDay ?? null;
+  let last = lastOf(opts.data);
+  if (opts.formsFrom && !(last >= need)) {
+    try {
+      const sl = lastOf(opts.formsFrom), shard = join(opts.formsFrom, 'trades', 'live.json.gz');
+      if (sl && (!last || sl > last) && existsSync(shard)) {
+        mkdirSync(join(opts.data, 'trades'), { recursive: true }); mkdirSync(join(opts.data, 'state'), { recursive: true });
+        copyFileSync(shard, join(opts.data, 'trades', 'live.json.gz'));
+        copyFileSync(join(opts.formsFrom, 'state', 'live.json'), join(opts.data, 'state', 'live.json'));
+        log(`формы: в ветке data разобраны по ${last ?? '—'}, в копии ночной сборки списка — по ${sl}: взят её живой шард`);
+        last = sl;
+      }
+    } catch (e) { log(`формы: копия ночной сборки списка не читается (${e.message})`); }
+  }
+  return last;
+}
+// Готовый справочник пересобирать не нужно: тот же день и те же бары, день по нему не будет выключен, вселенная полная
+export const refReady = (have, days) => !!have && have.v === SIGNAL.v && have.asOf === days.asOf && have.for === days.forDay
+  && !have.partial && refProblem(have, days.forDay) === null;
+
 // Одна попытка. ctx хранит завершённые шаги и вселенную между попытками.
 export async function attempt(opts, days, ctx, { fetchBarsImpl = fetchBars, nowMs = () => Date.now() } = {}) {
   const st = ctx.stage;
@@ -129,6 +162,16 @@ export async function attempt(opts, days, ctx, { fetchBarsImpl = fetchBars, nowM
     log('ветка data: загрузка…');
     if (!(await syncData(opts))) return fail('не удалось получить ветку data');
     st.sync = true;
+  }
+  if (!st.forms) {
+    const need = prevSecDay(forDay), last = freshForms(opts, need);
+    if (!(last >= need)) {
+      const why = `формы разобраны по ${last ?? '—'}, а нужны по ${need}: ночной прогон данных ещё не вышел`;
+      // до последней попытки ждём свежий снимок ветки data (она скачивается заново); на последней собираем как есть — день будет выключен
+      if (!ctx.lastChance) { st.sync = false; return fail(why); }
+      log(`ВНИМАНИЕ (последняя попытка, идём как есть): ${why} — процесс сигналов выключит день`);
+    }
+    st.forms = true;
   }
   if (!ctx.universe) {
     const u = pickUniverse(opts.data, asOf);
@@ -170,6 +213,7 @@ export async function attempt(opts, days, ctx, { fetchBarsImpl = fetchBars, nowM
       return fail(`источник цен ответил только по ${(share * 100).toFixed(1)}% вселенной${r.limited ? ' (воркер ответил лимитом)' : ''}${transient.length ? `; не получены: ${transient.slice(0, 8).join(', ')}${transient.length > 8 ? '…' : ''}` : ''}`);
     }
     if (share < REF.freshShare) log('ВНИМАНИЕ (последняя попытка, идём как есть): бумаги без свежего бара в справочник не попадут и сигнала не дадут');
+    ctx.partial = share < REF.freshShare;
     st.bars = true;
   }
   if (!st.built) {
@@ -184,8 +228,11 @@ export async function attempt(opts, days, ctx, { fetchBarsImpl = fetchBars, nowM
     const ref = readJson(tmp, null);
     const bad = !ref ? 'файл не записан' : ref.v !== SIGNAL.v ? `версия ${ref.v}` : ref.asOf !== asOf ? `бары по ${ref.asOf}, а нужен ${asOf}` : ref.for !== forDay ? `день ${ref.for}` : !(ref.n >= opts.minTickers) ? `бумаг ${ref.n}, меньше ${opts.minTickers}` : null;
     if (bad) { try { unlinkSync(tmp); } catch { /* нет файла */ } return fail(`справочник не годен: ${bad}`); }
+    // неполная вселенная (источник цен ответил не по всем бумагам) — пометка: утренний повтор такой справочник пересоберёт
+    if (ctx.partial) writeJson(tmp, { ...ref, partial: true });
     renameSync(tmp, join(opts.refDir, `${forDay}.json`));
-    ctx.summary = { for: forDay, asOf, n: ref.n, universe: names.length, fpiWarn: ref.fpiWarn?.length ?? 0 };
+    ctx.problem = refProblem(ref, forDay);
+    ctx.summary = { for: forDay, asOf, n: ref.n, universe: names.length, formsThrough: ref.formsThrough ?? null, fpiWarn: ref.fpiWarn?.length ?? 0, ...(ctx.partial ? { partial: true } : {}) };
     log(`справочник на ${forDay} по барам ${asOf}: бумаг ${ref.n}${ref.fpiWarn?.length ? `; ВНИМАНИЕ, справочники иностранных эмитентов не готовы — сигналов в этот день не будет: ${ref.fpiWarn.join('; ')}` : ''}`);
     st.built = true;
   }
@@ -208,12 +255,16 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const nowMs = () => fixed ?? Date.now();
   const days = refDays(nowMs(), nyWall(nowMs()).slice(0, 10), barClosedAtMs);
   const have = readJson(join(opts.refDir, `${days.forDay}.json`), null);
-  if (have && have.v === SIGNAL.v && have.asOf === days.asOf && have.for === days.forDay && !opts.force) {
-    log(`справочник на ${days.forDay} по барам ${days.asOf} уже есть (бумаг ${have.n}) — выходим`);
+  if (refReady(have, days) && !opts.force) {
+    log(`справочник на ${days.forDay} по барам ${days.asOf} уже есть (бумаг ${have.n}, формы по ${have.formsThrough}) — выходим`);
     return 0;
   }
-  log(`день сигнала ${days.forDay}, бары по ${days.asOf}; ${nyWall(nowMs()).slice(0, 16)} ET, не дольше ${opts.maxMin} мин`);
-  const untilMs = Date.now() + opts.maxMin * 60e3;
+  if (have && have.for === days.forDay) log(`справочник на ${days.forDay} есть, но не годен или неполон (${refProblem(have, days.forDay)?.text ?? (have.partial ? 'вселенная неполная' : 'другие бары')}) — пересборка`);
+  // утренний повтор не должен дойти до торгового дня бота (08:20 ET): compute занимает до 3 ГБ памяти
+  const hour = Number(nyWall(nowMs()).slice(11, 13));
+  const maxMin = hour >= 4 && hour < 12 ? Math.min(opts.maxMin, REF.morningMaxMin) : opts.maxMin;
+  log(`день сигнала ${days.forDay}, бары по ${days.asOf}; ${nyWall(nowMs()).slice(0, 16)} ET, не дольше ${maxMin} мин`);
+  const untilMs = Date.now() + maxMin * 60e3;
   const ctx = { stage: {}, lastChance: false, summary: null };
   for (let n = 1; ; n++) {
     ctx.lastChance = opts.once || Date.now() + opts.interval * 1000 >= untilMs;
@@ -221,6 +272,11 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     const r = await attempt(opts, days, ctx, { nowMs });
     if (r.ok) {
       pruneRefs(opts.refDir, days.forDay);
+      if (ctx.problem) {
+        // справочник лежит, но день по нему будет выключен: тревога сейчас, а не в 09:25; утренний повтор пересоберёт
+        log(`СОБРАН, НО НЕ ГОДЕН: ${ctx.problem.text} — сигналов ${days.forDay} не будет, если утренний повтор не исправит`, JSON.stringify(ctx.summary));
+        return 1;
+      }
       log('готово', JSON.stringify(ctx.summary));
       return 0;
     }

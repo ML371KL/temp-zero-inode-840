@@ -4837,7 +4837,7 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
 // Справочник D−1 (compute --intraday-ref, vps/intraday-ref.mjs), расчёт события дня (lib/intraday.mjs), процесс сигналов (vps/signal-watch.mjs).
 {
   const it = await import('./lib/intraday.mjs');
-  const { SIGNAL, LATENCY, DayState, OwnerGroups, evalEvent, refProblem, refDays, prevMarketDay, inSession, splitLines, latencyStat, acceptedMs, resolveToday } = it;
+  const { SIGNAL, LATENCY, DayState, OwnerGroups, evalEvent, refProblem, refDays, prevMarketDay, prevSecDay, inSession, splitLines, latencyStat, acceptedMs, resolveToday } = it;
   const { FEED } = await import('./lib/feed.mjs');
   const { barClosedAtMs } = await import('./lib/session.mjs');
   const ir = await import('./vps/intraday-ref.mjs');
@@ -4870,7 +4870,7 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   const barDays = bizDays('2026-11-02', ASOF);
   const mkBars = (px, dd = -0.35, dv = 4e7) => barDays.map((d, i) => [d, px, dd, dv, 300 + i]);
   const mkRef = (over = {}) => ({
-    v: 1, asOf: ASOF, for: DAY, built: '2026-11-20T04:55:00.000Z', n: 5, fpiWarn: [], months: ['2026-10', '2026-11'],
+    v: 1, asOf: ASOF, for: DAY, built: '2026-11-20T04:55:00.000Z', formsThrough: ASOF, n: 5, fpiWarn: [], months: ['2026-10', '2026-11'],
     tickers: {
       100: { t: 'AAA', name: 'Aaa Inc', px: 50, adv: 5e7, bars: mkBars(50) },
       200: { t: 'FOR', name: 'Foreign Plc', px: 50, adv: 5e7, bars: mkBars(50), fpi: 'forms' },
@@ -4974,10 +4974,11 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.equal(o1.length, 1);
     assert.deepEqual([o1[0].k, o1[0].v, o1[0].day, o1[0].cik, o1[0].t, o1[0].n, o1[0].acc, o1[0].score], ['sig', 1, DAY, 600, 'FLT', 1, f1.acc, 2]);
     assert.deepEqual([o1[0].at, o1[0].at0, o1[0].seen, o1[0].tw], ['2026-11-20T16:31:07Z', '2026-11-20T16:31:07Z', '2026-11-20T16:31:40Z', '2026-11-20T16:31:50Z']);
-    assert.deepEqual(Object.keys(o1[0]), ['k', 'v', 'day', 'cik', 't', 'n', 'acc', 'at', 'at0', 'seen', 'tw', 'score', 'pts', 'mx', 'val', 'rows', 'dv', 'px', 'asOf', 'dd', 'role', 'td', 'fpx', 'same', 'units'], 'состав записи — как в договорённости с ботом');
+    assert.deepEqual(Object.keys(o1[0]), ['k', 'v', 'day', 'cik', 't', 'n', 'acc', 'at', 'at0', 'atmx', 'seen', 'tw', 'score', 'pts', 'mx', 'val', 'rows', 'dv', 'px', 'asOf', 'dd', 'role', 'td', 'fpx', 'same', 'units'], 'состав записи — как в договорённости с ботом');
     assert.deepEqual(s.onForm(f1), [], 'та же подача второй раз не считается');
     const o2 = s.onForm(f2, { nowMs: now + 120e3 });
     assert.deepEqual([o2[0].k, o2[0].n, o2[0].score, o2[0].acc, o2[0].at, o2[0].at0, o2[0].rows], ['sig', 2, 3, f2.acc, '2026-11-20T16:33:20Z', '2026-11-20T16:31:07Z', 2], 'скор вырос — вторая запись, время — по форме, давшей рост');
+    assert.deepEqual([o1[0].atmx, o2[0].atmx], ['2026-11-20T16:31:07Z', '2026-11-20T16:31:07Z'], 'atmx — приём формы с крупнейшей покупкой: у второй записи это по-прежнему первая форма');
     assert.deepEqual(s.onForm(f3), [], 'скор не вырос — записи нет');
     const k4 = s.onForm(f4, { nowMs: now });
     assert.deepEqual([k4[0].k, k4[0].why, k4[0].t_, k4[0].cik, k4[0].score], ['skip', 'dv', 'THN', 300, 3]);
@@ -5000,7 +5001,15 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.equal(refProblem(mkRef({ v: 2 }), DAY).why, 'bad_ref'); assert.equal(refProblem({ v: 1 }, DAY).why, 'bad_ref');
     const w = refProblem(mkRef({ fpiWarn: ['справочник отчётов иностранных эмитентов устарел (по 2026-11-01, список за 2026-11-20)'] }), DAY);
     assert.equal(w.why, 'fpi_warn'); assert.match(w.text, /устарел/);
-    assert.equal(refProblem(mkRef({ for: '2026-11-23', asOf: DAY }), '2026-11-23'), null, 'понедельник по барам пятницы');
+    assert.equal(refProblem(mkRef({ for: '2026-11-23', asOf: DAY, formsThrough: DAY }), '2026-11-23'), null, 'понедельник по барам и формам пятницы');
+    // формы в справочнике старше последнего рабочего дня SEC — день выключен: поправки и синхронные подачи не нашли бы вчерашних строк
+    assert.equal(refProblem(mkRef({ formsThrough: '2026-11-18' }), DAY).why, 'stale_forms');
+    assert.equal(refProblem(mkRef({ formsThrough: null }), DAY).why, 'stale_forms');
+    assert.equal(refProblem(mkRef({ for: '2026-11-23', asOf: DAY }), '2026-11-23').why, 'stale_forms', 'на понедельник нужны формы пятницы');
+    assert.equal(prevSecDay('2026-11-23'), '2026-11-20'); assert.equal(prevSecDay('2026-11-12'), '2026-11-10', '11.11 SEC закрыта, биржа работает');
+    assert.equal(prevSecDay('2027-03-29'), '2027-03-26', 'Страстная пятница: биржа закрыта, SEC работает — формы пятницы нужны');
+    assert.equal(refProblem(mkRef({ for: '2027-03-29', asOf: '2027-03-25', formsThrough: '2027-03-25' }), '2027-03-29').why, 'stale_forms');
+    assert.equal(refProblem(mkRef({ for: '2027-03-29', asOf: '2027-03-25', formsThrough: '2027-03-26' }), '2027-03-29'), null);
   });
 
   ok('контур B: чтение дописываемого журнала — недописанная строка ждёт следующего чтения, испорченная пропускается', () => {
@@ -5022,6 +5031,58 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.equal(latencyStat(mk([200, 300, 40, 50, 60]), t0).alarm, false, 'медиана в норме');
     assert.equal(latencyStat([...mk([40, 50, 60, 45, 55]), ...[200, 300, 400, 500, 600].map((lat, i) => ({ t: t0 - 61 * 60e3 - i, lat }))], t0).alarm, false, 'старше часа — вне окна');
     assert.equal(LATENCY.alarmSec, 120); assert.equal(LATENCY.windowMin, 60);
+  });
+
+  ok('контур B: рутинные владельцы — для месяца дня сигнала и предыдущего КАЛЕНДАРНОГО месяца (первые дни месяца после 30-дневного и после февраля)', () => {
+    const hist = ['2023-11-10', '2024-11-12', '2025-11-11'].map(tdate => ({ tdate, fdate: tdate, code: 'P', cik: 100, val: 1e5, sh: 1000 }));
+    const build = forDay => it.buildIntradayRef({ forDay, spy: [[addDaysIso(forDay, -1), 1, 1, 1]], ref: new Map(), symRanges: null, series: () => null, splits: {},
+      lowsMap: new Map(), unitsMismatch: new Set(), drawdownAt: () => null, dollarVolumeAt: () => null, fpiRefs: { warn: [] }, fpiBefore: null, trades: [],
+      history: new Map([[9001, hist]]), ownerGroups: new Map(), formsThrough: '2026-11-30' });
+    const dec = build('2026-12-01');
+    assert.deepEqual(dec.months, ['2026-11', '2026-12'], '01.12 минус 31 день — октябрь: нужен ноябрь');
+    assert.deepEqual(dec.routine, { '2026-11': [9001], '2026-12': [] });
+    assert.equal(dec.formsThrough, '2026-11-30');
+    for (const [d, want] of [['2027-03-01', ['2027-02', '2027-03']], ['2027-03-03', ['2027-02', '2027-03']], ['2027-07-01', ['2027-06', '2027-07']], ['2027-01-04', ['2026-12', '2027-01']], ['2026-11-20', ['2026-10', '2026-11']], ['2026-12-31', ['2026-11', '2026-12']]]) assert.deepEqual(build(d).months, want, d);
+    // сквозной случай: рутинный владелец купил 30.11, форма 01.12 — отсев, а не сигнал
+    const bars = bizDays('2026-11-10', '2026-11-30').map((d, i) => [d, 50, -0.35, 4e7, 300 + i]);
+    const ref = { ...dec, v: 1, asOf: '2026-11-30', fpiWarn: [], tickers: { 100: { t: 'AAA', name: 'Aaa Inc', px: 50, adv: 5e7, bars } }, lows: {}, regular: {}, groups: {}, recent: {} };
+    const r = { ...row({ owners: [{ cik: 9001, name: 'Routine Rita', rel: 'DOC', title: 'CEO' }] }), fdate: '2026-12-01', tdate: '2026-11-30', at: '2026-12-01T11:31' };
+    const g = new OwnerGroups(ref); g.addFiling(r.owners);
+    assert.deepEqual(evalEvent(ref, '2026-12-01', 100, [r], g), { kind: 'skip', why: 'gates:routine' });
+  });
+
+  ok('контур B: формы одной порции считаются вместе — синхронная подача трёх лиц сигнала не даёт; по очереди первая форма сигнал даёт', () => {
+    const who = n => [{ cik: 9100 + n, name: `Buyer ${n}`, rel: 'DO', title: 'CFO' }];
+    const forms = () => [1, 2, 3].map(n => formOf([row({ owners: who(n), sh: 30000 })], `11:0${n}:00`));
+    const s = new DayState(mkRef(), DAY);
+    const out = s.onForms(forms(), { nowMs: ny(`${DAY}T11:03:30`) });
+    assert.deepEqual(out.map(x => [x.k, x.why]), [['skip', 'gates:sync']], 'три независимых подателя одной цены в одной порции — размещение, не сигнал');
+    const s2 = new DayState(mkRef(), DAY), one = forms();
+    const first = s2.onForms([one[0]], { nowMs: ny(`${DAY}T11:01:30`) });
+    assert.deepEqual([first[0].k, first[0].score], ['sig', 4], 'первая форма пришла отдельным тактом — сигнал записан (известное ограничение: остальные формы ещё не видны)');
+    assert.deepEqual(s2.onForms(one.slice(1)), [], 'после сигнала пропуск не пишется');
+    // порция с двумя эмитентами и повтором подачи: каждому — своя запись, причина записи — форма, принятая позже
+    const s3 = new DayState(mkRef(), DAY);
+    const a1 = formOf([row({ cik: 600, t: 'FLT', owners: P2, sh: 30000 })], '11:31:07'), a2 = formOf([row({ cik: 600, t: 'FLT', sh: 500 })], '11:33:20');
+    const b1 = formOf([row({ cik: 300, t: 'THN' })], '11:32:00');
+    const o = s3.onForms([a2, b1, a1, a1], { seenAtOf: acc => `seen-${acc}`, nowMs: ny(`${DAY}T11:34:00`) });
+    assert.deepEqual(o.map(x => [x.k, x.cik]), [['sig', 600], ['skip', 300]]);
+    assert.deepEqual([o[0].n, o[0].score, o[0].acc, o[0].at, o[0].atmx, o[0].at0, o[0].seen], [1, 3, a2.acc, '2026-11-20T16:33:20Z', '2026-11-20T16:31:07Z', '2026-11-20T16:31:07Z', `seen-${a2.acc}`]);
+    // ошибка расчёта одного эмитента не мешает остальным
+    const s4 = new DayState({ ...mkRef(), tickers: { ...mkRef().tickers, 600: { t: 'FLT', bars: null } } }, DAY), errs = [];
+    const o4 = s4.onForms([a1, formOf([row()], '11:35:00')], { onError: (cik, e) => errs.push(cik) });
+    assert.deepEqual([o4.map(x => [x.k, x.cik]), errs], [[['sig', 100]], [600]]);
+  });
+
+  ok('контур B: поправка 4/A офицера к давней сделке не добавляет сегодняшнему событию балл «офицер»', () => {
+    const buy = row({ cik: 600, t: 'FLT', owners: P2, sh: 30000 });                                  // директор, $1,5 млн: скор 2
+    const amend = row({ cik: 600, t: 'FLT', form: '4/A', orig: '2026-09-16', tdate: '2026-09-15', sh: 500 });   // CEO, поправка к сентябрьской покупке
+    assert.equal(ev([buy]).score, 2);
+    assert.equal(ev([buy, amend]).score, 2, 'у compute такая поправка получает дату исходной формы и в событие дня не входит');
+    assert.deepEqual(ev([amend]), { kind: 'skip', why: 'amend' });
+    // поправка к недавней сделке без исходной формы в данных — первое раскрытие: остаётся в событии, как у compute
+    const fresh = row({ cik: 600, t: 'FLT', form: '4/A', orig: '2026-11-18', tdate: '2026-11-17', sh: 500 });
+    assert.equal(ev([buy, fresh]).score, 3);
   });
 
   // Процесс сигналов на подставных каталогах
@@ -5155,15 +5216,39 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     const asked = [];
     const api = await fakeWorker({ charts: Object.fromEntries(Object.entries(src).map(([sym, s]) => [sym, from => { asked.push([sym, from]); const rows = s.filter(r => r[0] >= from), c = chartOf(rows); c.chart.result[0].indicators.quote[0].low = rows.map(r => r[1] * 0.99); return c; }])) });
     try {
-      const args = ['--state', state, '--no-sync', '--once', '--now', nowIso, '--min-tickers', '1'];
+      const args = ['--state', state, '--no-sync', '--once', '--now', nowIso, '--min-tickers', '1', '--no-forms-from'];
+      const livePath = join(data, 'state', 'live.json'), need = prevSecDay(day);
+      const quarters = []; for (let y = 2016; y <= 2026; y++) for (let q = 1; q <= 4; q++) quarters.push(`${y}q${q}`);
+      // 1) формы в копии данных старше последнего рабочего дня SEC: справочник собран, но не годен — код 1, день был бы выключен
+      writeJson(livePath, { ...readJson(livePath, {}), lastDay: addDaysIso(need, -3) });
+      assert.equal(await ir.main(args, { PAPER_URL: api.base, PAPER_TOKEN: 'tok' }), 1, 'формы устарели (или справочники иностранных эмитентов не готовы) — тревога');
+      const bad = readJson(join(state, 'ref', `${day}.json`));
+      assert.ok(refProblem(bad, day), 'справочник лежит, но день по нему был бы выключен');
+      assert.equal(ir.refReady(bad, { asOf, forDay: day }), false);
+      // 2) свежие формы есть в копии ночной сборки списка на том же сервере — берётся её живой шард
+      const morn = join(base, 'morning-repo');
+      cpSync(join(data, 'trades'), join(morn, 'trades'), { recursive: true });
+      writeJson(join(morn, 'state', 'live.json'), { ...readJson(livePath, {}), lastDay: need });
+      assert.equal(ir.freshForms({ data, formsFrom: morn }, need), need);
+      assert.equal(readJson(livePath).lastDay, need, 'состояние разбора — из копии ночной сборки');
+      assert.equal(ir.freshForms({ data, formsFrom: join(base, 'нет') }, need), need, 'нет копии — остаётся что есть');
+      // 3) справочники иностранных эмитентов готовы, формы свежие — годный справочник, код 0; неготовый был пересобран
+      writeJson(join(data, 'reference', 'first-form.json'), { v: 1, quarters, first: {} });
+      writeJson(join(data, 'reference', 'fpi-forms.json'), { v: 1, asOf, filled: [], fillDone: true, ciks: {} });
+      writeJsonGz(join(data, 'reference', 'symbol-ranges.json.gz'), { LIVA: [[1, '2015-01-02', '2099-12-31']] });
+      const n0 = asked.length;
       const code = await ir.main(args, { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
-      assert.equal(code, 0);
       const ref = readJson(join(state, 'ref', `${day}.json`));
+      assert.deepEqual([code, ref.fpiWarn, ref.formsThrough], [0, [], need], 'годный справочник');
+      assert.ok(asked.length > n0, 'негодный справочник утренним повтором пересобирается');
+      assert.equal(ir.refReady(ref, { asOf, forDay: day }), true);
+      assert.equal(ir.refReady({ ...ref, partial: true }, { asOf, forDay: day }), false, 'неполная вселенная — пересборка');
+      assert.equal(ir.refReady({ ...ref, fpiWarn: ['x'] }, { asOf, forDay: day }), false);
       assert.deepEqual([ref.asOf, ref.for, ref.n], [asOf, day, 1]);
       assert.equal(ref.tickers[222].px, 60, 'цена — закрытие asOf, а не недозакрытый бар сегодняшнего дня (99)');
       assert.equal(ref.tickers[222].bars.at(-1)[0], asOf);
       assert.equal(readPriceCache(data, 'LIVA').at(-1)[0], asOf, 'бар незакрытого дня в копию данных не записан');
-      assert.deepEqual(asked.map(x => x[0]).sort(), ['IWM', 'LIVA', 'SPY']);
+      assert.deepEqual([...new Set(asked.map(x => x[0]))].sort(), ['IWM', 'LIVA', 'SPY']);
       assert.ok(asked.every(([, from]) => from <= addDaysIso(asOf, -ir.REF.barsBackDays)), 'запрос с перекрытием: минимумы дня нужны за последние бары');
       assert.ok(Object.keys(ref.lows).some(k => k.startsWith('LIVA|')), 'минимумы дня последних баров — в справочнике');
       // второй запуск: справочник на этот день по этим барам уже лежит — к источнику не ходим
@@ -5171,10 +5256,10 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       assert.equal(await ir.main(args, { PAPER_URL: api.base, PAPER_TOKEN: 'tok' }), 0); assert.equal(asked.length, n);
       // источник цен не отвечает — справочник не собран, код 1 (тревога)
       rmSync(join(state, 'ref', `${day}.json`));
-      const dead = await ir.main(['--state', state, '--no-sync', '--once', '--now', nowIso], { PAPER_URL: 'http://127.0.0.1:9', PAPER_TOKEN: 'tok' });
+      const dead = await ir.main(['--state', state, '--no-sync', '--once', '--now', nowIso, '--no-forms-from'], { PAPER_URL: 'http://127.0.0.1:9', PAPER_TOKEN: 'tok' });
       assert.equal(dead, 1); assert.equal(existsSync(join(state, 'ref', `${day}.json`)), false);
-      assert.equal(await ir.main(['--state', state, '--no-sync', '--once', '--now', nowIso], { PAPER_URL: api.base }), 1, 'без токена воркера — отказ');
-      assert.equal(await ir.main(['--state', state, '--no-sync', '--once', '--now', nowIso], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' }), 1, 'справочник из одной бумаги — не справочник (порог --min-tickers)');
+      assert.equal(await ir.main(['--state', state, '--no-sync', '--once', '--now', nowIso, '--no-forms-from'], { PAPER_URL: api.base }), 1, 'без токена воркера — отказ');
+      assert.equal(await ir.main(['--state', state, '--no-sync', '--once', '--now', nowIso, '--no-forms-from'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' }), 1, 'справочник из одной бумаги — не справочник (порог --min-tickers)');
     } finally { await api.close(); rmSync(base, { recursive: true, force: true }); }
     assert.equal(ir.closedOnly({ series: [['2026-11-19', 1, 1, 1], ['2026-11-20', 2, 2, 2]], ohlc: [['2026-11-19', 1, 1], ['2026-11-20', 2, 2]], lows: [['2026-11-19', 1], ['2026-11-20', 2]] }, '2026-11-19', nyToMs('2026-11-20T23:52')).series.length, 1, 'бары позже asOf срезаются и после закрытия');
   });

@@ -64,8 +64,11 @@ let restarted = false;
   restarted = loadFeed(DIR, today, 0).runs.length > 0;
 }
 // Очередь на скачивание: подачи, по которым сеть уже сбоила, идут последними — несдающаяся подача не держит остальных
+// Терпение считается тактами, а такт в торговые часы втрое короче: без поправки файл подачи, которого у SEC ещё нет, бросался бы
+// через полторы минуты вместо четырёх с половиной (независимое чтение 20.11.2026, М1). Множитель — отношение шагов.
+const PATIENCE = RTH_INTERVAL_SEC > 0 && RTH_INTERVAL_SEC * 1000 < INTERVAL_MS ? Math.round(INTERVAL_MS / 1000 / RTH_INTERVAL_SEC) : 1;
 const pending = () => [...seen.values()]
-  .filter(s => !forms.has(s.acc) && (tries.get(s.acc) ?? 0) < FEED.maxTries && (netFails.get(s.acc) ?? 0) < FEED.maxNetFails)
+  .filter(s => !forms.has(s.acc) && (tries.get(s.acc) ?? 0) < FEED.maxTries * PATIENCE && (netFails.get(s.acc) ?? 0) < FEED.maxNetFails * PATIENCE)
   .sort((a, b) => (netFails.get(a.acc) ?? 0) - (netFails.get(b.acc) ?? 0));
 
 async function get(url) {

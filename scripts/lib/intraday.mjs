@@ -25,7 +25,7 @@ import { nominalFactor, turnover20 } from './prices.mjs';
 import { fpiVerdict, fpiStaleWarning } from './fpi.mjs';
 import { addDaysIso } from './util.mjs';
 import { nyToMs } from './nytime.mjs';
-import { isMarketClosed, marketCloseEt } from './calendar.mjs';
+import { isMarketClosed, isSecClosed, marketCloseEt } from './calendar.mjs';
 
 export const SIGNAL = {
   v: 1,                 // версия формата справочника и файла сигналов
@@ -56,6 +56,13 @@ export function refDays(nowMs, nyDate, closedAtMs) {
   while (isMarketClosed(forDay)) forDay = addDaysIso(forDay, 1);
   return { asOf, forDay };
 }
+// Последний рабочий день SEC раньше дня day: по этот день в справочнике должны лежать формы (поправки 4/A, повторные и синхронные
+// подачи дня сигнала ищут в них исходные строки). Биржевой праздник при работающей SEC (Страстная пятница) — рабочий день SEC.
+export function prevSecDay(day) {
+  let d = addDaysIso(day, -1);
+  while (isSecClosed(d)) d = addDaysIso(d, -1);
+  return d;
+}
 // Предыдущий торговый день
 export function prevMarketDay(day) {
   let d = addDaysIso(day, -1);
@@ -75,9 +82,11 @@ export function inSession(nowMs, day) {
 //   ref — справочник тикеров SEC (Map cik -> {ticker, exchange, name}); symRanges — реестр символов; series(t) — ряд цен;
 //   splits — prices/_splits.json; lowsMap — слой минимумов дня; unitsMismatch — Set тикеров с признаком «другие единицы»;
 //   drawdownAt, dollarVolumeAt — функции compute; fpiRefs, fpiBefore — справочники иностранных эмитентов;
-//   trades — все строки после разрешения поправок; history — buildOwnerHistory(trades); ownerGroups — buildOwnerGroups(trades).
+//   trades — все строки после разрешения поправок; history — buildOwnerHistory(trades); ownerGroups — buildOwnerGroups(trades);
+//   formsThrough — по какой день в данных разобраны формы (state/live.json, lastDay): процесс сигналов требует, чтобы это был
+//   последний рабочий день SEC перед днём сигнала, иначе день выключается (refProblem, причина stale_forms).
 export function buildIntradayRef({ forDay, spy, universe = null, ref, symRanges, series, splits, lowsMap, unitsMismatch, drawdownAt, dollarVolumeAt,
-  fpiRefs, fpiBefore, trades, history, ownerGroups }, p = SIGNAL) {
+  fpiRefs, fpiBefore, trades, history, ownerGroups, formsThrough = null }, p = SIGNAL) {
   const asOf = spy?.length ? spy[spy.length - 1][0] : null;
   const fpiWarn = [...(fpiRefs?.warn ?? [])];
   { const w = fpiStaleWarning(fpiRefs, forDay); if (w) fpiWarn.push(w); }
@@ -103,9 +112,11 @@ export function buildIntradayRef({ forDay, spy, universe = null, ref, symRanges,
     const fpi = fpiRefs?.first ? fpiVerdict({ cik, ticker: T, fdate: forDay, bar0: s[0][0] }, fpiRefs, { ranges: symRanges, before: fpiBefore }) : null;
     tickers[cik] = { t: T, name: v.name ?? T, px, adv, bars, ...(unitsMismatch?.has(T) ? { units: 1 } : {}), ...(fpi ? { fpi } : {}) };
   }
-  // Рутинные по CMP владельцы для месяцев, на которые может прийтись дата сделки из формы дня сигнала (текущий и предыдущий):
-  // ответ зависит только от года и месяца сделки и от прошлых лет, сегодняшняя форма его не меняет
-  const months = [...new Set([addDaysIso(forDay, -31).slice(0, 7), forDay.slice(0, 7)])];
+  // Рутинные по CMP владельцы для месяцев, на которые может прийтись дата сделки из формы дня сигнала (текущий и предыдущий
+  // календарный): ответ зависит только от года и месяца сделки и от прошлых лет, сегодняшняя форма его не меняет. Предыдущий —
+  // именно календарный: «день сигнала минус 31 день» после 30-дневного месяца и после февраля попадал в позапрошлый, и в первые
+  // дни месяца сделки прошлого месяца проверку рутинности не проходили вовсе (независимое чтение 20.11.2026, С1).
+  const months = [...new Set([addDaysIso(`${forDay.slice(0, 7)}-01`, -1).slice(0, 7), forDay.slice(0, 7)])];
   const routine = Object.fromEntries(months.map(m => [m, []]));
   // Последние покупки пары «владелец — эмитент» для отсева «регулярная серия» (isRegularSeries смотрит покупки строго до сделки).
   // Записи с одинаковой датой сохраняются все: нулевой шаг между покупками серию отменяет.
@@ -140,7 +151,7 @@ export function buildIntradayRef({ forDay, spy, universe = null, ref, symRanges,
   const lows = {};
   for (const [k, v] of lowsMap ?? []) if (k.slice(k.indexOf('|') + 1) >= cutRecent) lows[k] = v;
   return {
-    v: p.v, asOf, for: forDay, built: new Date().toISOString(), n: Object.keys(tickers).length, skipped,
+    v: p.v, asOf, for: forDay, built: new Date().toISOString(), formsThrough: formsThrough ?? null, n: Object.keys(tickers).length, skipped,
     params: { refDvMin: p.refDvMin, refPxMin: p.refPxMin, tailBars: p.tailBars, recentDays: p.recentDays },
     fpiWarn, months, tickers, lows, routine, regular, groups, recent,
   };
@@ -152,6 +163,10 @@ export function refProblem(ref, day) {
   if (ref.v !== SIGNAL.v || !ref.tickers || !ref.asOf) return { why: 'bad_ref', text: 'справочник D−1 не читается или другой версии' };
   if (ref.for !== day || ref.asOf !== prevMarketDay(day)) return { why: 'stale_ref', text: `справочник D−1 собран на ${ref.for} по барам ${ref.asOf}, а нужен на ${day} по барам ${prevMarketDay(day)}` };
   if (ref.fpiWarn?.length) return { why: 'fpi_warn', text: 'справочники иностранных эмитентов не готовы: ' + ref.fpiWarn.join('; ') };
+  // Формы в справочнике старше последнего рабочего дня SEC: поправка 4/A к вчерашней форме стала бы событием дня, повторная подача —
+  // новой покупкой, а «синхронная подача» не увидела бы вчерашних подателей той же цены — каждое из трёх даёт ложный сигнал
+  const need = prevSecDay(day);
+  if (!(ref.formsThrough >= need)) return { why: 'stale_forms', text: `в справочнике D−1 формы разобраны по ${ref.formsThrough ?? '—'}, а нужны по ${need} (ночной прогон данных опоздал)` };
   return null;
 }
 
@@ -209,7 +224,14 @@ export function evalEvent(ref, day, cik, rows, groups, p = SIGNAL) {
   const tk = ref.tickers?.[cik];
   if (!tk) return { kind: 'skip', why: 'no_ref_ticker' };       // нет в справочнике SEC, нет свежего бара или оборот ниже запаса
   const prior = ref.recent?.[cik] ?? [];
-  const { mine, all: pool } = resolveToday(prior, rows.filter(r => r.code === 'P'), day);
+  const resolved = resolveToday(prior, rows.filter(r => r.code === 'P'), day);
+  const pool = resolved.all;
+  // Поправка 4/A к форме, поданной раньше дня сигнала, чья сделка старше окна недавних покупок справочника: исходную строку ей
+  // найти не в чем, хотя в полных данных она есть (compute отдаёт такой поправке дату исходной формы, и в событие дня она не
+  // входит). Оставлять её нельзя: сама она отсеивается как поздняя, но «офицер» и просадка события берутся по всем строкам,
+  // включая отсеянные, — поправка офицера к давней сделке давала событию лишний балл (независимое чтение 20.11.2026, Ср2).
+  const cutRecent = addDaysIso(ref.asOf, -(ref.params?.recentDays ?? p.recentDays));
+  const mine = resolved.mine.filter(r => !(r.form === '4/A' && r.orig && r.orig < day && r.tdate < cutRecent));
   if (!mine.length) return { kind: 'skip', why: 'amend' };      // поправки и повторы раньше поданных форм: событие не сегодняшнее
   const cands = mine.map(r => {
     const bar = barAt(tk.bars, r.tdate);
@@ -267,7 +289,7 @@ export function evalEvent(ref, day, cik, rows, groups, p = SIGNAL) {
     pts: { v100k: row.mx >= MORNING.scoreVal ? 1 : 0, v1m: row.mx >= MORNING.bigVal ? 1 : 0, off: row.tags.includes('off') ? 1 : 0, deep: row.tags.includes('deep') ? 1 : 0 },
     mx: row.mx, val: row.val, rows: row.n, dv: row.dv, px: row.px, asOf: ref.asOf, dd: row.dd, role: row.role,
     td: lead._td, fpx: lead._fpx, same: lead._td >= day, units: !!tk.units,
-    accs: [...new Set(cands.filter(c => !c.drop).map(c => c._acc))],
+    accs: [...new Set(cands.filter(c => !c.drop).map(c => c._acc))], leadAcc: lead._acc,
   };
 }
 
@@ -297,14 +319,37 @@ export class DayState {
   // Новая запись form журнала ленты. seenAt — когда ленту увидела подачу (запись seen), nowMs — момент записи сигнала.
   // -> записи для файла сигналов (0 или 1)
   onForm(form, { seenAt = null, nowMs = Date.now() } = {}) {
-    if (!form || form.filed !== this.day || this.accs.has(form.acc)) return [];
-    this.accs.add(form.acc);
-    for (const r of form.trades ?? []) this.groups.addFiling(r.owners);
-    const buys = (form.trades ?? []).filter(r => r.code === 'P');
-    if (!buys.length) return [];
-    const cik = buys[0].cik;
-    (this.forms.get(cik) ?? this.forms.set(cik, []).get(cik)).push(form);
+    return this.onForms([form], { seenAtOf: () => seenAt, nowMs });
+  }
+  // Порция записей form, прочитанная из журнала за один раз (формы одного такта ленты). Сначала учитываются ВСЕ формы порции,
+  // потом событие каждого затронутого эмитента считается один раз: три формы одной цены, принятые в одну минуту, — это
+  // «синхронная подача» (признак размещения), и по первой из них сигнал уходить не должен (независимое чтение 20.11.2026, Ср1).
+  // Формы, пришедшие разными тактами, по-прежнему считаются по мере прихода. seenAtOf(acc) — когда лента увидела подачу;
+  // onError(cik, ошибка) — расчёт события одного эмитента не удался (остальные считаются). -> записи для файла сигналов
+  onForms(forms, { seenAtOf = () => null, nowMs = Date.now(), onError = null } = {}) {
+    const touched = new Map();       // cik -> форма порции, принятая SEC позже остальных: она и есть причина записи
+    for (const form of forms ?? []) {
+      if (!form || form.filed !== this.day || this.accs.has(form.acc)) continue;
+      this.accs.add(form.acc);
+      for (const r of form.trades ?? []) this.groups.addFiling(r.owners);
+      const buys = (form.trades ?? []).filter(r => r.code === 'P');
+      if (!buys.length) continue;
+      const cik = buys[0].cik;
+      (this.forms.get(cik) ?? this.forms.set(cik, []).get(cik)).push(form);
+      const prev = touched.get(cik);
+      if (!prev || (acceptedMs(form) ?? 0) >= (acceptedMs(prev) ?? 0)) touched.set(cik, form);
+    }
     if (this.off) return [];
+    const out = [];
+    for (const [cik, form] of touched) {
+      try { out.push(...this.evalIssuer(cik, form, { seenAt: seenAtOf(form.acc), nowMs })); }
+      catch (e) { if (onError) onError(cik, e); else throw e; }
+    }
+    return out;
+  }
+  // Событие эмитента cik после формы form (она уже учтена) -> записи для файла сигналов (0 или 1)
+  evalIssuer(cik, form, { seenAt = null, nowMs = Date.now() } = {}) {
+    const buys = (form.trades ?? []).filter(r => r.code === 'P');
     const all = this.forms.get(cik);
     const res = evalEvent(this.ref, this.day, cik, all.flatMap(f => f.trades ?? []), this.groups);
     const t = isoZ(nowMs);
@@ -320,11 +365,14 @@ export class DayState {
     this.sigs.set(cik, { n, score: res.score });
     const at = acceptedMs(form);
     const times = all.filter(f => res.accs.includes(f.acc)).map(acceptedMs).filter(x => x !== null);
-    const { kind, accs, ...body } = res;
+    // atmx — когда SEC приняла форму с крупнейшей покупкой события: в проверке рычага время события — именно оно, и бот входит,
+    // только если эта форма свежая (а не одна лишь форма, добавившая событию балл)
+    const lead = all.find(f => f.acc === res.leadAcc), atmx = lead ? acceptedMs(lead) : null;
+    const { kind, accs, leadAcc, ...body } = res;
     return [{
       k: 'sig', v: SIGNAL.v, day: this.day, cik, t: body.t, n, acc: form.acc,
       at: at === null ? null : isoZ(at), at0: times.length ? isoZ(Math.min(...times)) : (at === null ? null : isoZ(at)),
-      seen: seenAt ?? null, tw: t,
+      atmx: atmx === null ? null : isoZ(atmx), seen: seenAt ?? null, tw: t,
       score: body.score, pts: body.pts, mx: body.mx, val: body.val, rows: body.rows, dv: body.dv, px: body.px, asOf: body.asOf, dd: body.dd,
       role: body.role, td: body.td, fpx: body.fpx, same: body.same, units: body.units,
     }];

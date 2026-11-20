@@ -72,9 +72,10 @@ if (problem) {
 const seenAt = new Map();          // acc -> запись seen ленты: t — когда увидела подачу, upd — время приёма из самой ленты
 const samples = [];                // задержка по формам, пришедшим при работающем процессе
 let lastStat = null, alarmSaid = 0;
-function onRecord(r, { live, nowMs }) {
-  if (r.k === 'seen') { seenAt.set(r.acc, { t: r.t ?? null, upd: r.upd ?? null }); return; }
-  if (r.k !== 'form') return;
+// Запись журнала ленты: seen — запомнить, form — замер задержки. Возвращает запись form (её считает emit) или null
+function note(r, { live, nowMs }) {
+  if (r.k === 'seen') { seenAt.set(r.acc, { t: r.t ?? null, upd: r.upd ?? null }); return null; }
+  if (r.k !== 'form') return null;
   const seen = seenAt.get(r.acc);
   // Момент записи формы в журнал: поле w; у записей прежнего сборщика его нет — берётся время, когда лента увидела подачу
   const wMs = Date.parse(r.w ?? '') || Date.parse(seen?.t ?? '') || nowMs;
@@ -84,9 +85,17 @@ function onRecord(r, { live, nowMs }) {
     // в замер — формы, принятые сегодня в основную сессию
     if (at !== null && inSession(at, DAY)) samples.push({ t: wMs, lat: Math.max(0, (wMs - at) / 1000) });
   }
+  return r;
+}
+const seenIso = acc => { const t = seenAt.get(acc)?.t; return t ? isoZ(Date.parse(t)) : null; };
+const writtenMs = (r, nowMs) => Date.parse(r.w ?? '') || Date.parse(seenAt.get(r.acc)?.t ?? '') || nowMs;
+// Порция форм, прочитанная за один раз, считается целиком: событие эмитента пересчитывается один раз, после всех его форм порции
+// (DayState.onForms). Ошибка расчёта по одному эмитенту остальных не останавливает.
+function emit(forms, { live, nowMs }) {
+  if (!forms.length) return;
   let out = [];
-  try { out = state.onForm(r, { seenAt: seen?.t ? isoZ(Date.parse(seen.t)) : null, nowMs: REPLAY ? wMs : nowMs }); }
-  catch (e) { log(`форма ${r.acc}: расчёт не удался — ${e.message}`); }
+  try { out = state.onForms(forms, { seenAtOf: seenIso, nowMs, onError: (cik, e) => log(`эмитент ${cik}: расчёт не удался — ${e.message}`) }); }
+  catch (e) { log(`порция из ${forms.length} форм: расчёт не удался — ${e.message}`); }
   for (const rec of out) {
     write(rec);
     if (rec.k === 'sig') log(`СИГНАЛ ${rec.t} · скор ${rec.score} · №${rec.n} · покупка $${rec.mx} · оборот $${Math.round(rec.dv / 1e6)} млн · принята ${rec.at ?? '—'}${live ? '' : ' (накопившаяся форма)'}`);
@@ -118,8 +127,9 @@ function stat(nowMs, { force = false } = {}) {
   for (const [a, r] of j.seen) seenAt.set(a, { t: r.t ?? null, upd: r.upd ?? null });
   const today = existsSync(feedFile(FEED_DIR, DAY)) ? splitLines(readFileSync(feedFile(FEED_DIR, DAY))).recs.filter(r => r.k === 'form').map(r => r.acc) : [];
   const inToday = new Set(today);
-  // прошлые дни — сейчас; сегодняшний файл читается ниже с начала (в режиме --replay его формы идут как «живые»)
-  for (const r of j.forms.values()) if (!inToday.has(r.acc)) onRecord(r, { live: false, nowMs: Date.now() });
+  // прошлые дни — сейчас, одной порцией; сегодняшний файл читается ниже с начала (в режиме --replay его формы идут как «живые»)
+  const nowMs = Date.now();
+  emit([...j.forms.values()].filter(r => !inToday.has(r.acc)).map(r => note(r, { live: false, nowMs })).filter(Boolean), { live: false, nowMs });
 }
 
 // ---------- хвост сегодняшнего журнала ----------
@@ -142,10 +152,16 @@ function readNew() {
     rest = all.subarray(cut + 1).toString('latin1');
     const { recs } = splitLines(all.subarray(0, cut + 1));
     const live = !first || REPLAY;
-    for (const r of recs) {
-      const nowMs = REPLAY ? (Date.parse(r.w ?? r.t ?? '') || Date.parse(seenAt.get(r.acc)?.t ?? '') || Date.now()) : Date.now();
-      onRecord(r, { live, nowMs });
-      if (REPLAY && r.k === 'form') stat(nowMs);
+    if (REPLAY) {
+      // повтор прошлого журнала «по его же часам»: формы идут по одной, момент записи сигнала — момент записи формы в журнал
+      for (const r of recs) {
+        const nowMs = Date.parse(r.w ?? r.t ?? '') || Date.parse(seenAt.get(r.acc)?.t ?? '') || Date.now();
+        const f = note(r, { live, nowMs });
+        if (f) { emit([f], { live, nowMs: writtenMs(f, nowMs) }); stat(nowMs); }
+      }
+    } else {
+      const nowMs = Date.now();
+      emit(recs.map(r => note(r, { live, nowMs })).filter(Boolean), { live, nowMs });
     }
     return recs.length;
   } finally { closeSync(fd); first = false; }
