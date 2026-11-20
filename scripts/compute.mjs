@@ -26,6 +26,7 @@ import { readOpens, opensOf, nextTradingDay, OPENS_FROM } from './lib/opens.mjs'
 import { MORNING, BREADTH, HEALTH, buildDayFull, tradeResult, summarize, breadth, prevDays, signalHealth } from './lib/morning.mjs';
 import { listDayOf } from './lib/livecal.mjs';
 import { FPI, loadFpiRefs, fpiVerdict, tickersBeforeLaw, fpiStaleWarning } from './lib/fpi.mjs';
+import { buildIntradayRef } from './lib/intraday.mjs';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 
@@ -48,6 +49,13 @@ const SOURCE = argVal('--source', 'index');
 // процесс завершается (без ленты, бэктеста и портфелей). --plan файл.json — что докачать до сборки (бары D0, открытия D+1).
 const ONLY_MORNING = args.includes('--only-morning');
 const PLAN = argVal('--plan', null);
+// Справочник D−1 для сигнала в торговые часы (lib/intraday.mjs; ночной шаг сервера scripts/vps/intraday-ref.mjs): --intraday-ref файл.json
+// --intraday-for ГГГГ-ММ-ДД (день сигнала) [--intraday-universe файл.json — тикеры, чьи бары шаг перекачал: их цены читаются вместе
+// с бумагами последних дней подачи]. Без ключа --intraday-ref сборка не меняется ни в чём.
+const INTRADAY_REF = argVal('--intraday-ref', null);
+const INTRADAY_FOR = argVal('--intraday-for', null);
+const INTRADAY_UNIVERSE = INTRADAY_REF && argVal('--intraday-universe', null) ? new Set(readJson(argVal('--intraday-universe', null), [])) : null;
+if (INTRADAY_REF && !isIsoDate(INTRADAY_FOR)) throw new Error('--intraday-ref: нужен день сигнала --intraday-for ГГГГ-ММ-ДД');
 
 const today = isoToday();
 const HORIZONS = { 3: 63, 6: 126, 12: 252, 24: 504 };  // месяцы -> торговые дни
@@ -294,6 +302,8 @@ const leanTickers = ONLY_MORNING ? (() => {
   const set = new Set(recent.map(r => r.T)), ciks = new Set(recent.map(r => r.cik));
   const from = addDaysIso(leanFrom, -MORNING.prevMax);
   for (const r of buys) if (r.fdate >= from && ciks.has(r.cik)) set.add(r.T);
+  // справочник D−1: признак «другие единицы» и цены нужны по всем бумагам его вселенной
+  if (INTRADAY_UNIVERSE) for (const t of INTRADAY_UNIVERSE) set.add(t);
   return set;
 })() : null;
 for (const [t, rows] of byTicker) {
@@ -436,6 +446,17 @@ for (const r of buys) {
   // «живой» и исторический признак совпадают — отдельной point-in-time версии не нужно.
   r._set = r._gate.ok && r._dd !== null && r._dd >= SET_MAX_DD
     && r.val >= SET_MIN_VAL && (r._dv ?? 0) >= SET_MIN_DV ? 1 : 0;
+}
+
+// ---------- Справочник D−1 для сигнала в торговые часы ----------
+// Пишется после гейтов: по закрытым барам, теми же функциями и на тех же строках, что список. Ничего из посчитанного выше не меняет.
+if (INTRADAY_REF) {
+  const out = buildIntradayRef({
+    forDay: INTRADAY_FOR, spy, universe: INTRADAY_UNIVERSE, ref, symRanges, series, splits: allSplits, lowsMap, unitsMismatch,
+    drawdownAt, dollarVolumeAt, fpiRefs, fpiBefore, trades, history, ownerGroups,
+  });
+  writeJson(INTRADAY_REF, out);
+  console.log(`[compute] справочник D−1: бары по ${out.asOf}, день сигнала ${out.for}, бумаг ${out.n} (без свежего бара ${out.skipped.stale}, ниже запаса ${out.skipped.thin}, без ряда ${out.skipped.noCache})${out.fpiWarn.length ? '; ИНОСТРАННЫЕ ЭМИТЕНТЫ: ' + out.fpiWarn.join('; ') : ''}`);
 }
 
 // ---------- Payload ----------

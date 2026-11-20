@@ -1,0 +1,13 @@
+[Unit]
+Description=Инсайдерский радар 840 · сигнал в торговые часы: старт в 09:25 по Нью-Йорку, будни
+
+[Timer]
+Unit=insider840-signals.service
+# Процесс работает до 16:05 ET; в биржевой праздник выходит сразу. Формы с сегодняшней датой подачи, принятые накануне вечером,
+# он читает из журналов ленты прошлых дней при старте.
+OnCalendar=Mon..Fri *-*-* 09:25:00 America/New_York
+AccuracySec=1s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

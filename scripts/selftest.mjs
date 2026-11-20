@@ -4833,5 +4833,352 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   });
 }
 
+// ==================== КОНТУР B: сигнал в торговые часы (audit-840-levers-2026-11-17: B-ВНЕДРЕНИЕ.md, B-ПОСЛЕ-АУДИТА-ФОРМ.md) ====================
+// Справочник D−1 (compute --intraday-ref, vps/intraday-ref.mjs), расчёт события дня (lib/intraday.mjs), процесс сигналов (vps/signal-watch.mjs).
+{
+  const it = await import('./lib/intraday.mjs');
+  const { SIGNAL, LATENCY, DayState, OwnerGroups, evalEvent, refProblem, refDays, prevMarketDay, inSession, splitLines, latencyStat, acceptedMs, resolveToday } = it;
+  const { FEED } = await import('./lib/feed.mjs');
+  const { barClosedAtMs } = await import('./lib/session.mjs');
+  const ir = await import('./vps/intraday-ref.mjs');
+  const ny = w => nyToMs(w);
+
+  ok('контур B: время приёма формы в записи ленты — с секундами, у старых записей минутное', () => {
+    assert.equal(acceptedMs({ acs: '2026-11-20T11:31:07' }), Date.parse('2026-11-20T16:31:07Z'));
+    assert.equal(acceptedMs({ at: '2026-11-20T11:31' }), Date.parse('2026-11-20T16:31:00Z'), 'у старых записей ленты — минутное время');
+    assert.equal(acceptedMs({ trades: [{ at: '2026-07-01T11:31' }] }), Date.parse('2026-07-01T15:31:00Z'), 'летнее время');
+    assert.equal(acceptedMs({}), null);
+  });
+
+  ok('контур B: день справочника — последний закрытый бар и следующий торговый день (ночь, утро, выходные, праздник, сокращённый день)', () => {
+    const rd = w => { const ms = ny(w); return refDays(ms, w.slice(0, 10), barClosedAtMs); };
+    assert.deepEqual(rd('2026-11-19T23:52'), { asOf: '2026-11-19', forDay: '2026-11-20' }, 'ночной запуск');
+    assert.deepEqual(rd('2026-11-20T07:00'), { asOf: '2026-11-19', forDay: '2026-11-20' }, 'утренний повтор — тот же справочник');
+    assert.deepEqual(rd('2026-11-20T23:52'), { asOf: '2026-11-20', forDay: '2026-11-23' }, 'пятница — на понедельник');
+    assert.deepEqual(rd('2026-11-25T23:52'), { asOf: '2026-11-25', forDay: '2026-11-27' }, 'канун Дня благодарения — на пятницу');
+    assert.deepEqual(rd('2026-11-26T23:52'), { asOf: '2026-11-25', forDay: '2026-11-27' }, 'в праздник — тот же');
+    assert.deepEqual(rd('2026-11-27T13:09'), { asOf: '2026-11-25', forDay: '2026-11-27' }, 'сокращённый день: до 13:10 бар не закрыт');
+    assert.deepEqual(rd('2026-11-27T13:10'), { asOf: '2026-11-27', forDay: '2026-11-30' });
+    assert.deepEqual(rd('2026-11-20T16:09'), { asOf: '2026-11-19', forDay: '2026-11-20' }, 'до 16:10 бар дня не закрыт');
+    assert.equal(prevMarketDay('2026-11-23'), '2026-11-20'); assert.equal(prevMarketDay('2026-11-27'), '2026-11-25');
+    assert.equal(inSession(ny('2026-11-20T09:30'), '2026-11-20'), true); assert.equal(inSession(ny('2026-11-20T16:00'), '2026-11-20'), false);
+    assert.equal(inSession(ny('2026-11-27T13:00'), '2026-11-27'), false); assert.equal(inSession(ny('2026-11-26T12:00'), '2026-11-26'), false);
+  });
+
+  // Подставной справочник: AAA — $50, оборот $50 млн, просадка −35%; хвост из 14 баров до 19.11
+  const DAY = '2026-11-20', ASOF = '2026-11-19';
+  const barDays = bizDays('2026-11-02', ASOF);
+  const mkBars = (px, dd = -0.35, dv = 4e7) => barDays.map((d, i) => [d, px, dd, dv, 300 + i]);
+  const mkRef = (over = {}) => ({
+    v: 1, asOf: ASOF, for: DAY, built: '2026-11-20T04:55:00.000Z', n: 5, fpiWarn: [], months: ['2026-10', '2026-11'],
+    tickers: {
+      100: { t: 'AAA', name: 'Aaa Inc', px: 50, adv: 5e7, bars: mkBars(50) },
+      200: { t: 'FOR', name: 'Foreign Plc', px: 50, adv: 5e7, bars: mkBars(50), fpi: 'forms' },
+      300: { t: 'THN', name: 'Thin Co', px: 50, adv: 2.5e7, bars: mkBars(50) },
+      400: { t: 'UNI', name: 'Units Sa', px: 50, adv: 5e7, bars: mkBars(50), units: 1 },
+      500: { t: 'CHP', name: 'Cheap Co', px: 4.5, adv: 5e7, bars: mkBars(4.5) },
+      600: { t: 'FLT', name: 'Flat Co', px: 50, adv: 5e7, bars: mkBars(50, -0.05) },
+    },
+    lows: {}, routine: { '2026-10': [], '2026-11': [9001] }, regular: {}, groups: {}, recent: {}, ...over,
+  });
+  const P1 = [{ cik: 9000, name: 'Ivanov Ivan', rel: 'DOC', title: 'CEO' }], P2 = [{ cik: 9002, name: 'Petrov Petr', rel: 'D', title: '' }];
+  let accN = 0;
+  const row = (o = {}) => { const px = o.px ?? 50, sh = o.sh ?? 3000; return { acc: `ACC-${++accN}`, form: '4', fdate: DAY, tdate: ASOF, cik: 100, t: 'AAA', owners: P1, code: 'P', sh, px, val: Math.round(px * sh), di: 'D', b5: 0, sec: 'Common Stock', fn: {}, at: `${DAY}T11:31`, ...o }; };
+  const ev = (rows, ref = mkRef(), cik = rows[0].cik) => { const g = new OwnerGroups(ref); for (const r of rows) g.addFiling(r.owners); return evalEvent(ref, DAY, cik, rows, g); };
+
+  ok('контур B: событие по справочнику D−1 — скор и его слагаемые, цена, оборот и просадка по последнему закрытому бару', () => {
+    const r = ev([row()]);
+    assert.equal(r.kind, 'sig');
+    assert.deepEqual([r.t, r.score, r.pts, r.mx, r.val, r.rows], ['AAA', 3, { v100k: 1, v1m: 0, off: 1, deep: 1 }, 150000, 150000, 1]);
+    assert.deepEqual([r.px, r.dv, r.dd, r.asOf, r.role], [50, 5e7, -0.35, ASOF, 'C']);
+    assert.deepEqual([r.td, r.fpx, r.same, r.units], [ASOF, 50, false, false]);
+    // сделка, датированная днём сигнала: бара этого дня нет — сверяется с последним баром; запись несёт признак для итоговой сверки ботом
+    const s = ev([row({ tdate: DAY, px: 51 })]);
+    assert.equal(s.kind, 'sig'); assert.deepEqual([s.td, s.fpx, s.same], [DAY, 51, true]);
+    // покупка от $1 млн директора в бумаге без просадки: два балла за сумму
+    const b = ev([row({ cik: 600, t: 'FLT', owners: P2, sh: 30000 })]);
+    assert.deepEqual([b.kind, b.score, b.pts, b.role], ['sig', 2, { v100k: 1, v1m: 1, off: 0, deep: 0 }, 'D']);
+    // две строки двух лиц: крупнейшая задаёт балл, офицер — по любой строке, сумма — обе
+    const m = ev([row({ owners: P2, sh: 30000 }), row({ sh: 1000 })]);
+    assert.deepEqual([m.score, m.mx, m.val, m.rows], [4, 1500000, 1550000, 2]);
+  });
+
+  ok('контур B: события, которые сигнала не дают, — нет бумаги в справочнике, иностранный эмитент, оборот, цена, скор', () => {
+    assert.deepEqual(ev([row({ cik: 999, t: 'ZZZ' })]), { kind: 'skip', why: 'no_ref_ticker' });
+    assert.deepEqual(ev([row({ cik: 200, t: 'FOR' })]), { kind: 'skip', why: 'fpi', score: 3 });
+    assert.deepEqual(ev([row({ cik: 300, t: 'THN' })]), { kind: 'skip', why: 'dv', score: 3 }, 'оборот $25 млн: в справочнике есть, порога $30 млн нет');
+    assert.deepEqual(ev([row({ cik: 500, t: 'CHP', px: 4.5, sh: 40000 })]), { kind: 'skip', why: 'px' });
+    assert.deepEqual(ev([row({ cik: 600, t: 'FLT', owners: P2, sh: 3000 })]), { kind: 'skip', why: 'score', score: 1 });
+  });
+
+  ok('контур B: отсевы — те же, что у ночного списка, каждый на своём примере', () => {
+    const why = (rows, ref) => { const r = ev(rows, ref); return r.kind === 'skip' ? r.why : `sig ${r.score}`; };
+    assert.equal(why([row({ tdate: '2026-10-30' })]), 'gates:late', 'сделка старше 10 рабочих дней');
+    assert.equal(why([row({ px: 40 })]), 'gates:discount', 'на 20% ниже закрытия дня сделки, минимумов дня нет');
+    assert.equal(why([row({ px: 40 })], mkRef({ lows: { [`AAA|${ASOF}`]: [39.5, 41] } })), 'sig 3', 'цена внутри дневного диапазона — не скидка');
+    assert.equal(why([row({ px: 40, t: 'AAA.B' })], mkRef({ lows: { [`AAA|${ASOF}`]: [39.5, 41] } })), 'gates:discount', 'слой минимумов ключуется тикером формы');
+    assert.equal(why([row({ px: 70 })]), 'gates:premium', 'цена формы выше рынка в 1,25 раза');
+    assert.equal(why([row({ px: 600 })]), 'gates:outlier');
+    assert.equal(why([row({ sec: 'Series A Preferred Stock' })]), 'gates:security');
+    assert.equal(why([row({ b5: 1 })]), 'gates:planned'); assert.equal(why([row({ fn: { b5: 1 } })]), 'gates:planned');
+    assert.equal(why([row({ fn: { offering: 1 } })]), 'gates:offering'); assert.equal(why([row({ fn: { drip: 1 } })]), 'gates:drip');
+    assert.equal(why([row({ owners: [{ cik: 9001, name: 'Routine Roman', rel: 'DO', title: 'CFO' }] })]), 'gates:routine', 'рутинный по CMP в месяце сделки');
+    assert.equal(why([row({ owners: [{ cik: 9001, name: 'Routine Roman', rel: 'DO', title: 'CFO' }], tdate: '2026-10-30' })]), 'gates:late');
+    assert.equal(why([row({ owners: [{ cik: 7000, name: 'Big Capital Partners LP', rel: 'T', title: '' }] })]), 'gates:fund');
+    assert.equal(why([row({ sh: 100 })]), 'gates:minval', 'покупка меньше $10 тыс.');
+    assert.equal(why([row({ ad: 'D' })]), 'gates:disposed');
+    assert.equal(why([row({ sh: 4e9 })]), 'gates:badvalue');
+    assert.equal(why([row({ sh: 2e7 })], mkRef({ tickers: { 100: { t: 'AAA', name: 'Aaa', px: 50, adv: 5e7, bars: barDays.map((d, i) => [d, 50, -0.35, 2e6, 300 + i]) } } })), 'gates:capacity', 'сумма в сотни раз больше дневного оборота');
+    // признак эмитента «другие единицы»: отсеивается только строка, чья цена не сходится с котировкой
+    assert.equal(why([row({ cik: 400, t: 'UNI', px: 60 })]), 'gates:units'); assert.equal(why([row({ cik: 400, t: 'UNI', px: 51 })]), 'sig 3');
+    // синхронная подача: та же цена и дата у трёх независимых подателей (двое — во вчерашних формах справочника)
+    const prior = [1, 2].map(k => ({ acc: `OLD-${k}`, form: '4', fdate: ASOF, tdate: ASOF, cik: 100, code: 'P', sec: 'Common Stock', sh: 1000, px: 50, orig: null, owners: [{ cik: 8000 + k, name: `Fund ${k} LP` }] }));
+    assert.equal(why([row()], mkRef({ recent: { 100: prior } })), 'gates:sync');
+    assert.equal(why([row()], mkRef({ recent: { 100: prior }, groups: { 8001: 8002 } })), 'sig 3', 'двое прежних — одна группа: независимых подателей два');
+    assert.equal(why([row({ px: 50.01 })], mkRef({ recent: { 100: prior } })), 'sig 3', 'цена другая — не синхронная подача');
+    // регулярная серия: три прежние покупки с шагом 30 дней и четвёртая на том же шаге
+    const reg = { 9000: { 100: ['2026-08-21', '2026-09-20', '2026-10-20'] } };
+    assert.equal(why([row()], mkRef({ regular: reg })), 'gates:regular');
+    assert.equal(why([row()], mkRef({ regular: { 9000: { 100: ['2026-08-21', '2026-09-20', '2026-10-20', '2026-10-20'] } } })), 'sig 3', 'две записи одного дня — не расписание');
+    assert.equal(why([row()], mkRef({ regular: { 9000: { 777: reg[9000][100] } } })), 'sig 3', 'серия у другого эмитента не в счёт');
+    // сделка раньше хвоста ряда, но не поздняя — сверять не с чем
+    assert.equal(why([row({ tdate: '2026-11-10' })], mkRef({ tickers: { 100: { t: 'AAA', name: 'Aaa', px: 50, adv: 5e7, bars: mkBars(50).slice(-3) } } })), 'gates:nobar');
+    // молодая бумага: до сделки меньше 20 баров; ряд без оборота
+    assert.equal(why([row()], mkRef({ tickers: { 100: { t: 'AAA', name: 'Aaa', px: 50, adv: 5e7, bars: barDays.map((d, i) => [d, 50, null, 4e7, 5 + i]) } } })), 'gates:newlisting');
+    assert.equal(why([row()], mkRef({ tickers: { 100: { t: 'AAA', name: 'Aaa', px: 50, adv: 5e7, bars: barDays.map((d, i) => [d, 50, -0.35, null, 300 + i]) } } })), 'gates:noliq');
+  });
+
+  ok('контур B: поправка 4/A и повтор раньше поданной формы — не событие дня; сегодняшняя поправка к сегодняшней форме — событие', () => {
+    const old = { acc: 'OLD-1', form: '4', fdate: '2026-11-18', tdate: '2026-11-17', cik: 100, code: 'P', sec: 'Common Stock', sh: 3000, px: 50, orig: null, owners: P1.map(o => ({ cik: o.cik, name: o.name })) };
+    const ref = mkRef({ recent: { 100: [old] } });
+    assert.deepEqual(ev([row({ form: '4/A', tdate: '2026-11-17', orig: '2026-11-18', sh: 3100 })], ref), { kind: 'skip', why: 'amend' }, 'поправка берёт дату подачи исходной формы');
+    assert.deepEqual(ev([row({ tdate: '2026-11-17' })], ref), { kind: 'skip', why: 'amend' }, 'та же покупка подана повторно');
+    assert.equal(ev([row({ tdate: '2026-11-17', sh: 5000 })], ref).kind, 'sig', 'другая покупка того же лица за ту же дату — складывается');
+    const a = row({ tdate: '2026-11-18' }), b = row({ form: '4/A', tdate: '2026-11-18', orig: DAY, sh: 2000 });
+    const r = ev([a, b]);
+    assert.deepEqual([r.kind, r.rows, r.mx], ['sig', 1, 100000], 'поправка заместила исходную строку того же дня');
+    const { mine, all } = resolveToday([old], [row({ form: '4/A', tdate: '2026-11-17', orig: '2026-11-18', sh: 3100 })], DAY);
+    assert.equal(mine.length, 0); assert.equal(all.length, 1); assert.equal(all[0].fdate, '2026-11-18');
+  });
+
+  const formOf = (rows, hms, o = {}) => ({ k: 'form', acc: rows[0].acc, filed: DAY, at: `${DAY}T${hms.slice(0, 5)}`, acs: `${DAY}T${hms}`, w: new Date(ny(`${DAY}T${hms}`) + 40e3).toISOString(), rev: 3, end: true, trades: rows, amend: [], ...o });
+  ok('контур B: одна запись на эмитента в день; повторная — только при росте скора; пропуск пишется один раз; перезапуск ничего не дублирует', () => {
+    const ref = mkRef();
+    const f1 = formOf([row({ cik: 600, t: 'FLT', owners: P2, sh: 30000 })], '11:31:07');        // скор 2
+    const f2 = formOf([row({ cik: 600, t: 'FLT', sh: 500 })], '11:33:20');                     // офицер: скор 3
+    const f3 = formOf([row({ cik: 600, t: 'FLT', owners: [{ cik: 9005, name: 'Sidorov Sidor', rel: 'D', title: '' }], sh: 400 })], '11:40:00');   // ничего не добавляет
+    const f4 = formOf([row({ cik: 300, t: 'THN' })], '11:41:00'), f5 = formOf([row({ cik: 300, t: 'THN', sh: 1000 })], '11:42:00');
+    const s = new DayState(ref, DAY);
+    const now = ny(`${DAY}T11:31:50`);
+    const o1 = s.onForm(f1, { seenAt: '2026-11-20T16:31:40Z', nowMs: now });
+    assert.equal(o1.length, 1);
+    assert.deepEqual([o1[0].k, o1[0].v, o1[0].day, o1[0].cik, o1[0].t, o1[0].n, o1[0].acc, o1[0].score], ['sig', 1, DAY, 600, 'FLT', 1, f1.acc, 2]);
+    assert.deepEqual([o1[0].at, o1[0].at0, o1[0].seen, o1[0].tw], ['2026-11-20T16:31:07Z', '2026-11-20T16:31:07Z', '2026-11-20T16:31:40Z', '2026-11-20T16:31:50Z']);
+    assert.deepEqual(Object.keys(o1[0]), ['k', 'v', 'day', 'cik', 't', 'n', 'acc', 'at', 'at0', 'seen', 'tw', 'score', 'pts', 'mx', 'val', 'rows', 'dv', 'px', 'asOf', 'dd', 'role', 'td', 'fpx', 'same', 'units'], 'состав записи — как в договорённости с ботом');
+    assert.deepEqual(s.onForm(f1), [], 'та же подача второй раз не считается');
+    const o2 = s.onForm(f2, { nowMs: now + 120e3 });
+    assert.deepEqual([o2[0].k, o2[0].n, o2[0].score, o2[0].acc, o2[0].at, o2[0].at0, o2[0].rows], ['sig', 2, 3, f2.acc, '2026-11-20T16:33:20Z', '2026-11-20T16:31:07Z', 2], 'скор вырос — вторая запись, время — по форме, давшей рост');
+    assert.deepEqual(s.onForm(f3), [], 'скор не вырос — записи нет');
+    const k4 = s.onForm(f4, { nowMs: now });
+    assert.deepEqual([k4[0].k, k4[0].why, k4[0].t_, k4[0].cik, k4[0].score], ['skip', 'dv', 'THN', 300, 3]);
+    assert.deepEqual(s.onForm(f5), [], 'та же причина пропуска второй раз не пишется');
+    assert.deepEqual(s.onForm(formOf([{ ...row(), code: 'S' }], '11:50:00')), [], 'форма без покупок');
+    assert.deepEqual(s.onForm(formOf([row()], '11:51:00', { filed: ASOF })), [], 'форма с другой датой подачи');
+    // перезапуск: состояние из файла дня, формы — заново из журнала
+    const s2 = new DayState(ref, DAY, [...o1, ...o2, ...k4]);
+    for (const f of [f1, f2, f3, f4, f5]) assert.deepEqual(s2.onForm(f), []);
+    // день выключен — записей нет
+    const s3 = new DayState(ref, DAY, [{ k: 'off', why: 'fpi_warn' }]);
+    assert.deepEqual(s3.onForm(f1), []); assert.equal(s3.off, 'fpi_warn');
+  });
+
+  ok('контур B: справочник не на тот день, отсутствует или справочники иностранных эмитентов не готовы — сигналов нет весь день', () => {
+    assert.equal(refProblem(mkRef(), DAY), null);
+    assert.equal(refProblem(null, DAY).why, 'no_ref');
+    assert.equal(refProblem(mkRef({ for: ASOF }), DAY).why, 'stale_ref');
+    assert.equal(refProblem(mkRef({ asOf: '2026-11-18' }), DAY).why, 'stale_ref', 'бары старше предыдущего торгового дня');
+    assert.equal(refProblem(mkRef({ v: 2 }), DAY).why, 'bad_ref'); assert.equal(refProblem({ v: 1 }, DAY).why, 'bad_ref');
+    const w = refProblem(mkRef({ fpiWarn: ['справочник отчётов иностранных эмитентов устарел (по 2026-11-01, список за 2026-11-20)'] }), DAY);
+    assert.equal(w.why, 'fpi_warn'); assert.match(w.text, /устарел/);
+    assert.equal(refProblem(mkRef({ for: '2026-11-23', asOf: DAY }), '2026-11-23'), null, 'понедельник по барам пятницы');
+  });
+
+  ok('контур B: чтение дописываемого журнала — недописанная строка ждёт следующего чтения, испорченная пропускается', () => {
+    const a = splitLines('{"k":"seen","acc":"A"}\n{"k":"form","acc":"A"}\n{"k":"se');
+    assert.deepEqual(a.recs.map(r => r.k), ['seen', 'form']); assert.equal(a.rest, '{"k":"se');
+    const b = splitLines(a.rest + 'en","acc":"B"}\nмусор\n\n{"k":"stat"}\n');
+    assert.deepEqual(b.recs.map(r => r.k), ['seen', 'stat']); assert.equal(b.rest, '');
+    assert.deepEqual(splitLines('без перевода строки'), { recs: [], rest: 'без перевода строки' });
+    assert.deepEqual(splitLines(Buffer.from('{"k":"run"}\n')).recs, [{ k: 'run' }]);
+  });
+
+  ok('контур B: задержка ленты за час и тревога — медиана выше двух минут не меньше чем на пяти формах', () => {
+    const t0 = ny(`${DAY}T13:00`), mk = lats => lats.map((lat, i) => ({ t: t0 - i * 60e3, lat }));
+    assert.deepEqual(latencyStat([], t0), { n: 0, med: null, p90: null, ok90: null, alarm: false });
+    const okS = latencyStat(mk([40, 50, 51, 60, 95, 30]), t0);
+    assert.deepEqual([okS.n, okS.med, okS.alarm, okS.ok90], [6, 51, false, 0.833]);
+    assert.equal(latencyStat(mk([200, 300, 400, 500]), t0).alarm, false, 'четыре формы — мало для тревоги');
+    assert.equal(latencyStat(mk([200, 300, 400, 500, 50]), t0).alarm, true);
+    assert.equal(latencyStat(mk([200, 300, 40, 50, 60]), t0).alarm, false, 'медиана в норме');
+    assert.equal(latencyStat([...mk([40, 50, 60, 45, 55]), ...[200, 300, 400, 500, 600].map((lat, i) => ({ t: t0 - 61 * 60e3 - i, lat }))], t0).alarm, false, 'старше часа — вне окна');
+    assert.equal(LATENCY.alarmSec, 120); assert.equal(LATENCY.windowMin, 60);
+  });
+
+  // Процесс сигналов на подставных каталогах
+  const sigBase = join(ROOT, '.selftest-signals');
+  const watch = (argv) => new Promise(resolve => execFile(process.execPath, [join(ROOT, 'scripts', 'vps', 'signal-watch.mjs'), ...argv], { encoding: 'utf8' }, (err, so, se) => resolve({ code: err ? (err.code ?? 1) : 0, out: so + se })));
+  const runWatch = (dir, feedDir, extra = []) => watch(['--dir', dir, '--feed-dir', feedDir, '--day', DAY, '--once', ...extra]);
+  const linesOf = p => readFileSync(p, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l));
+  await okAsync('контур B: процесс сигналов — накопившиеся формы (в том числе вчерашнего вечера с сегодняшней датой подачи), файл дня, перезапуск без дублей, дописанная форма', async () => {
+    rmSync(sigBase, { recursive: true, force: true });
+    const dir = join(sigBase, 'sig'), feedDir = join(sigBase, 'feed');
+    mkdirSync(join(dir, 'ref'), { recursive: true }); mkdirSync(feedDir, { recursive: true });
+    writeJson(join(dir, 'ref', `${DAY}.json`), mkRef());
+    // вчера в 18:05 принята форма с сегодняшней датой подачи (скор 2), сегодня в 11:31 — вторая (скор 3)
+    const eve = { ...formOf([row({ cik: 600, t: 'FLT', owners: P2, sh: 30000 })], '11:00:00'), at: `${ASOF}T18:05`, acs: `${ASOF}T18:05:11`, w: '2026-11-19T23:05:50.000Z' };
+    const f2 = formOf([row({ cik: 600, t: 'FLT', sh: 500 })], '11:31:07'), f3 = formOf([row()], '11:32:00');
+    writeFileSync(feedFile(feedDir, ASOF), [{ k: 'seen', acc: eve.acc, filed: DAY, t: '2026-11-19T23:05:40.000Z' }, eve].map(x => JSON.stringify(x)).join('\n') + '\n');
+    writeFileSync(feedFile(feedDir, DAY), [{ k: 'run' }, { k: 'seen', acc: f2.acc, filed: DAY, t: '2026-11-20T16:31:40.000Z' }, f2].map(x => JSON.stringify(x)).join('\n') + '\n' + JSON.stringify(f3).slice(0, 80));
+    const out = join(dir, `${DAY}.jsonl`);
+    const r1 = await runWatch(dir, feedDir);
+    assert.equal(r1.code, 0, r1.out);
+    let L = linesOf(out);
+    assert.deepEqual(L.map(x => x.k), ['run', 'sig', 'sig'], 'недописанная третья форма не прочитана');
+    assert.deepEqual(L[0].ref, { asOf: ASOF, for: DAY, built: '2026-11-20T04:55:00.000Z', n: 5 });
+    assert.deepEqual([L[1].n, L[1].score, L[1].at, L[1].seen], [1, 2, '2026-11-19T23:05:11Z', '2026-11-19T23:05:40Z'], 'вечерняя форма: время приёма вчерашнее — бот её не возьмёт по сроку годности');
+    assert.deepEqual([L[2].n, L[2].score, L[2].at, L[2].at0, L[2].seen], [2, 3, '2026-11-20T16:31:07Z', '2026-11-19T23:05:11Z', '2026-11-20T16:31:40Z']);
+    // строка дописана, процесс перезапущен: прежние сигналы не повторяются, новый — один
+    writeFileSync(feedFile(feedDir, DAY), [{ k: 'run' }, { k: 'seen', acc: f2.acc, filed: DAY, t: '2026-11-20T16:31:40.000Z' }, f2, f3].map(x => JSON.stringify(x)).join('\n') + '\n');
+    const r2 = await runWatch(dir, feedDir);
+    assert.equal(r2.code, 0, r2.out);
+    L = linesOf(out);
+    assert.deepEqual(L.map(x => x.k), ['run', 'sig', 'sig', 'run', 'sig']); assert.deepEqual([L[4].t, L[4].n, L[4].score], ['AAA', 1, 3]);
+    const r3 = await runWatch(dir, feedDir);
+    assert.deepEqual(linesOf(out).map(x => x.k), ['run', 'sig', 'sig', 'run', 'sig', 'run'], 'третий запуск ничего не добавил'); assert.equal(r3.code, 0);
+    // биржевой праздник — процесс выходит сразу
+    const h = await watch(['--dir', dir, '--feed-dir', feedDir, '--day', '2026-11-26', '--once']);
+    assert.equal(h.code, 0); assert.match(h.out, /биржа не торгует/); assert.equal(existsSync(join(dir, '2026-11-26.jsonl')), false);
+  });
+  await okAsync('контур B: процесс сигналов — справочника нет или справочники иностранных эмитентов не готовы: запись off и ни одного сигнала; тревога по задержке на повторе журнала', async () => {
+    const feedDir = join(sigBase, 'feed2'), f = formOf([row()], '11:31:07');
+    mkdirSync(feedDir, { recursive: true });
+    writeFileSync(feedFile(feedDir, DAY), JSON.stringify(f) + '\n');
+    for (const [name, refObj, why] of [['none', null, 'no_ref'], ['warn', mkRef({ fpiWarn: ['нет справочника первой формы'] }), 'fpi_warn'], ['old', mkRef({ for: ASOF, asOf: '2026-11-18' }), 'stale_ref']]) {
+      const dir = join(sigBase, `off-${name}`);
+      mkdirSync(join(dir, 'ref'), { recursive: true });
+      if (refObj) writeJson(join(dir, 'ref', `${DAY}.json`), refObj);
+      const r = await runWatch(dir, feedDir);
+      assert.equal(r.code, 0, r.out); assert.match(r.out, /СИГНАЛОВ СЕГОДНЯ НЕТ/);
+      let L = linesOf(join(dir, `${DAY}.jsonl`));
+      assert.deepEqual(L.map(x => x.k), ['run', 'off']); assert.equal(L[1].why, why); assert.ok(L[1].text.length > 10);
+      // справочник появился позже — день всё равно выключен (запись off действует до конца дня)
+      writeJson(join(dir, 'ref', `${DAY}.json`), mkRef());
+      await runWatch(dir, feedDir);
+      L = linesOf(join(dir, `${DAY}.jsonl`));
+      assert.deepEqual(L.map(x => x.k), ['run', 'off', 'run'], 'второй раз off не пишется, сигналов нет');
+    }
+    // без --once процесс с выключенным днём выходит с кодом 3 (тревога юнита без перезапуска)
+    const c = await watch(['--dir', join(sigBase, 'off-code'), '--feed-dir', feedDir, '--day', DAY]);
+    assert.equal(c.code, 3, c.out);
+    const unit = readFileSync(join(ROOT, 'ops', 'insider840-signals', 'insider840-signals.service'), 'utf8').replace(/\r/g, '');
+    assert.match(unit, /\nRestartPreventExitStatus=3\n/); assert.match(unit, /\nCPUWeight=400\n/); assert.match(unit, /\nStateDirectoryMode=0755\n/);
+    // повтор журнала: шесть форм торговых часов с задержкой от 200 секунд — запись stat с тревогой; с обычной задержкой тревоги нет
+    for (const [name, lag, alarm] of [['slow', 200, true], ['fast', 40, false]]) {
+      const fd = join(sigBase, `feed-${name}`), dir = join(sigBase, `lat-${name}`);
+      mkdirSync(fd, { recursive: true }); mkdirSync(join(dir, 'ref'), { recursive: true });
+      writeJson(join(dir, 'ref', `${DAY}.json`), mkRef());
+      const forms = [0, 1, 2, 3, 4, 5].map(i => { const hms = `11:${String(10 + i * 5).padStart(2, '0')}:00`; return { ...formOf([{ ...row(), code: 'S' }], hms), w: new Date(ny(`${DAY}T${hms}`) + lag * 1000).toISOString() }; });
+      writeFileSync(feedFile(fd, DAY), forms.map(x => JSON.stringify(x)).join('\n') + '\n');
+      const r = await runWatch(dir, fd, ['--replay']);
+      assert.equal(r.code, 0, r.out);
+      const st = linesOf(join(dir, `${DAY}.jsonl`)).filter(x => x.k === 'stat');
+      assert.equal(st.some(x => x.alarm === true), alarm, r.out);
+      if (alarm) { const a = st.find(x => x.alarm); assert.ok(a.med > 120 && a.n >= 5); assert.match(r.out, /ТРЕВОГА: медиана задержки ленты/); assert.equal(st.filter(x => x.alarm).length, 1, 'не чаще раза в час'); }
+    }
+    rmSync(sigBase, { recursive: true, force: true });
+  });
+
+  // Справочник D−1 от самого compute: без ключа сборка не меняется; событие по справочнику равно строке списка, посчитанной compute
+  await okAsync('контур B: compute --intraday-ref — список тот же, что без ключа; событие по справочнику равно строке списка самого compute на тех же барах', async () => {
+    const base = join(ROOT, '.selftest-intraday'), data = join(base, 'repo');
+    rmSync(base, { recursive: true, force: true });
+    for (const d of ['trades', 'reference', 'prices', 'state']) cpSync(join(TMP, d), join(data, d), { recursive: true });
+    const spy = readPriceCache(data, 'SPY'), asOf = spy.at(-1)[0];
+    let forDay = addDaysIso(asOf, 1); while (isMarketClosed(forDay)) forDay = addDaysIso(forDay, 1);
+    const run = (site, extra = []) => execFileSync(process.execPath, [join(ROOT, 'scripts', 'compute.mjs'), '--data', data, '--site', join(base, site), '--only-morning', '--builder', 'vps', ...extra], { encoding: 'utf8', stdio: 'pipe' });
+    const strip = m => ({ ...m, builtAt: null });
+    run('plain');
+    const refFile = join(base, 'ref.json');
+    const out = run('withref', ['--intraday-ref', refFile, '--intraday-for', forDay]);
+    assert.match(out, /справочник D−1: бары по /);
+    assert.deepEqual(strip(readJson(join(base, 'withref', 'data', 'morning.json'))), strip(readJson(join(base, 'plain', 'data', 'morning.json'))), 'ключ --intraday-ref список не меняет');
+    assert.throws(() => run('bad', ['--intraday-ref', refFile]), /intraday-for/, 'без дня сигнала — отказ');
+    const ref = readJson(refFile);
+    assert.deepEqual([ref.v, ref.asOf, ref.for, ref.n], [1, asOf, forDay, 1], 'в справочнике одна бумага: ALFA ушла с биржи (нет свежего бара), OTCX — внебиржевая');
+    assert.equal(refProblem(ref, forDay)?.why, prevMarketDay(forDay) === asOf ? 'fpi_warn' : 'stale_ref', 'в фикстуре нет справочников иностранных эмитентов — день был бы выключен');
+    const tk = ref.tickers[222];
+    assert.deepEqual([tk.t, tk.name, tk.bars.length, tk.bars.at(-1)[0]], ['LIVA', 'Liva Inc', SIGNAL.tailBars, asOf]);
+    assert.equal(tk.px, livaSeries.find(r => r[0] === asOf)[1]); assert.ok(tk.adv > 5e7);
+    assert.ok(ref.recent[222].some(r => r.acc === 'L1'), 'недавняя покупка — в справочнике (поправки, синхронные подачи)');
+    assert.ok(ref.fpiWarn.length >= 1);
+    // форма дня сигнала: директор и CEO, цена сделки — закрытие asOf; эталон — compute с этой формой в шарде на тех же барах
+    const px = tk.px, mk = (acc, owners, sh, tdate) => T({ acc, fdate: forDay, tdate, cik: 222, t: 'LIVA', owners, code: 'P', sh, px, val: Math.round(px * sh), own: 9e4, sec: 'Common Stock', at: `${forDay}T11:31` });
+    const today2 = [mk('N1', dir, 20000, asOf), mk('N2', ceo, 2000, forDay)];
+    const g = new OwnerGroups(ref); for (const r of today2) g.addFiling(r.owners);
+    const sig = evalEvent({ ...ref, fpiWarn: [] }, forDay, 222, today2, g);
+    const shard = readJsonGz(join(data, 'trades', 'live.json.gz'));
+    writeJsonGz(join(data, 'trades', 'live.json.gz'), { ...shard, trades: [...shard.trades, ...today2] });
+    run('oracle');
+    const w = readJson(join(base, 'oracle', 'data', 'morning.json')).days.find(d => d.date === forDay).rows.find(r => r.t === 'LIVA');
+    assert.equal(sig.kind, 'sig');
+    assert.deepEqual([sig.score, sig.mx, sig.val, sig.rows, sig.dv, sig.px, sig.dd, sig.role], [w.score, w.mx, w.val, w.n, w.dv, w.px, w.dd, w.role], 'скор, суммы, оборот, цена, просадка — как у compute');
+    assert.deepEqual([sig.score, sig.pts.v1m, sig.pts.off, sig.same], [3, 1, 1, false]);
+    // вселенная шага справочника: по кэшу цен, биржевые бумаги с запасом по обороту и цене; устаревший кэш не берётся
+    const u = ir.pickUniverse(data, asOf);
+    assert.deepEqual(Object.keys(u.universe), ['LIVA']); assert.equal(u.universe.LIVA, asOf); assert.equal(u.stat.stale, 1, 'ALFA: кэш кончился в 2021 году');
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  await okAsync('контур B: шаг справочника — бары вселенной через воркер, бар незакрытого дня и бары позже asOf не берутся, готовый справочник не пересобирается', async () => {
+    const base = join(ROOT, '.selftest-intraday2'), state = join(base, 'state'), data = join(state, 'build', 'repo');
+    rmSync(base, { recursive: true, force: true });
+    for (const d of ['trades', 'reference', 'prices', 'state']) cpSync(join(TMP, d), join(data, d), { recursive: true });
+    // «сейчас» — 07:00 ET сегодняшнего (или ближайшего) торгового дня: бар этого дня не закрыт, asOf — предыдущий торговый день
+    let day = nyWall(Date.now()).slice(0, 10); while (isMarketClosed(day)) day = addDaysIso(day, 1);
+    const nowIso = new Date(nyToMs(`${day}T07:00`)).toISOString(), asOf = prevMarketDay(day);
+    // в копии данных ряды кончаются за два дня до asOf; источник отдаёт ряд по сегодняшний день включительно (недозакрытый бар)
+    const cutAt = prevMarketDay(asOf);
+    for (const sym of ['SPY', 'IWM', 'LIVA']) writePriceCache(data, sym, readPriceCache(data, sym).filter(r => r[0] < cutAt));
+    const flat = bizDays('2015-01-01', day).filter(d => !isMarketClosed(d)).map(d => [d, 100, 100, 1e6]);
+    const liva = bizDays('2024-01-02', day).filter(d => !isMarketClosed(d)).map(d => [d, d === day ? 99 : 60, d === day ? 99 : 60, 1e6]);
+    const src = { SPY: flat, IWM: flat, LIVA: liva };
+    const asked = [];
+    const api = await fakeWorker({ charts: Object.fromEntries(Object.entries(src).map(([sym, s]) => [sym, from => { asked.push([sym, from]); const rows = s.filter(r => r[0] >= from), c = chartOf(rows); c.chart.result[0].indicators.quote[0].low = rows.map(r => r[1] * 0.99); return c; }])) });
+    try {
+      const args = ['--state', state, '--no-sync', '--once', '--now', nowIso, '--min-tickers', '1'];
+      const code = await ir.main(args, { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+      assert.equal(code, 0);
+      const ref = readJson(join(state, 'ref', `${day}.json`));
+      assert.deepEqual([ref.asOf, ref.for, ref.n], [asOf, day, 1]);
+      assert.equal(ref.tickers[222].px, 60, 'цена — закрытие asOf, а не недозакрытый бар сегодняшнего дня (99)');
+      assert.equal(ref.tickers[222].bars.at(-1)[0], asOf);
+      assert.equal(readPriceCache(data, 'LIVA').at(-1)[0], asOf, 'бар незакрытого дня в копию данных не записан');
+      assert.deepEqual(asked.map(x => x[0]).sort(), ['IWM', 'LIVA', 'SPY']);
+      assert.ok(asked.every(([, from]) => from <= addDaysIso(asOf, -ir.REF.barsBackDays)), 'запрос с перекрытием: минимумы дня нужны за последние бары');
+      assert.ok(Object.keys(ref.lows).some(k => k.startsWith('LIVA|')), 'минимумы дня последних баров — в справочнике');
+      // второй запуск: справочник на этот день по этим барам уже лежит — к источнику не ходим
+      const n = asked.length;
+      assert.equal(await ir.main(args, { PAPER_URL: api.base, PAPER_TOKEN: 'tok' }), 0); assert.equal(asked.length, n);
+      // источник цен не отвечает — справочник не собран, код 1 (тревога)
+      rmSync(join(state, 'ref', `${day}.json`));
+      const dead = await ir.main(['--state', state, '--no-sync', '--once', '--now', nowIso], { PAPER_URL: 'http://127.0.0.1:9', PAPER_TOKEN: 'tok' });
+      assert.equal(dead, 1); assert.equal(existsSync(join(state, 'ref', `${day}.json`)), false);
+      assert.equal(await ir.main(['--state', state, '--no-sync', '--once', '--now', nowIso], { PAPER_URL: api.base }), 1, 'без токена воркера — отказ');
+      assert.equal(await ir.main(['--state', state, '--no-sync', '--once', '--now', nowIso], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' }), 1, 'справочник из одной бумаги — не справочник (порог --min-tickers)');
+    } finally { await api.close(); rmSync(base, { recursive: true, force: true }); }
+    assert.equal(ir.closedOnly({ series: [['2026-11-19', 1, 1, 1], ['2026-11-20', 2, 2, 2]], ohlc: [['2026-11-19', 1, 1], ['2026-11-20', 2, 2]], lows: [['2026-11-19', 1], ['2026-11-20', 2]] }, '2026-11-19', nyToMs('2026-11-20T23:52')).series.length, 1, 'бары позже asOf срезаются и после закрытия');
+  });
+}
+
 rmSync(TMP, { recursive: true, force: true });
 console.log(`Самотесты: ${passed} ok${process.exitCode ? ', ЕСТЬ ПАДЕНИЯ' : ''}`);

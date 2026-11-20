@@ -1,0 +1,37 @@
+[Unit]
+Description=Инсайдерский радар 840 · справочник D−1 для сигнала в торговые часы: ветка data → бары вселенной через воркер → compute --intraday-ref → /var/lib/insider840-signals/ref
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dash
+Group=dash
+WorkingDirectory=/srv/dash/repo-840
+# Воркер и токен — те же, что у сборки утреннего списка (бары через GET /bars); в воркер и в ветку data шаг ничего не пишет
+EnvironmentFile=/usr/local/etc/insider840-morning/env
+Environment=NODE_ENV=production
+# git и Node пишут только в каталог состояния (ProtectHome и ProtectSystem=strict закрывают остальное)
+Environment=HOME=/var/lib/insider840-signals/build
+# Старт — таймером в 23:52 ET (после сборки списка и ночного прогона GitHub) и повтор в 07:00 ET: справочник на нужный день уже
+# лежит — выход без работы. Попытки каждые 5 минут не дольше полутора часов; не собрал — выход с ошибкой и тревога: в этот день
+# процесс сигналов запишет «off», контур бота молчит.
+ExecStart=/usr/bin/node scripts/vps/intraday-ref.mjs --state /var/lib/insider840-signals --max-min 90 --interval 300
+TimeoutStartSec=7200
+SyslogIdentifier=insider840-signals-ref
+
+StateDirectory=insider840-signals
+# Файлы сигналов дня читает пользователь ib840 (бот): каталог открыт на чтение, данные в нём публичные
+StateDirectoryMode=0755
+UMask=0022
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+# compute читает ряды всей вселенной справочника (около 2 тыс. бумаг): пик памяти — как у сборки списка
+MemoryHigh=3G
+MemoryMax=4G
+Nice=10
+
+# Тревога из systemd: ИМЕННО ExecStopPost, а не OnFailure (приходит и «упало», и «снова проходит»)
+ExecStopPost=-+/usr/local/sbin/dash-alert %n
