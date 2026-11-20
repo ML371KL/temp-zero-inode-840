@@ -352,6 +352,15 @@ export function acceptedAt(header) {
   const date = `${m[1]}-${m[2]}-${m[3]}`;
   return isIsoDate(date) && Number(m[4]) < 24 && Number(m[5]) < 60 ? `${date}T${m[4]}:${m[5]}` : null;
 }
+// То же время с секундами — «ГГГГ-ММ-ДДTчч:мм:сс» по Нью-Йорку. Нужно только ленте на весь день (поле acs записи form журнала): по
+// нему считается задержка «принято SEC → запись» и срок годности сигнала в торговые часы. Поле at строк остаётся минутным — оно
+// идёт в morning.json.
+export function acceptedAtSec(header) {
+  const m = /<ACCEPTANCE-DATETIME>(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(header ?? '');
+  if (!m) return null;
+  const date = `${m[1]}-${m[2]}-${m[3]}`;
+  return isIsoDate(date) && Number(m[4]) < 24 && Number(m[5]) < 60 && Number(m[6]) < 60 ? `${date}T${m[4]}:${m[5]}:${m[6]}` : null;
+}
 
 // Полный .txt сабмишен -> { trades, amend } (та же схема, что из датасета)
 export function parseForm4Txt(txt, acc, fdate) {

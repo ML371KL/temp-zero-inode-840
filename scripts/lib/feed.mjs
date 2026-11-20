@@ -4,6 +4,8 @@
 import { existsSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { addDaysIso } from './util.mjs';
+import { nyWall, nyToMs } from './nytime.mjs';
+import { marketCloseEt } from './calendar.mjs';
 
 // timeoutMs и retries — запрос к SEC: 10 с и один повтор (худший случай ~22 с вместо 230); backDays — за сколько прошлых дней сборщик
 // читает журналы при старте (длинные выходные); blindExitMin — слепота, после которой сборщик выходит с ошибкой (не меньше blindMinTicks
@@ -11,8 +13,19 @@ import { addDaysIso } from './util.mjs';
 // maxTries — сколько раз ждём файл подачи, которого у SEC ещё нет (ответ «нет файла») или который пришёл оборванным; maxNetFails —
 // сколько сбоев сети по одной подаче терпим за запуск (сбой сети попытку не списывает: иначе короткий сбой выбивал бы из очереди
 // первые подачи до конца дня).
-export const FEED = { from: '06:00', until: '22:00', intervalSec: 45, keepDays: 14, maxTries: 6, maxNetFails: 20, timeoutMs: 10000, retries: 1, backDays: 4, blindExitMin: 15, blindMinTicks: 3 };
+// rthIntervalSec — шаг опроса в основную сессию биржи (09:30 — закрытие): по форме, принятой SEC в торговые часы, считается сигнал
+// контура B бота (lib/intraday.mjs), и минута ожидания в начале стоит ему 0,09% на сделку. Лимит SEC — 10 запросов в секунду с
+// адреса, лента держит не больше 2,5.
+export const FEED = { from: '06:00', until: '22:00', intervalSec: 45, rthIntervalSec: 15, rthFrom: '09:30', keepDays: 14, maxTries: 6, maxNetFails: 20, timeoutMs: 10000, retries: 1, backDays: 4, blindExitMin: 15, blindMinTicks: 3 };
 export const feedFile = (dir, nyDate) => join(dir, `${nyDate}.jsonl`);
+// Шаг опроса ленты в момент nowMs, секунд: rth — в основную сессию торгового дня (в сокращённый день она кончается в 13:00), base — в
+// остальное время. rth не задан или не меньше base — всегда base.
+export function feedIntervalSec(nowMs, base = FEED.intervalSec, rth = FEED.rthIntervalSec, p = FEED) {
+  if (!(rth > 0) || rth >= base) return base;
+  const day = nyWall(nowMs).slice(0, 10), close = marketCloseEt(day);
+  if (!close) return base;
+  return nowMs >= nyToMs(`${day}T${p.rthFrom}`) && nowMs < nyToMs(`${day}T${close}`) ? rth : base;
+}
 // Запись form журнала годится ночной сборке вместо своей загрузки: разобрана той же ревизией разбора, файл скачан целиком, подана в
 // день индекса. Одно условие на оба места — первый источник форм (live.mjs --feed-dir) и добор недоставших (morning-build.mjs).
 export const feedFormUsable = (f, day, rev) => !!f && f.rev === rev && f.end === true && f.filed === day && Array.isArray(f.trades);
@@ -22,8 +35,9 @@ export const feedFormStale = (f, day) => !!f && f.end !== false && f.filed === d
 
 // Журнал JSONL, по записи в строке:
 //   run  — старт сборщика; seen — номер подачи замечен в ленте {acc, cik, form, filed, upd, t};
-//   form — полный .txt скачан и разобран {acc, filed, at, rev, end, trades, amend} (строки P и S — как у живого контура;
-//          rev — ревизия разбора PARSER_REV, end — файл скачан целиком; у записей до 11.2026 этих полей нет);
+//   form — полный .txt скачан и разобран {acc, filed, at, acs, w, rev, end, trades, amend} (строки P и S — как у живого контура;
+//          rev — ревизия разбора PARSER_REV, end — файл скачан целиком; у записей до 11.2026 этих полей нет; acs — время приёма SEC
+//          с секундами по Нью-Йорку, w — когда запись сделана (UTC): их читает только процесс сигналов, сборка списка — нет);
 //   stat — такт опроса {t, polls, errors, forms, pending, gap}.
 // Оборванная последней строка (убили процесс посреди записи) не ломает чтение.
 export function parseFeedJournal(text) {

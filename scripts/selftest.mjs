@@ -2616,7 +2616,7 @@ await okAsync('лента: сборщик — подачи дня замечаю
     assert.deepEqual([...j.seen.keys()], ['0001000000-26-000011', '0001000000-26-000012'], '424B2 чужого типа не замечается');
     assert.deepEqual([...j.forms.keys()], ['0001000000-26-000011'], 'вторая подача ещё не отдаётся (404) — только замечена');
     const form = j.forms.get('0001000000-26-000011');
-    assert.equal(form.filed, day); assert.equal(form.at, `${day}T10:15`); assert.ok(form.trades.length >= 1 && form.trades.every(t => t.acc === '0001000000-26-000011' && t.fdate === day), 'строки как у живого контура, дата подачи из ленты');
+    assert.equal(form.filed, day); assert.equal(form.at, `${day}T10:15`); assert.equal(form.acs, `${day}T10:15:00`, 'время приёма с секундами — для сигнала в торговые часы'); assert.ok(Date.parse(form.w) > 0); assert.ok(form.trades.length >= 1 && form.trades.every(t => t.acc === '0001000000-26-000011' && t.fdate === day), 'строки как у живого контура, дата подачи из ленты');
     hits.b404 = false;
     const r2 = await run();
     assert.equal(r2.code, 0, r2.out);
@@ -4803,6 +4803,33 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       assert.equal(r.ok, true, r.why); assert.equal(last.summary.rows, 25);
       assert.ok(lines.some(l => /бар не перекачан у 5 бумаг \(L21A, L22A, L23A, L24A, L25A\)/.test(l)), 'предупреждение называет бумаги, до которых воркер не дошёл');
     } finally { console.log = orig; await new Promise(r => srv.close(r)); rmSync(base, { recursive: true, force: true }); }
+  });
+}
+
+// ==================== КОНТУР B: лента в торговые часы (audit-840-levers-2026-11-17: B-ВНЕДРЕНИЕ.md, раздел 5; B-ПОСЛЕ-АУДИТА-ФОРМ.md, 5.3) ====================
+{
+  const { acceptedAtSec } = await import('./lib/edgar.mjs');
+  const { feedIntervalSec, FEED } = await import('./lib/feed.mjs');
+  const ny = w => nyToMs(w);
+
+  ok('контур B: время приёма формы с секундами — рядом с минутным, которое идёт в список', () => {
+    const h = '<SEC-HEADER>x\n<ACCEPTANCE-DATETIME>20261120113107\nACCESSION NUMBER: 1\n';
+    assert.equal(acceptedAtSec(h), '2026-11-20T11:31:07'); assert.equal(acceptedAt(h), '2026-11-20T11:31', 'минутное поле не изменилось');
+    assert.equal(acceptedAtSec('<ACCEPTANCE-DATETIME>20261120256107'), null); assert.equal(acceptedAtSec('<ACCEPTANCE-DATETIME>202611201131'), null);
+    assert.equal(acceptedAtSec(''), null); assert.equal(acceptedAtSec(null), null);
+  });
+
+  ok('контур B: шаг опроса ленты — 15 секунд в основную сессию, 45 вне её; сокращённый день, выходной, праздник', () => {
+    const f = w => feedIntervalSec(ny(w), 45, 15);
+    assert.equal(FEED.rthIntervalSec, 15); assert.equal(FEED.intervalSec, 45);
+    assert.deepEqual(['2026-11-20T09:29:59', '2026-11-20T09:30:00', '2026-11-20T12:00', '2026-11-20T15:59:59', '2026-11-20T16:00:00', '2026-11-20T06:00', '2026-11-20T21:59'].map(f), [45, 15, 15, 15, 45, 45, 45]);
+    assert.deepEqual(['2026-11-27T12:59:59', '2026-11-27T13:00:00', '2026-11-27T15:00'].map(f), [15, 45, 45], 'пятница после Дня благодарения: сессия до 13:00');
+    assert.deepEqual(['2026-11-21T12:00', '2026-11-26T12:00', '2026-04-03T12:00'].map(f), [45, 45, 45], 'суббота, День благодарения, Страстная пятница');
+    assert.equal(f('2026-07-01T10:00'), 15, 'летнее время');
+    assert.equal(feedIntervalSec(ny('2026-11-20T12:00'), 45, 0), 45, '--rth-interval 0 — прежний шаг весь день');
+    assert.equal(feedIntervalSec(ny('2026-11-20T12:00'), 30, 60), 30, 'шаг сессии не может быть реже обычного');
+    const unit = readFileSync(join(ROOT, 'ops', 'insider840-feed', 'insider840-feed.service'), 'utf8').replace(/\r/g, '');
+    assert.match(unit, /--interval 45 --rth-interval 15\n/); assert.match(unit, /\nCPUWeight=400\n/);
   });
 }
 

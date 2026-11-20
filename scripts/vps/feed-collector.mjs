@@ -2,7 +2,8 @@
 // в журнал JSONL (/var/lib/insider840-feed/ГГГГ-ММ-ДД.jsonl). В 22:03 сборка списка (morning-build.mjs) сверяет индекс EDGAR с лентой:
 // второй, независимый путь к тем же подачам. Нет индекса к 23:30 ET — список собирается по ленте с пометкой источника.
 //
-//   node scripts/vps/feed-collector.mjs [--dir /var/lib/insider840-feed] [--from 06:00] [--until 22:00] [--interval 45] [--once] [--dry-run]
+//   node scripts/vps/feed-collector.mjs [--dir /var/lib/insider840-feed] [--from 06:00] [--until 22:00] [--interval 45] [--rth-interval 15] [--once] [--dry-run]
+// --rth-interval — шаг опроса в основную сессию биржи (по умолчанию FEED.rthIntervalSec; 0 — как --interval весь день).
 //
 // Ограничения: SEC — только politeFetch с SEC_UA проекта, не чаще 2,5 запроса в секунду (запас до 10 в секунду, которые SEC разрешает
 // с адреса: в 22:03 рядом работает сборка списка); лента — до 300 записей на такт (три страницы), глубже не идём:
@@ -21,9 +22,9 @@
 //    (StartLimitBurst=6 за час) не достигается — сборщик переживает сбой любой длины и возвращается сам.
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { politeFetch, SEC_UA } from '../lib/util.mjs';
-import { parseForm4Txt, acceptedAt, edgarBase, PARSER_REV } from '../lib/edgar.mjs';
+import { parseForm4Txt, acceptedAt, acceptedAtSec, edgarBase, PARSER_REV } from '../lib/edgar.mjs';
 import { nyWall, nyToMs } from '../lib/nytime.mjs';
-import { FEED, feedFile, loadFeed, pruneFeed, parseAtom, filingPath, formComplete } from '../lib/feed.mjs';
+import { FEED, feedFile, loadFeed, pruneFeed, parseAtom, filingPath, formComplete, feedIntervalSec } from '../lib/feed.mjs';
 
 const args = process.argv.slice(2);
 const argVal = (n, d) => { const i = args.indexOf(n); return i >= 0 ? args[i + 1] : d; };
@@ -31,6 +32,7 @@ const DIR = argVal('--dir', process.env.FEED_DIR || '/var/lib/insider840-feed');
 const FROM = argVal('--from', FEED.from);
 const UNTIL = argVal('--until', FEED.until);
 const INTERVAL_MS = Number(argVal('--interval', String(FEED.intervalSec))) * 1000;
+const RTH_INTERVAL_SEC = Number(argVal('--rth-interval', String(FEED.rthIntervalSec)));
 const ONCE = args.includes('--once');
 const DRY = args.includes('--dry-run');
 const GAP_MS = 400;                                              // ≤ 2,5 запроса в секунду к SEC
@@ -87,7 +89,8 @@ async function fetchForm(s) {
   const parsed = parseForm4Txt(txt, s.acc, filed);
   // rev — ревизия разбора, end — файл подачи скачан целиком: ночная сборка берёт из журнала только формы, разобранные её же
   // разбором и полные (live.mjs --feed-dir), остальные качает сама
-  write({ k: 'form', acc: s.acc, filed, at: at ?? null, rev: PARSER_REV, end: true, trades: parsed.trades, amend: parsed.amend });
+  // acs и w — для процесса сигналов в торговые часы (scripts/vps/signal-watch.mjs): время приёма SEC с секундами и момент записи
+  write({ k: 'form', acc: s.acc, filed, at: at ?? null, acs: acceptedAtSec(head), w: new Date().toISOString(), rev: PARSER_REV, end: true, trades: parsed.trades, amend: parsed.amend });
   forms.add(s.acc);
   return true;
 }
@@ -127,7 +130,7 @@ async function tick(stat) {
 const stat = { polls: 0, errors: 0, forms: 0, gaps: 0 };
 let failed = 0, blindSince = null, lastStat = Date.now();
 pruneFeed(DIR, nyWall(Date.now()).slice(0, 10));
-write({ k: 'run', start: new Date().toISOString(), from: FROM, until: UNTIL, interval: INTERVAL_MS / 1000, v: 1, rev: PARSER_REV });
+write({ k: 'run', start: new Date().toISOString(), from: FROM, until: UNTIL, interval: INTERVAL_MS / 1000, rth: RTH_INTERVAL_SEC, v: 1, rev: PARSER_REV });
 log(`старт: журнал ${DIR}, уже замечено ${seen.size}, разобрано ${forms.size}; окно ${FROM}–${UNTIL} ET`);
 const wallDay = () => nyWall(Date.now()).slice(0, 10);
 const startMs = nyToMs(`${wallDay()}T${FROM}`), endMs = nyToMs(`${wallDay()}T${UNTIL}`);
@@ -153,7 +156,7 @@ for (;;) {
     lastStat = Date.now();
   }
   if (ONCE || (endMs && Date.now() >= endMs)) break;
-  await sleep(INTERVAL_MS);
+  await sleep(feedIntervalSec(Date.now(), INTERVAL_MS / 1000, RTH_INTERVAL_SEC) * 1000);
 }
 write({ k: 'stat', t: new Date().toISOString(), seen: seen.size, forms: forms.size, pending: pending().length, ...stat, end: true });
 log(`конец: замечено ${seen.size}, разобрано ${forms.size}, ошибок ${stat.errors}, разрывов ${stat.gaps}`);

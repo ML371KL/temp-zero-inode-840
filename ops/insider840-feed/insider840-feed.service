@@ -1,5 +1,5 @@
 [Unit]
-Description=Инсайдерский радар 840 · лента формы 4 на весь день: getcurrent EDGAR каждые 45 с, 06:00–22:00 ET, журнал в /var/lib/insider840-feed (сверка с индексом в 22:03)
+Description=Инсайдерский радар 840 · лента формы 4 на весь день: getcurrent EDGAR каждые 45 с (в торговые часы — 15 с), 06:00–22:00 ET, журнал в /var/lib/insider840-feed (сверка с индексом в 22:03, сигнал в торговые часы)
 Wants=network-online.target
 After=network-online.target
 # Сбой посреди дня перезапускается (состояние читается из журнала); шесть стартов в час гасят только петлю.
@@ -15,7 +15,9 @@ Group=dash
 WorkingDirectory=/srv/dash/repo-840
 Environment=NODE_ENV=production
 # Секретов нет: SEC читается с User-Agent проекта, журнал остаётся на диске VPS (его читает сборка утреннего списка, insider840-morning).
-ExecStart=/usr/bin/node scripts/vps/feed-collector.mjs --dir /var/lib/insider840-feed --from 06:00 --until 22:00 --interval 45
+# --rth-interval 15 — шаг опроса в основную сессию биржи (09:30 — закрытие): по формам, принятым в торговые часы, считается сигнал
+# контура B бота (insider840-signals); лимит SEC — 10 запросов в секунду, лента держит не больше 2,5
+ExecStart=/usr/bin/node scripts/vps/feed-collector.mjs --dir /var/lib/insider840-feed --from 06:00 --until 22:00 --interval 45 --rth-interval 15
 Restart=on-failure
 RestartSec=30
 # 06:00 → 22:00 ET = 16 ч; предел 17 ч страхует только от зависшего процесса
@@ -31,6 +33,9 @@ NoNewPrivileges=yes
 MemoryHigh=256M
 MemoryMax=512M
 Nice=5
+# В торговые часы процессор сервера занят фоновыми задачами на 75–80%; Nice между службами разных групп не работает — доля
+# процессора задаётся весом группы (по умолчанию 100). Лента — первое звено сигнала в торговые часы.
+CPUWeight=400
 
 # Тревога из systemd: ИМЕННО ExecStopPost, а не OnFailure (приходит и «упало», и «снова проходит»)
 ExecStopPost=-+/usr/local/sbin/dash-alert %n
