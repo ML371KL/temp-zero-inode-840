@@ -526,14 +526,30 @@ export function normalizeTiingo(rows) {
   return { series: trim.series, splits, dropped: clean.dropped, frozen: trim.trimmed };
 }
 
+// Ответ источника не укорачивает ряд. Yahoo временами отдаёт ряд без последних баров: вечером 19.11.2026 (22:04–22:42 по Нью-Йорку) у ~30
+// бумаг не было бара 19.11, который в 18:49 он отдавал. Ряд замещался ответом с точки перекрытия (сервер, mergeSeries) или целиком
+// (ежедневный прогон, scripts/prices.mjs) — и закрытый бар дня, записанный прогоном после закрытия, стирался: у бумаги без бара D0 нет
+// цены и оборота, IRTC и MTDR выпали из обоих ночных списков. Бары кэша позже последнего бара ответа остаются, если их немного и они
+// рядом с концом ответа (TAIL_KEEP); длинный или далёкий хвост, которого источник не знает, — другой случай (делистинг, чужой инструмент),
+// его решают прежние правила. adjclose сохранённого бара — от прежнего ответа: дивиденд с отсечкой в сам этот день сдвинет доходность
+// одного дня на его величину до следующего полного ответа, который бар заместит.
+export const TAIL_KEEP = { bars: 3, days: 7 };
+export function cachedTail(cached, fresh, p = TAIL_KEEP) {
+  if (!cached?.length || !fresh?.length) return [];
+  const end = fresh[fresh.length - 1][0];
+  const tail = cached.filter(r => r[0] > end);
+  return tail.length && tail.length <= p.bars && tail[tail.length - 1][0] <= addDaysIso(end, p.days) ? tail : [];
+}
+
 // Слияние: свежие данные замещают хвост кэша с точки перекрытия
-// (adjclose пересчитывается задним числом после дивидендов — просто дописывать нельзя).
+// (adjclose пересчитывается задним числом после дивидендов — просто дописывать нельзя);
+// бары кэша позже конца ответа остаются по правилу cachedTail.
 export function mergeSeries(cached, fresh) {
   if (!cached?.length) return fresh;
   if (!fresh?.length) return cached;
   const freshStart = fresh[0][0];
   const head = cached.filter(r => r[0] < freshStart);
-  return [...head, ...fresh];
+  return [...head, ...fresh, ...cachedTail(cached, fresh)];
 }
 
 // Оборот бумаги для утреннего списка (ревизия 04.11.2026, r10_oos.py): медиана close×volume за

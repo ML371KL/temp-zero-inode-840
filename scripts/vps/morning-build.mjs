@@ -217,6 +217,9 @@ export function feedFillPending(opts, day, { lastChance = false } = {}) {
 const lastBar = (data, t) => { const s = readPriceCache(data, t); return s?.length ? s[s.length - 1][0] : null; };
 // Дата не позже cap: у перекачиваемого ряда запрос должен начинаться с перекрытием до дня cap, даже если кэш ушёл дальше него
 const notAfter = (iso, cap) => (iso && cap && iso > cap ? cap : iso);
+// Бумаги, чей ответ источника кончился раньше копии данных (applyBars, stat.tail): их последние бары оставлены из ветки data — их записал
+// прогон GitHub после закрытия, — а не стёрты. До 20.11.2026 такой ответ стирал бар D0, и бумага выпадала из списка «без цены» (IRTC, MTDR).
+const tailNote = syms => `ответ источника кончается раньше данных у ${syms.length} бумаг (${syms.slice(0, 8).join(', ')}${syms.length > 8 ? '…' : ''}) — их последние бары оставлены из ветки data`;
 // Потребности в открытиях { тикер: [даты подач] } из двух источников: даты одной бумаги объединяются, а не замещаются — бумага может
 // стоять и во вчерашнем списке (перекачка дня входа D0), и в более раннем дне без открытия
 export function unionNeeds(a = {}, b = {}) {
@@ -306,7 +309,11 @@ export async function attempt(opts, day, ctx) {
     const why = failed.length || r.limited ? `бары бенчмарков не получены: ${failed.map(s => `${s} (${r.failed[s]})`).join(', ') || 'лимит'}` : null;
     if (why && !(have && ctx.lastChance)) return fail(why);
     if (why) log(`ВНИМАНИЕ (последняя попытка, идём как есть): ${why} — остаются бары из ветки data, они могли быть записаны до закрытия торгов`);
-    else log('бенчмарки:', JSON.stringify(applyBars(opts.data, r.got, { updated: day })));
+    else {
+      const bs = applyBars(opts.data, r.got, { updated: day });
+      log('бенчмарки:', JSON.stringify({ ...bs, tail: bs.tail.length }));
+      if (bs.tail.length) log(tailNote(bs.tail));
+    }
     st.bench = true;
   }
 
@@ -328,6 +335,7 @@ export async function attempt(opts, day, ctx) {
       // дней. В обычную ночь последний прогон GitHub шёл до открытия рынка: бара D0 нет ни у кого, и всё это докачивается и так. После
       // прогона GitHub в торговые часы бар есть, но недозакрытый — сервер считал по нему цену, оборот, просадку и результаты вчерашних
       // сделок. Перекачка — только в первом проходе и только того, что в этом запуске ещё не перекачано (ctx.refreshed).
+      // Ответ без бара D0 бар из копии данных не стирает (applyBars → mergeSeries, правило cachedTail): ночь 19→20.11.2026.
       const done = (ctx.refreshed ??= new Set());
       const freshBars = pass === 1 ? (plan.fresh?.bars ?? []).filter(sym => !done.has(sym)) : [];
       const freshOpens = pass === 1 ? Object.fromEntries(Object.entries(plan.fresh?.opens ?? {}).filter(([sym]) => !done.has(sym))) : {};
@@ -354,7 +362,8 @@ export async function attempt(opts, day, ctx) {
         // Бумага, которой у Yahoo нет вовсе (missing), — не сбой: повтор ничего не даст. Сбой — когда воркер или Yahoo не ответили.
         // Минимумы дня у тикера формы, которого нет среди бумаг списка, необязательны: без них гейт работает по прежнему правилу.
         const transient = Object.keys(r.failed).filter(sym => names.includes(sym));
-        log('бары:', JSON.stringify({ ...stat, missing: stat.missing.length, transient: transient.length, limited: r.limited, lows: lowsAdded }));
+        log('бары:', JSON.stringify({ ...stat, missing: stat.missing.length, tail: stat.tail.length, transient: transient.length, limited: r.limited, lows: lowsAdded }));
+        if (stat.tail.length) log(tailNote(stat.tail));
         if (transient.length && !ctx.lastChance) return fail(`бары не получены: ${transient.slice(0, 8).join(', ')}${transient.length > 8 ? '…' : ''}`);
         // Не перекачано — всё, чего нет в ответе: и то, по чему воркер ответил ошибкой, и то, до чего он не дошёл (после отказа по
         // лимиту fetchBars остальные пачки не шлёт и в failed их не пишет, а перекачиваемые бумаги стоят в конце запроса)

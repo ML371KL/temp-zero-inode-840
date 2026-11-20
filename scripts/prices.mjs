@@ -2,6 +2,8 @@
 // Кэш замещается полной историей (adjclose пересчитывается задним числом после дивидендов —
 // инкрементальная дозапись дала бы разрыв на стыке). При деградации свежего ответа
 // (короче половины кэша) сохраняется старый кэш — защита от глюков и потери делистнутых.
+// Ответ, который кончается раньше кэша на один–три бара, последних баров кэша не стирает (lib/prices.mjs, cachedTail):
+// вечером 19.11.2026 Yahoo у ~30 бумаг не отдавал бар дня, записанный прогоном после закрытия, и он пропадал из ветки data.
 // Режимы:
 //   --mode daily     — SPY + тикеры с покупками P за последние 25 месяцев + повтор missing
 //   --mode backfill  — все тикеры вселенной без кэша (резюмируемо, с бюджетом времени)
@@ -16,7 +18,7 @@
 import { readJson, writeJson, isoToday, addDaysIso } from './lib/util.mjs';
 import { fetchTickerRef } from './lib/edgar.mjs';
 import { OPENS_FROM, OPENS_BENCH, readOpens, writeOpens, pickOpens, mergeOpens, dailyQueue, latestFilingDays, volumesOf } from './lib/opens.mjs';
-import { fetchYahooDaily, fetchStooqDaily, readPriceCache, writePriceCache, hasPriceCache, listedThrough } from './lib/prices.mjs';
+import { fetchYahooDaily, fetchStooqDaily, readPriceCache, writePriceCache, hasPriceCache, listedThrough, cachedTail } from './lib/prices.mjs';
 import { fetchSymbolRanges, writeSymbolRanges, loadSymbolRanges } from './lib/symbols.mjs';
 import { loadAllTrades, loadTickerRef, resolveTicker, issuerCategory, plausibleTicker, exchangeCounts } from './lib/universe.mjs';
 import { openBarDay, dropOpenBars } from './lib/session.mjs';
@@ -138,6 +140,7 @@ console.log(`[prices] режим ${MODE}: кандидатов ${list.length}`);
 
 let ok = 0, kept = 0, miss = 0, budgetOut = false;
 let openCut = 0, openCutDay = null;   // сколько рядов пришло с баром незакрытого дня (бар не записан)
+const tailKept = [];                  // тикеры, чей ответ кончился раньше кэша: последние бары кэша сохранены (cachedTail)
 // Бар незакрытого торгового дня из ответа убирается до записи: ряд, пары открытий и минимумы (lib/session.mjs)
 const closedOnly = res => {
   const day = openBarDay(nowMs()), out = dropOpenBars(res, day);
@@ -190,7 +193,11 @@ for (let qi = 0; qi < list.length || !staleQueued; qi++) {
     } else {
       if (res.dropped) { quality.droppedBars += res.dropped; quality.dirtySeries++; }
       if (res.exchange) quality.exchanges[res.exchange] = (quality.exchanges[res.exchange] ?? 0) + 1;
-      writePriceCache(DATA, t, res.series);
+      // Ответ кончается раньше кэша на один–три бара — эти бары кэша остаются; бар незакрытого дня не держим, как и не пишем
+      const od = openBarDay(nowMs());
+      const tail = cachedTail(cached, res.series).filter(r => !od || r[0] < od);
+      if (tail.length) tailKept.push(t);
+      writePriceCache(DATA, t, tail.length ? [...res.series, ...tail] : res.series);
       // Открытия дней входа — только из ответа Yahoo, из которого пришёл и сам ряд
       if (fromYahoo && res.ohlc) mergeOpens(opens, t, pickOpens(res.ohlc, all.get(t)?.fd, { all: OPENS_BENCH.includes(t), vol: volumesOf(res.series) }));
       // Сплиты обновляются только по ответу Yahoo: у резервного источника их нет, и «пусто»
@@ -214,6 +221,7 @@ writeOpens(DATA, opens, today);
 const nOpens = Object.values(opens.t).reduce((a, d) => a + Object.keys(d).length, 0);
 console.log(`[prices] открытия: ${Object.keys(opens.t).length} тикеров, ${nOpens} записей`);
 if (openCut) console.log(`[prices] торги ${openCutDay} ещё не закрыты: бар этого дня не записан у ${openCut} рядов (появится в прогоне после закрытия)`);
+if (tailKept.length) console.log(`[prices] ответ кончался раньше кэша у ${tailKept.length} рядов (${tailKept.slice(0, 8).join(', ')}${tailKept.length > 8 ? '…' : ''}): последние бары кэша сохранены, полный ответ их заместит`);
 if (OPENS_ONLY) {
   console.log(`[prices] --opens-only: обработано ${ok}, нет данных ${miss}, бюджет ${budgetOut ? 'ИСЧЕРПАН' : 'ок'}`);
   process.exit(0);

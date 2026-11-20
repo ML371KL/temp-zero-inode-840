@@ -5,7 +5,7 @@
 import { join } from 'node:path';
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { gunzipSync, gzipSync } from 'node:zlib';
-import { parseYahooChart, readPriceCache, writePriceCache, mergeSeries, nominalFactor } from './prices.mjs';
+import { parseYahooChart, readPriceCache, writePriceCache, mergeSeries, cachedTail, nominalFactor } from './prices.mjs';
 import { readOpens, writeOpens, mergeOpens, pickOpens, volumesOf, OPENS_BENCH } from './opens.mjs';
 import { readJson, writeJson, addDaysIso } from './util.mjs';
 import { FPI } from './fpi.mjs';
@@ -88,17 +88,19 @@ export function applyLows(dataDir, got, needs = {}) {
 }
 
 // Влить ответы в копию data/. opensNeeds — { тикер: [даты подач] }: для них в хранилище открытий кладётся первый торговый день
-// после подачи; бенчмарки (IWM, SPY) — каждый день. Возвращает счётчики для лога и проверок.
+// после подачи; бенчмарки (IWM, SPY) — каждый день. Возвращает счётчики для лога и проверок; tail — бумаги, чей ответ кончился раньше
+// копии данных: их последние бары остались из ветки data, а не стёрты (lib/prices.mjs, cachedTail).
 export function applyBars(dataDir, got, { opensNeeds = {}, bench = OPENS_BENCH, updated = null } = {}) {
   const store = readOpens(dataDir);
   const splitsPath = join(dataDir, 'prices', '_splits.json');
   const splits = readJson(splitsPath, {});
-  const stat = { merged: 0, fresh: 0, opens: 0, missing: [] };
+  const stat = { merged: 0, fresh: 0, opens: 0, missing: [], tail: [] };
   let splitsChanged = false;
   for (const [sym, r] of got) {
     if (r.missing || !r.series?.length) { stat.missing.push(sym); continue; }
     const cached = readPriceCache(dataDir, sym);
     if (!cached?.length) stat.fresh++;
+    if (cachedTail(cached, r.series).length) stat.tail.push(sym);
     writePriceCache(dataDir, sym, mergeSeries(cached ?? [], r.series));
     stat.merged++;
     if (r.splits?.length) {

@@ -12,7 +12,7 @@ import { normalizeQuarterZip, relFlags, parseFormIdx, parseForm4Txt, acceptedAt,
 import {
   mergeSeries, writePriceCache, nominalFactor, sanitizeSeries, metaAcceptable, normalizeTiingo,
   trimFrozenTail, repairUnadjustedSplits, clipToInstrument, cutAtDataBreak, listedThrough, fetchYahooDaily, turnover20,
-  parseYahooChart, readPriceCache,
+  parseYahooChart, readPriceCache, cachedTail, TAIL_KEEP,
 } from './lib/prices.mjs';
 import { barsFrom, fetchBars, applyBars } from './lib/bars.mjs';
 import { isSecClosed, isMarketClosed } from './lib/calendar.mjs';
@@ -300,6 +300,29 @@ ok('mergeSeries: свежее замещает хвост с точки пере
   const cached = [['2020-01-01', 1, 1, 10], ['2020-01-02', 2, 2, 10], ['2020-01-03', 3, 3, 10]];
   const fresh = [['2020-01-02', 20, 20, 99], ['2020-01-04', 40, 40, 99]];
   assert.deepEqual(mergeSeries(cached, fresh), [['2020-01-01', 1, 1, 10], ['2020-01-02', 20, 20, 99], ['2020-01-04', 40, 40, 99]]);
+});
+ok('mergeSeries: ответ, который кончается раньше кэша, последних баров кэша не стирает (IRTC 19.11.2026); длинный или далёкий хвост — прежнее правило', () => {
+  // ряд IRTC в копии сервера: бар 19.11 записал прогон GitHub в 18:49, в 22:04 Yahoo отдал ряд с 16.11 по 18.11
+  const c = [['2026-11-13', 91.91, 91.91, 917800], ['2026-11-16', 90.83, 90.83, 712100], ['2026-11-17', 89.665, 89.665, 590200], ['2026-11-18', 94.87, 94.87, 1198700], ['2026-11-19', 94.24, 94.24, 795224]];
+  const f = c.slice(1, 4);
+  assert.deepEqual(cachedTail(c, f), [c[4]]);
+  assert.deepEqual(mergeSeries(c, f), c, 'бар 19.11 остался');
+  // ответ дошёл до конца кэша — хвоста нет, свежее замещает, как раньше
+  const f2 = [...f, ['2026-11-19', 94.24, 94.24, 800000], ['2026-11-20', 95, 95, 1e6]];
+  assert.deepEqual(cachedTail(c, f2), []); assert.deepEqual(mergeSeries(c, f2), [c[0], ...f2]);
+  // пропуск внутри ответа (день без торгов) — бар кэша внутри ряда по-прежнему замещается: хвост — только после конца ответа
+  assert.deepEqual(mergeSeries(c, [c[1], c[3]]), [c[0], c[1], c[3], c[4]]);
+  // хвост длиннее TAIL_KEEP.bars или дальше TAIL_KEEP.days от конца ответа — другой случай (делистинг, чужой инструмент), не держим
+  assert.deepEqual(TAIL_KEEP, { bars: 3, days: 7 });
+  const long = [...c, ['2026-11-20', 95, 95, 1e6], ['2026-11-23', 96, 96, 1e6]];
+  assert.equal(cachedTail(long, f).length, 3, 'три бара после конца ответа — держим');
+  const longer = [...long, ['2026-11-24', 97, 97, 1e6]];
+  assert.deepEqual(cachedTail(longer, f), [], 'четыре — нет'); assert.deepEqual(mergeSeries(longer, f), c.slice(0, 4));
+  const far = [...c.slice(0, 4), ['2026-11-26', 99, 99, 1e6]];
+  assert.equal(cachedTail([...c.slice(0, 4), ['2026-11-25', 99, 99, 1e6]], f).length, 1, 'через 7 дней — держим');
+  assert.deepEqual(cachedTail(far, f), [], 'через 8 дней — нет');
+  for (const [a, b] of [[[], f], [null, f], [c, []], [c, null]]) assert.deepEqual(cachedTail(a, b), []);
+  assert.deepEqual(mergeSeries(c, []), c); assert.deepEqual(mergeSeries([], f), f);
 });
 
 ok('sanitizeSeries: изолированный выброс снимается, настоящий скачок остаётся', () => {
@@ -2239,7 +2262,7 @@ ok('бары VPS: с какой даты просить, слияние в ко�
   const splitChart = chartOf(fresh); splitChart.chart.result[0].events = { splits: { x: { date: Date.parse('2026-10-29T14:30:00Z') / 1000, numerator: 2, denominator: 1 } } };
   const got = new Map([['OLD', parseYahooChart(chartOf(fresh))], ['NEW', parseYahooChart(splitChart)], ['IWM', parseYahooChart(chartOf(fresh, { '2026-10-28': [11.9, 12.2] }))], ['GONE', { missing: true }]]);
   const st = applyBars(dir, got, { opensNeeds: { OLD: ['2026-10-27'] }, updated: '2026-10-29' });
-  assert.deepEqual(st, { merged: 3, fresh: 2, opens: 2, missing: ['GONE'] });
+  assert.deepEqual(st, { merged: 3, fresh: 2, opens: 2, missing: ['GONE'], tail: [] });
   assert.deepEqual(readPriceCache(dir, 'OLD').map(r => r[0]), ['2026-10-26', '2026-10-27', '2026-10-28', '2026-10-29']);
   assert.equal(readPriceCache(dir, 'NEW').length, 4, 'бумага без кэша получила ряд');
   assert.deepEqual(readJson(join(dir, 'prices', '_splits.json')).NEW, [['2026-10-29', 2]]);
@@ -4497,6 +4520,103 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       assert.equal(r.ok, true, r.why);
       assert.match(fetched(), /, 0 — перекачка бара, уже лежащего в данных\)/, 'перекачка бара D0 — один раз за запуск');
     } finally { console.log = orig; await api.close(); rmSync(base, { recursive: true, force: true }); }
+  });
+}
+
+// Ответ источника цен не укорачивает ряд (20.11.2026). Ночь 19→20.11: ветку data последним писал прогон GitHub после закрытия торгов
+// (бары 19.11 закрытые), а Yahoo в 22:04–22:42 по Нью-Йорку у ~30 бумаг отдавал ряд без бара 19.11. Перекачка пачки 2 (сервер) и полная
+// замена ряда (ежедневный прогон GitHub) стирали этот бар: у сервера «без цены на D0» стало 34 бумаги вместо 5, IRTC и MTDR выпали из обоих
+// ночных списков, утром бот получил «позднюю цену» и купил ARR вместо IRTC.
+{
+  await okAsync('ряд не укорачивается: источник отдал ряд без бара D0, а в ветке data он закрытый — список сервера равен полному пересчёту, в журнале названа бумага', async () => {
+    const base = join(ROOT, '.selftest-tail-vps'), full = join(base, 'full'), work = join(base, 'vps'), data = join(work, 'repo');
+    rmSync(base, { recursive: true, force: true });
+    const days = bizDays('2024-01-02', today), D = days.filter(d => d <= addDaysIso(today, -6)).at(-1), iD = days.indexOf(D), PD = days[iD - 1];
+    // Две бумаги дня с одинаковым рядом: два месяца назад 60, потом 50, объёмы через день 3 и 1 млн; бар D закрытый — 52 и 3 млн
+    const ser = upTo => days.filter(d => d <= upTo).map((d, i) => (d === D ? [d, 52, 52, 3e6] : [d, i <= iD - 40 ? 60 : 50, i <= iD - 40 ? 60 : 50, (iD - i) % 2 === 0 ? 3e6 : 1e6]));
+    const bench = upTo => days.filter(d => d <= upTo).map(d => [d, d === D ? 101 : 100, d === D ? 101 : 100, 1e6]);
+    const SYMS = ['SPY', 'IWM', 'CUTA', 'FULB'];
+    const seriesOf = (sym, upTo) => (sym === 'SPY' || sym === 'IWM' ? bench(upTo) : ser(upTo));
+    const seed = dirTo => {
+      mkdirSync(join(dirTo, 'state'), { recursive: true });
+      writeJson(join(dirTo, 'reference', 'tickers.json'), { 451: { ticker: 'CUTA', exchange: 'NYSE', name: 'Cut A Corp' }, 452: { ticker: 'FULB', exchange: 'NYSE', name: 'Full B Corp' } });
+      writeJsonGz(join(dirTo, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [
+        T({ acc: 'TL1', cik: 451, t: 'CUTA', fdate: D, tdate: D, owners: ceo, code: 'P', sh: 5000, px: 51, val: 255000, own: 1e5 }),
+        T({ acc: 'TL2', cik: 452, t: 'FULB', fdate: D, tdate: D, owners: ceo, code: 'P', sh: 5000, px: 51, val: 255000, own: 1e5 }),
+      ] });
+      writeJson(join(dirTo, 'state', 'live.json'), { schema: SHARD_VERSION, lastDay: D, coverage: { [D]: { status: 'complete', indexed: 2, collected: 2, pending: 0, at: 'x' } } });
+      // копия ветки data в 22:03: бары D уже лежат, их записал прогон GitHub после закрытия
+      applyBars(dirTo, new Map(SYMS.map(sym => [sym, parseYahooChart(chartOf(seriesOf(sym, D)))])), { updated: D });
+    };
+    const rowOf = (m, t) => m.days.find(d => d.date === D)?.rows.find(r => r.t === t);
+    const LISTK = ['val', 'mx', 'n', 'score', 'main', 'dv', 'px', 'dd', 'cost', 'tags'];
+    try {
+      seed(full);
+      execFileSync(process.execPath, [join(ROOT, 'scripts', 'compute.mjs'), '--data', full, '--site', join(base, 'site-full'), '--only-morning'], { stdio: 'pipe' });
+      const ref = readJson(join(base, 'site-full', 'data', 'morning.json'));
+      assert.deepEqual([rowOf(ref, 'CUTA')?.px, rowOf(ref, 'FULB')?.px], [52, 52], 'эталон: у обеих бумаг цена D0');
+      seed(data);
+      // источник цен в 22:04: у CUTA ряд без бара D (как у IRTC и MTDR 19.11), остальным — полный
+      const charts = Object.fromEntries(SYMS.map(sym => [sym, from => chartOf(seriesOf(sym, sym === 'CUTA' ? PD : D).filter(r => r[0] >= from))]));
+      const api = await fakeWorker({ charts });
+      const lines = [], orig = console.log;
+      console.log = (...x) => { lines.push(x.join(' ')); };
+      try {
+        const code = await morningMain(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--once', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+        assert.equal(code, 0);
+        assert.ok(api.calls.bars.some(x => x.sym === 'CUTA'), 'бар D у CUTA перекачивался');
+        assert.deepEqual(readPriceCache(data, 'CUTA').at(-1), [D, 52, 52, 3e6], 'бар D из ветки data не стёрт');
+        const sent = JSON.parse(api.calls.morningPuts[0]), day = sent.days.find(d => d.date === D);
+        assert.ok(!(day.unpriced ?? []).includes('CUTA'), 'CUTA не «без цены на D0»');
+        for (const t of ['CUTA', 'FULB']) for (const k of LISTK) assert.deepEqual(rowOf(sent, t)?.[k], rowOf(ref, t)[k], `${t}, поле ${k}: сервер = полный пересчёт`);
+        assert.ok(lines.some(l => /ответ источника кончается раньше данных у 1 бумаг \(CUTA\)/.test(l)), 'в журнале названа бумага, у которой бар оставлен из ветки data');
+      } finally { console.log = orig; await api.close(); }
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
+  // Прогон prices.mjs целиком, как в правке 2 пачки 2: источник цен и справочник SEC подставные, часы — --now
+  await okAsync('ряд не укорачивается: ежедневный прогон цен — ответ без бара дня не стирает бар, записанный после закрытия; полный ответ замещает его, как раньше', async () => {
+    const base = join(ROOT, '.selftest-tail-prices');
+    rmSync(base, { recursive: true, force: true }); mkdirSync(base, { recursive: true });
+    const stub = join(base, 'stub.mjs');
+    writeFileSync(stub, [
+      "import { readFileSync } from 'node:fs';",
+      "const fx = () => JSON.parse(readFileSync(process.env.STUB_FIXTURE, 'utf8'));",
+      "const json = (o, status = 200) => new Response(JSON.stringify(o), { status, headers: { 'content-type': 'application/json' } });",
+      'globalThis.fetch = async url => {',
+      '  const u = new URL(String(url)), f = fx();',
+      "  if (u.hostname === 'www.sec.gov') return json(f.tickers);",
+      "  const m = u.pathname.startsWith('/v8/finance/chart/') ? decodeURIComponent(u.pathname.slice('/v8/finance/chart/'.length)) : null;",
+      "  return m && f.charts[m] ? json(f.charts[m]) : new Response('', { status: 404 });",
+      '};',
+    ].join('\n') + '\n');
+    const run = (L, now, fixture) => {
+      const fx = join(base, 'fixture.json');
+      writeJson(fx, fixture);
+      return new Promise(resolve => execFile(process.execPath, ['--import', pathToFileURL(stub).href, join(ROOT, 'scripts', 'prices.mjs'), '--mode', 'daily', '--data', L, '--now', now],
+        { encoding: 'utf8', env: { ...process.env, POLITE_BACKOFF_MS: '2', STUB_FIXTURE: fx } }, (err, so, se) => resolve({ code: err ? (err.code ?? 1) : 0, out: so + se })));
+    };
+    const tickers = { fields: ['cik', 'name', 'ticker', 'exchange'], data: [[1, 'AAA Inc', 'AAA', 'NYSE']] };
+    const D = '2026-11-18', P = '2026-11-17', L = join(base, 'data');
+    const days = bizDays('2026-08-03', D).filter(d => !isMarketClosed(d));
+    const ser = (upTo, vol = 1e6) => days.filter(d => d <= upTo).map((d, i) => (d === D ? [d, 105, 105, vol] : [d, 100 + (i % 7) * 0.5, 100 + (i % 7) * 0.5, 1e6]));
+    const charts = (aaaUpTo, vol) => ({ SPY: chartOf(ser(D)), IWM: chartOf(ser(D)), AAA: chartOf(ser(aaaUpTo, vol)) });
+    writeJsonGz(join(L, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [T({ acc: 'TP1', cik: 1, t: 'AAA', fdate: P, tdate: P, owners: ceo, code: 'P', sh: 1000, px: 100, val: 1e5, own: 1e5 })] });
+    const last = () => readPriceCache(L, 'AAA').at(-1);
+    try {
+      // 18:49 — прогон от слияния в main после закрытия: бар дня записан
+      let r = await run(L, `${D}T18:49:00-05:00`, { tickers, charts: charts(D, 795224) });
+      assert.equal(r.code, 0, r.out); assert.deepEqual(last(), [D, 105, 105, 795224]);
+      // 22:30 — ночной прогон: источник отдаёт ряд без бара дня; бар остаётся, в журнале — строка о сохранённом хвосте
+      r = await run(L, `${D}T22:30:00-05:00`, { tickers, charts: charts(P) });
+      assert.equal(r.code, 0, r.out);
+      assert.deepEqual(last(), [D, 105, 105, 795224], 'ответ без бара дня его не стёр');
+      assert.match(r.out, /ответ кончался раньше кэша у 1 рядов \(AAA\)/);
+      // утро следующего дня: источник снова отдаёт бар дня (с окончательным объёмом) — он замещает сохранённый, как раньше
+      r = await run(L, '2026-11-19T07:10:00-05:00', { tickers, charts: charts(D, 801000) });
+      assert.equal(r.code, 0, r.out); assert.deepEqual(last(), [D, 105, 105, 801000], 'полный ответ замещает бар дня');
+      assert.ok(!/ответ кончался раньше кэша/.test(r.out));
+    } finally { rmSync(base, { recursive: true, force: true }); }
   });
 }
 
