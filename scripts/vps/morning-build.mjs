@@ -218,8 +218,9 @@ const lastBar = (data, t) => { const s = readPriceCache(data, t); return s?.leng
 // Дата не позже cap: у перекачиваемого ряда запрос должен начинаться с перекрытием до дня cap, даже если кэш ушёл дальше него
 const notAfter = (iso, cap) => (iso && cap && iso > cap ? cap : iso);
 // Бумаги, чей ответ источника кончился раньше копии данных (applyBars, stat.tail): их последние бары оставлены из ветки data — их записал
-// прогон GitHub после закрытия, — а не стёрты. До 20.11.2026 такой ответ стирал бар D0, и бумага выпадала из списка «без цены» (IRTC, MTDR).
-const tailNote = syms => `ответ источника кончается раньше данных у ${syms.length} бумаг (${syms.slice(0, 8).join(', ')}${syms.length > 8 ? '…' : ''}) — их последние бары оставлены из ветки data`;
+// прогон GitHub после закрытия, стык с ответом сверен (cachedTail), — а не стёрты. До 20.11.2026 такой ответ стирал бар D0, и бумага
+// выпадала из списка «без цены» (IRTC, MTDR). Перекачанными они не считаются: повтор попытки попросит их снова.
+const tailNote = syms => `ответ источника кончается раньше данных у ${syms.length} бумаг (${syms.slice(0, 8).join(', ')}${syms.length > 8 ? '…' : ''}) — их последние бары оставлены из ветки data (стык с ответом сверен)`;
 // Потребности в открытиях { тикер: [даты подач] } из двух источников: даты одной бумаги объединяются, а не замещаются — бумага может
 // стоять и во вчерашнем списке (перекачка дня входа D0), и в более раннем дне без открытия
 export function unionNeeds(a = {}, b = {}) {
@@ -357,7 +358,8 @@ export async function attempt(opts, day, ctx) {
         log(`докачка баров (проход ${pass}): ${items.length} бумаг (${Object.keys(plan.bars).length} без бара D0, ${Object.keys(plan.opens).length} с открытиями, ${Object.keys(lowNeeds).length} с минимумами дня, ${refresh.length} — перекачка бара, уже лежащего в данных)`);
         const r = await fetchBars(opts.workerUrl, opts.token, items);
         const stat = applyBars(opts.data, new Map([...r.got].filter(([sym]) => names.includes(sym))), { opensNeeds, updated: day });
-        for (const sym of refresh) if (r.got.has(sym)) done.add(sym);
+        // Ответ без бара D0 (stat.tail) — бар не перекачан, а оставлен из ветки data: повтор попытки попросит его снова
+        for (const sym of refresh) if (r.got.has(sym) && !stat.tail.includes(sym)) done.add(sym);
         const lowsAdded = applyLows(opts.data, r.got, lowNeeds);
         // Бумага, которой у Yahoo нет вовсе (missing), — не сбой: повтор ничего не даст. Сбой — когда воркер или Yahoo не ответили.
         // Минимумы дня у тикера формы, которого нет среди бумаг списка, необязательны: без них гейт работает по прежнему правилу.

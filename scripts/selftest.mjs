@@ -313,7 +313,7 @@ ok('mergeSeries: ответ, который кончается раньше кэ
   // пропуск внутри ответа (день без торгов) — бар кэша внутри ряда по-прежнему замещается: хвост — только после конца ответа
   assert.deepEqual(mergeSeries(c, [c[1], c[3]]), [c[0], c[1], c[3], c[4]]);
   // хвост длиннее TAIL_KEEP.bars или дальше TAIL_KEEP.days от конца ответа — другой случай (делистинг, чужой инструмент), не держим
-  assert.deepEqual(TAIL_KEEP, { bars: 3, days: 7 });
+  assert.deepEqual(TAIL_KEEP, { bars: 3, days: 7, closeTol: 0.01, jump: 3 });
   const long = [...c, ['2026-11-20', 95, 95, 1e6], ['2026-11-23', 96, 96, 1e6]];
   assert.equal(cachedTail(long, f).length, 3, 'три бара после конца ответа — держим');
   const longer = [...long, ['2026-11-24', 97, 97, 1e6]];
@@ -323,6 +323,35 @@ ok('mergeSeries: ответ, который кончается раньше кэ
   assert.deepEqual(cachedTail(far, f), [], 'через 8 дней — нет');
   for (const [a, b] of [[[], f], [null, f], [c, []], [c, null]]) assert.deepEqual(cachedTail(a, b), []);
   assert.deepEqual(mergeSeries(c, []), c); assert.deepEqual(mergeSeries([], f), f);
+});
+ok('mergeSeries: хвост держится только при согласованном стыке, без скачка и свежим ко дню прогона; adjclose хвоста — в базе ответа', () => {
+  const c = [['2026-11-16', 90.83, 90.83, 712100], ['2026-11-17', 89.665, 89.665, 590200], ['2026-11-18', 94.87, 94.87, 1198700], ['2026-11-19', 94.24, 94.24, 795224]];
+  const f = c.slice(0, 3);
+  // обратный сплит 1:10 с отсечкой 19.11: кэш (прогон 18:49) уже пересчитан, ответ без бара 19.11 — ещё нет; хвост дал бы +900% за день
+  const split = [['2026-11-17', 10, 10, 1e5], ['2026-11-18', 10, 10, 1e5], ['2026-11-19', 10, 10, 2e5]];
+  const unadj = [['2026-11-17', 1, 1, 1e6], ['2026-11-18', 1, 1, 1e6]];
+  assert.deepEqual(cachedTail(split, unadj), [], 'close на стыке разошёлся — прежнее правило');
+  assert.deepEqual(mergeSeries(split, unadj), unadj);
+  assert.equal(cachedTail([c[0], c[1], ['2026-11-18', 95.8, 95.8, 1], c[3]], f).length, 1, 'расхождение close до 1% — стык согласован');
+  assert.deepEqual(cachedTail([c[0], c[1], ['2026-11-18', 96, 96, 1], c[3]], f), [], 'больше 1% — нет');
+  // в кэше нет бара за последний день ответа — сверять не с чем
+  assert.deepEqual(cachedTail([c[0], c[1], c[3]], f), []);
+  // скачок close хвоста больше чем втрое от конца ответа — фантомный или чужой бар
+  assert.equal(cachedTail([...f, ['2026-11-19', 284, 284, 1]], f).length, 1, 'втрое — ещё держим');
+  assert.deepEqual(cachedTail([...f, ['2026-11-19', 285, 285, 1]], f), []);
+  assert.deepEqual(cachedTail([...f, ['2026-11-19', 31.6, 31.6, 1]], f), [], 'падение больше чем втрое — тоже нет');
+  // дивиденд 2% с отсечкой 19.11: кэш его учёл (adjclose 18.11 ниже close), ответ без бара 19.11 — ещё нет; adjclose хвоста переводится в
+  // базу ответа, и доходность дня через стык та же, что в кэше: 94.24 / 92.9726 − 1 ≈ +1,36%, а не 94.24 / 94.87 − 1 ≈ −0,66%
+  const div = [c[0], c[1], ['2026-11-18', 94.87, 92.9726, 1198700], c[3]];
+  const t = cachedTail(div, f);
+  assert.equal(t.length, 1); assert.deepEqual([t[0][0], t[0][1], t[0][3]], ['2026-11-19', 94.24, 795224], 'close и объём — как в кэше');
+  assert.ok(Math.abs(t[0][2] / f[2][2] - div[3][2] / div[2][2]) < 1e-6, `доходность дня ${t[0][2] / f[2][2] - 1}`);
+  assert.equal(mergeSeries(div, f).at(-1)[2], t[0][2]);
+  // день прогона: хвост держится, если он не старше недели до него — ряд, который источник перестал продлевать, не держит хвост бессрочно
+  assert.equal(cachedTail(c, f, { asOf: '2026-11-20' }).length, 1);
+  assert.equal(cachedTail(c, f, { asOf: '2026-11-26' }).length, 1, 'ровно неделя');
+  assert.deepEqual(cachedTail(c, f, { asOf: '2026-11-27' }), [], 'больше недели');
+  assert.deepEqual(mergeSeries(c, f, { asOf: '2026-12-01' }), f);
 });
 
 ok('sanitizeSeries: изолированный выброс снимается, настоящий скачок остаётся', () => {
@@ -4570,6 +4599,18 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
         assert.ok(!(day.unpriced ?? []).includes('CUTA'), 'CUTA не «без цены на D0»');
         for (const t of ['CUTA', 'FULB']) for (const k of LISTK) assert.deepEqual(rowOf(sent, t)?.[k], rowOf(ref, t)[k], `${t}, поле ${k}: сервер = полный пересчёт`);
         assert.ok(lines.some(l => /ответ источника кончается раньше данных у 1 бумаг \(CUTA\)/.test(l)), 'в журнале названа бумага, у которой бар оставлен из ветки data');
+        // перекачанной CUTA не считается: повтор попытки того же запуска просит её снова, FULB — нет
+        const mb = await import('./vps/morning-build.mjs');
+        mkdirSync(join(base, 'vps2'), { recursive: true });
+        const opts = mb.parseArgs(['--state', join(base, 'vps2'), '--data', data, '--site', join(base, 'site2'), '--date', D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--dry-run', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+        const ctx = { stage: {}, lastChance: false, summary: null };
+        let r = await mb.attempt(opts, D, ctx);
+        assert.equal(r.ok, true, r.why); assert.deepEqual([...ctx.refreshed], ['FULB']);
+        ctx.stage.bars = false; ctx.stage.built = false;
+        r = await mb.attempt(opts, D, ctx);
+        assert.equal(r.ok, true, r.why);
+        assert.match(lines.filter(l => /докачка баров \(проход 1\)/.test(l)).at(-1), /, 1 — перекачка бара, уже лежащего в данных\)/, 'повтор просит только CUTA');
+        assert.equal(readJson(join(base, 'site2', 'data', 'morning.json')).days.find(d => d.date === D).rows.find(x => x.t === 'CUTA')?.px, 52);
       } finally { console.log = orig; await api.close(); }
     } finally { rmSync(base, { recursive: true, force: true }); }
   });

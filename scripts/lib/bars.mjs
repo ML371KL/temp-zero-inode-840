@@ -100,8 +100,9 @@ export function applyBars(dataDir, got, { opensNeeds = {}, bench = OPENS_BENCH, 
     if (r.missing || !r.series?.length) { stat.missing.push(sym); continue; }
     const cached = readPriceCache(dataDir, sym);
     if (!cached?.length) stat.fresh++;
-    if (cachedTail(cached, r.series).length) stat.tail.push(sym);
-    writePriceCache(dataDir, sym, mergeSeries(cached ?? [], r.series));
+    // updated — день сборки: хвост держится, только если он не старше недели до него (cachedTail, asOf)
+    if (cachedTail(cached, r.series, { asOf: updated }).length) stat.tail.push(sym);
+    writePriceCache(dataDir, sym, mergeSeries(cached ?? [], r.series, { asOf: updated }));
     stat.merged++;
     if (r.splits?.length) {
       const have = new Set((splits[sym] ?? []).map(s => s[0]));

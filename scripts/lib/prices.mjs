@@ -529,27 +529,41 @@ export function normalizeTiingo(rows) {
 // Ответ источника не укорачивает ряд. Yahoo временами отдаёт ряд без последних баров: вечером 19.11.2026 (22:04–22:42 по Нью-Йорку) у ~30
 // бумаг не было бара 19.11, который в 18:49 он отдавал. Ряд замещался ответом с точки перекрытия (сервер, mergeSeries) или целиком
 // (ежедневный прогон, scripts/prices.mjs) — и закрытый бар дня, записанный прогоном после закрытия, стирался: у бумаги без бара D0 нет
-// цены и оборота, IRTC и MTDR выпали из обоих ночных списков. Бары кэша позже последнего бара ответа остаются, если их немного и они
-// рядом с концом ответа (TAIL_KEEP); длинный или далёкий хвост, которого источник не знает, — другой случай (делистинг, чужой инструмент),
-// его решают прежние правила. adjclose сохранённого бара — от прежнего ответа: дивиденд с отсечкой в сам этот день сдвинет доходность
-// одного дня на его величину до следующего полного ответа, который бар заместит.
-export const TAIL_KEEP = { bars: 3, days: 7 };
-export function cachedTail(cached, fresh, p = TAIL_KEEP) {
+// цены и оборота, IRTC и MTDR выпали из обоих ночных списков. Бары кэша позже последнего бара ответа (хвост) остаются, только если:
+//  - их не больше TAIL_KEEP.bars и последний не дальше TAIL_KEEP.days от конца ответа, а при заданном asOf (день прогона) — и не раньше
+//    asOf − TAIL_KEEP.days: правило про последние бары, а не про ряд, который источник перестал продлевать (делистинг, остановка
+//    торгов), — там прежнее правило, и хвост не держится бессрочно;
+//  - стык согласован: в кэше есть бар за последний день ответа и его close совпадает с ответом в пределах TAIL_KEEP.closeTol — кэш и ответ
+//    в одной базе (тот же инструмент, тот же учёт сплитов). Обратный сплит с отсечкой в день хвоста ответ без этого бара ещё не учёл:
+//    пересчитанный бар за непересчитанной историей дал бы доходность дня +900% и просадку 0 вместо −50% — такой хвост не держим;
+//  - close хвоста не дальше чем в TAIL_KEEP.jump раз от close конца ответа (фантомный или чужой бар).
+// adjclose хвоста переводится в базу ответа — множитель adjclose ответа к adjclose кэша на день стыка: дивиденд с отсечкой в день хвоста,
+// которого ответ ещё не знает, иначе сдвинул бы доходность этого дня на свою величину. Следующий полный ответ хвост заместит.
+export const TAIL_KEEP = { bars: 3, days: 7, closeTol: 0.01, jump: 3 };
+export function cachedTail(cached, fresh, { asOf = null } = {}, p = TAIL_KEEP) {
   if (!cached?.length || !fresh?.length) return [];
-  const end = fresh[fresh.length - 1][0];
+  const last = fresh[fresh.length - 1], end = last[0];
   const tail = cached.filter(r => r[0] > end);
-  return tail.length && tail.length <= p.bars && tail[tail.length - 1][0] <= addDaysIso(end, p.days) ? tail : [];
+  if (!tail.length || tail.length > p.bars) return [];
+  const tailEnd = tail[tail.length - 1][0];
+  if (tailEnd > addDaysIso(end, p.days) || (asOf && tailEnd < addDaysIso(asOf, -p.days))) return [];
+  const pos = (a, b) => a > 0 && b > 0;
+  const at = cached[cached.length - tail.length - 1];           // ряд упорядочен: перед хвостом — последний бар кэша не позже конца ответа
+  if (!at || at[0] !== end || !pos(at[1], last[1]) || Math.abs(at[1] / last[1] - 1) > p.closeTol) return [];
+  if (!tail.every(r => pos(r[1], last[1]) && r[1] / last[1] <= p.jump && last[1] / r[1] <= p.jump)) return [];
+  const k = pos(at[2], last[2]) ? last[2] / at[2] : 1;
+  return k === 1 ? tail : tail.map(r => [r[0], r[1], Math.round(r[2] * k * 10000) / 10000, r[3]]);
 }
 
 // Слияние: свежие данные замещают хвост кэша с точки перекрытия
 // (adjclose пересчитывается задним числом после дивидендов — просто дописывать нельзя);
-// бары кэша позже конца ответа остаются по правилу cachedTail.
-export function mergeSeries(cached, fresh) {
+// бары кэша позже конца ответа остаются по правилу cachedTail (opts: { asOf }).
+export function mergeSeries(cached, fresh, opts = {}) {
   if (!cached?.length) return fresh;
   if (!fresh?.length) return cached;
   const freshStart = fresh[0][0];
   const head = cached.filter(r => r[0] < freshStart);
-  return [...head, ...fresh, ...cachedTail(cached, fresh)];
+  return [...head, ...fresh, ...cachedTail(cached, fresh, opts)];
 }
 
 // Оборот бумаги для утреннего списка (ревизия 04.11.2026, r10_oos.py): медиана close×volume за
