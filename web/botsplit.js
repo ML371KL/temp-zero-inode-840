@@ -18,13 +18,16 @@ const isFrac = (v, max) => typeof v === 'number' && Number.isFinite(v) && Math.a
 const fracOrNull = (v, max) => v === null || isFrac(v, max);
 const isDate = v => typeof v === 'string' && ISO_DATE.test(v) && !Number.isNaN(Date.parse(v));
 
-// Группа сделок: число, среднее на сделку (доля) и сумма долей. Пустая группа — net = null; сумма пустой группы может
-// быть не нулём только у основного правила и итога (дни, когда хедж был, а сделок не было: loose = true).
+// Группа сделок: число; на сделку — до комиссий (gross), комиссии (cost) и после комиссий (net), в долях суммы сделки;
+// сумма долей после комиссий. Пустая группа — три средних равны null; сумма пустой группы может быть не нулём только у
+// основного правила и итога (дни, когда хедж был, а сделок не было: loose = true).
 function cleanGroup(g, loose = false) {
   if (!g || typeof g !== 'object' || !isInt(g.n, 1e5) || !fracOrNull(g.net, 1) || !isFrac(g.sum, 1e3)) return null;
-  if ((g.n === 0) !== (g.net === null)) return null;
+  if (!fracOrNull(g.gross, 1) || !fracOrNull(g.cost, 0.1)) return null;
+  if ((g.n === 0) !== (g.net === null) || (g.n === 0) !== (g.gross === null) || (g.n === 0) !== (g.cost === null)) return null;
   if (g.n === 0 ? !loose && g.sum !== 0 : Math.abs(g.sum - g.n * g.net) > EPS * (g.n + 1)) return null;
-  return { n: g.n, net: g.net, sum: g.sum };
+  if (g.n && (g.cost < -0.01 || Math.abs(g.gross - g.cost - g.net) > 3e-6)) return null;
+  return { n: g.n, net: g.net, sum: g.sum, gross: g.gross, cost: g.cost };
 }
 
 // Сводка бота → объект только из известных полей, либо null (с причиной в why.text), если хоть одно поле не того вида
@@ -80,15 +83,17 @@ export function pickBotSplit(lists, nowMs) {
     .sort((a, b) => b.built.localeCompare(a.built))[0] ?? null;
 }
 
-// Строки блока. Строка без сделок несёт text — что написать вместо чисел. Итог в деньгах — sum × stake: «если в каждую
+// Строки блока: сделок, на сделку до комиссий, комиссии и после комиссий, итог в деньгах после комиссий. Строка без
+// сделок несёт text — что написать вместо чисел. Итог в деньгах — sum × stake: «если в каждую
 // сделку вложено по stake», как у живого счётчика панели; размеры позиций бота у контуров разные и сюда не входят.
 export function botRows(bot, stake) {
   const money = g => (g.n || g.sum ? g.sum * stake : null);
+  const nums = g => ({ n: g.n, gross: g.gross, cost: g.cost, net: g.net });
   const b = bot.b;
   const rows = [{
-    key: 'main', label: 'Основное правило', n: bot.main.n, net: bot.main.net, money: money(bot.main),
+    key: 'main', label: 'Основное правило', ...nums(bot.main), money: money(bot.main),
     text: bot.main.n ? null : 'сделок пока нет',
-    hint: 'Вход на аукционе открытия, выход на закрытии, шорт IWM на сумму покупок. На сделку: результат акции после комиссий'
+    hint: 'Вход на аукционе открытия, выход на закрытии, шорт IWM на сумму покупок. После комиссий на сделку: результат акции'
       + (bot.main.n ? ` (${pct(bot.main.stock)})` : '') + ' плюс доля ноги хеджа того же дня'
       + (bot.main.n ? ` (${pct(bot.main.hedge)})` : ''),
   }];
@@ -98,17 +103,17 @@ export function botRows(bot, stake) {
     : b.trial.n ? `по правилу (скор от ${bot.ruleScore}) сделок пока нет`
     : 'сделок пока нет';
   rows.push({
-    key: 'rule', label: 'Контур B', n: b.rule.n, net: b.rule.net, money: money(b.rule), text: b.rule.n ? null : idle,
+    key: 'rule', label: 'Контур B', ...nums(b.rule), money: money(b.rule), text: b.rule.n ? null : idle,
     hint: `Вход в торговые часы по форме, принятой SEC днём, скор от ${bot.ruleScore}; покупка по цене продавца, выход на закрытии, без хеджа`,
   });
   if (b.trial.n) {
     rows.push({
-      key: 'trial', label: 'Контур B · приёмка', n: b.trial.n, net: b.trial.net, money: money(b.trial), text: null,
+      key: 'trial', label: 'Контур B · приёмка', ...nums(b.trial), money: money(b.trial), text: null,
       hint: `Сделки со скором ниже ${bot.ruleScore}: их пускали на время приёмки ради проверки механики, правило по ним не судят`,
     });
   }
   rows.push({
-    key: 'total', label: 'Итого', n: bot.total.n, net: bot.total.net, money: money(bot.total),
+    key: 'total', label: 'Итого', ...nums(bot.total), money: money(bot.total),
     text: bot.total.n ? null : 'сделок пока нет', hint: 'Все сделки бота вместе',
   });
   return rows;
@@ -136,20 +141,31 @@ export function botExecLine(bot) {
 export function botBlockHtml(bot, stake, f) {
   const head = '<div class="strip-head"><b>Бот: что дал каждый контур</b>'
     + (bot.days ? ` с ${f.esc(f.fmtDate(bot.since))} · по ${f.esc(f.fmtDate(bot.upTo))} · ${f.esc(f.plural(bot.days, 'живой день', 'живых дня', 'живых дней'))}` : ' · живых дней пока нет')
-    + ` · факт счёта, после комиссий · <a href="${f.esc(f.guideUrl)}#бот-что-дал-каждый-контур" target="_blank" rel="noopener">как считается</a></div>`;
+    + ` · факт счёта · <a href="${f.esc(f.guideUrl)}#бот-что-дал-каждый-контур" target="_blank" rel="noopener">как считается</a></div>`;
   const row = r => `<tr${r.key === 'total' ? ' class="sum"' : ''}><td class="lab" title="${f.esc(r.hint)}">${f.esc(r.label)}</td>`
     + (r.text !== null
-      ? (r.money === null ? `<td class="note" colspan="3">${f.esc(r.text)}</td>`
-        : `<td class="note" colspan="2">${f.esc(r.text)}</td><td class="${f.cls(r.money)}">${f.esc(f.sgnMoney(r.money))}</td>`)
-      : `<td>${Number(r.n)}</td><td class="${f.cls(r.net)}">${f.esc(f.fmtPct(r.net, 2))}</td><td class="${f.cls(r.money)}">${f.esc(f.sgnMoney(r.money))}</td>`)
+      ? (r.money === null ? `<td class="note" colspan="5">${f.esc(r.text)}</td>`
+        : `<td class="note" colspan="4">${f.esc(r.text)}</td><td class="${f.cls(r.money)}">${f.esc(f.sgnMoney(r.money))}</td>`)
+      : `<td>${Number(r.n)}</td><td class="c-t ${f.cls(r.gross)}">${f.esc(f.fmtPct(r.gross, 2))}</td>`
+        + `<td class="muted">${f.esc(costText(r.cost, f))}</td><td class="${f.cls(r.net)}">${f.esc(f.fmtPct(r.net, 2))}</td>`
+        + `<td class="${f.cls(r.money)}">${f.esc(f.sgnMoney(r.money))}</td>`)
     + '</tr>';
   const exec = botExecLine(bot);
-  const moneyHint = `Итог всех сделок строки, если в каждую вложено по ${f.fmtMoney(stake)} — мера вклада, а не прибыль счёта: размер позиций бота у контуров разный и сюда не входит`;
+  const moneyHint = `Итог всех сделок строки после комиссий, если в каждую вложено по ${f.fmtMoney(stake)} — мера вклада, а не прибыль счёта: размер позиций бота у контуров разный и сюда не входит`;
+  const costHint = 'Комиссии брокера на сделку в долях её суммы; у основного правила — акции и хедж вместе. У комиссии есть минимум в долларах: с ростом суммы сделки её доля падает';
   return head + '<table class="strip-t bot-t"><tr><th></th><th title="Закрытые сделки живого счёта">сделок</th>'
-    + '<th title="Средний результат сделки после комиссий, в долях суммы сделки">на сделку</th>'
+    + '<th class="c-t" title="Средний результат сделки по ценам исполнения, до комиссий брокера, в долях суммы сделки">до комиссий</th>'
+    + `<th title="${f.esc(costHint)}">комиссии</th>`
+    + '<th title="Средний результат сделки после комиссий, в долях суммы сделки">после комиссий</th>'
     + `<th title="${f.esc(moneyHint)}">на ${f.esc(f.fmtMoney(stake))} в сделке</th></tr>`
     + botRows(bot, stake).map(row).join('') + '</table>'
     + (exec ? `<div class="strip-empty">${f.esc(exec)}</div>` : '');
+}
+
+// Комиссии — расход: показываются со знаком минус; меньше половины сотой процента — ноль без знака
+function costText(cost, f) {
+  if (cost === null || cost === undefined || !Number.isFinite(cost)) return '—';
+  return Math.abs(cost) < 5e-5 ? '0.00%' : f.fmtPct(-cost, 2);
 }
 
 function pct(v, digits = 2) {
