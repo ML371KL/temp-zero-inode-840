@@ -1,0 +1,97 @@
+{
+ "schema": 3,
+ "parserRev": 3,
+ "from": "2026-10-01",
+ "lastDay": "2026-11-21",
+ "updated": "2026-11-21",
+ "coverage": {
+  "2026-11-04": {
+   "indexed": 603,
+   "collected": 603,
+   "at": "2026-11-05T03:27:31Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-05": {
+   "indexed": 443,
+   "collected": 443,
+   "at": "2026-11-06T03:27:13Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-06": {
+   "indexed": 515,
+   "collected": 515,
+   "at": "2026-11-07T03:35:21Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-09": {
+   "indexed": 485,
+   "collected": 485,
+   "at": "2026-11-10T03:29:50Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-10": {
+   "indexed": 555,
+   "collected": 555,
+   "at": "2026-11-11T03:29:36Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-11": {
+   "status": "holiday",
+   "at": "2026-11-13T02:19:59Z"
+  },
+  "2026-11-12": {
+   "indexed": 841,
+   "collected": 841,
+   "at": "2026-11-13T03:36:06Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-13": {
+   "indexed": 675,
+   "collected": 675,
+   "at": "2026-11-14T03:30:20Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-16": {
+   "indexed": 624,
+   "collected": 624,
+   "at": "2026-11-17T03:47:08Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-17": {
+   "indexed": 1047,
+   "collected": 1047,
+   "at": "2026-11-18T03:29:16Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-18": {
+   "indexed": 762,
+   "collected": 762,
+   "at": "2026-11-19T03:28:35Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-19": {
+   "indexed": 578,
+   "collected": 578,
+   "at": "2026-11-20T03:28:19Z",
+   "status": "complete",
+   "pending": 0
+  },
+  "2026-11-20": {
+   "indexed": 593,
+   "collected": 593,
+   "at": "2026-11-21T03:28:28Z",
+   "status": "complete",
+   "pending": 0
+  }
+ }
+}
