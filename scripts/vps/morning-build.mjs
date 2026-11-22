@@ -18,6 +18,9 @@
 //      к отправляемому тексту прикладывается сводка бота ib840      — блок bot для страницы (scripts/lib/botsplit.mjs, файл
 //      «что дал каждый контур», если бот её написал                   --bot-split); список не меняется, неудача вставки — не сбой
 //   8. письмо (если в env есть TELEGRAM_*)                              — scripts/notify.mjs --sender vps; дубль исключает отметка в воркере
+//   9. дозапрос бара D0 (waitD0): бумаги дня, у которых Yahoo ответил    — список уже отправлен; бар пришёл — список пересобирается и
+//      без бара D0, переспрашиваются каждые --interval секунд до --until   отправляется заново (письмо второй раз не уходит). Не с --once
+//                                                                         и не с --no-d0-wait
 //  Лента на весь день (feed-collector.mjs, отдельный юнит): после шага 3 индекс сверяется с лентой — подачи, которые лента видела, а индекс нет,
 //  добавляются в список (coverage.feed); нет индекса до последней попытки — список по ленте с пометкой source: "feed" и ошибкой выхода (тревога).
 // В ветку data VPS ничего не пишет. Код берётся из клона репозитория (обновляет только install.sh).
@@ -49,7 +52,7 @@ export function parseArgs(argv, env = process.env) {
     state, data: resolve(val('--data', join(state, 'repo'))), site: resolve(val('--site', join(state, 'site'))),
     date: val('--date', null), until: val('--until', '23:30'), interval: Number(val('--interval', '120')),
     once: flag('--once'), dry: flag('--dry-run'), noLetter: flag('--no-letter'), noSync: flag('--no-sync'), noLive: flag('--no-live'),
-    noIndexCheck: flag('--no-index-check'), noFeed: flag('--no-feed'),
+    noIndexCheck: flag('--no-index-check'), noFeed: flag('--no-feed'), noD0Wait: flag('--no-d0-wait'),
     feedDir: resolve(val('--feed-dir', env.FEED_DIR || '/var/lib/insider840-feed')),
     repoUrl: env.DATA_REPO_URL || 'https://github.com/ML371KL/temp-zero-inode-840.git',
     workerUrl: (env.PAPER_URL || 'https://radar840-quotes.financehub.workers.dev').replace(/\/$/, ''),
@@ -387,6 +390,14 @@ export async function attempt(opts, day, ctx) {
         // Ответ без бара D0 (stat.tail) — бар не перекачан, а оставлен из ветки data: повтор попытки попросит его снова
         for (const sym of refresh) if (r.got.has(sym) && !stat.tail.includes(sym)) done.add(sym);
         const lowsAdded = applyLows(opts.data, r.got, lowNeeds);
+        // Бумаги дня без бара D0 и после ответа: после отправки списка их переспросит waitD0 (с той же даты, с теми же минимумами
+        // дня). Бумагу, которой у Yahoo нет вовсе (missing), ждать незачем. Что из этого всё же получило бар (проход 2), waitD0
+        // увидит по копии данных.
+        if (pass === 1) {
+          const lack = Object.keys(plan.bars).filter(sym => !stat.missing.includes(sym));
+          const from = Object.fromEntries(items.filter(x => lack.includes(x.sym)).map(x => [x.sym, x.from]));
+          ctx.d0Wait = { d0: plan.d0, from, lows: Object.fromEntries(Object.entries(lowNeeds).filter(([sym]) => sym in from)) };
+        }
         // Бумага, которой у Yahoo нет вовсе (missing), — не сбой: повтор ничего не даст. Сбой — когда воркер или Yahoo не ответили.
         // Минимумы дня у тикера формы, которого нет среди бумаг списка, необязательны: без них гейт работает по прежнему правилу.
         const transient = Object.keys(r.failed).filter(sym => names.includes(sym));
@@ -430,6 +441,64 @@ export async function attempt(opts, day, ctx) {
   return { ok: true };
 }
 
+// ---------- дозапрос бара D0 ----------
+// Yahoo иногда отвечает рядом без бара дня: у неликвидной или дорогой бумаги бар появляется позже, а 19.11.2026 в 22:04–22:42 ET его
+// не было у ~30 бумаг. Такая бумага уходит в unpriced и в список не попадает. Утром бот торгует пересечение списков сервера и GitHub,
+// поэтому её не купит, даже если GitHub, собранный позже, цену уже видел (жёлтое «поздняя цена»). Сборка не ждёт: список уходит сразу
+// (в 22:20 ET по нему строится вечерний план бота). Потом бумаги из ctx.d0Wait переспрашиваются каждые --interval секунд, пока до
+// untilMs остаётся интервал. Пришёл бар — он вливается в копию данных, список пересобирается и отправляется заново (тот же attempt,
+// остальные шаги уже пройдены; письмо второй раз не уходит). Утром бот берёт список заново и строит план по нему.
+// Возвращает { rounds, arrived, left, pending } — для журнала и проверок.
+export async function waitD0(opts, day, ctx, untilMs, { sleepFn = sleep, nowFn = Date.now, onRebuilt = () => {} } = {}) {
+  const w = ctx.d0Wait;
+  const out = { rounds: 0, arrived: [], left: [], pending: false };
+  if (!w?.d0) return out;
+  const hasD0 = sym => (readPriceCache(opts.data, sym) ?? []).some(x => x[0] === w.d0);
+  const fmt = syms => `${syms.slice(0, 8).join(', ')}${syms.length > 8 ? '…' : ''}`;
+  let left = Object.keys(w.from).filter(sym => !hasD0(sym));
+  if (!left.length) return out;
+  if (nowFn() + opts.interval * 1000 >= untilMs) {
+    out.left = left;
+    log(`без бара D0 у ${left.length} бумаг дня (${fmt(left)}), а до ${opts.until} ET дозапросить уже не успеть — они остаются «без цены»`);
+    return out;
+  }
+  log(`без бара D0 у ${left.length} бумаг дня (${fmt(left)}): Yahoo ответил без него. Список уже отправлен; переспрашиваю каждые ${opts.interval} с до ${opts.until} ET и пересоберу список, если бар придёт`);
+  while ((left.length || out.pending) && nowFn() + opts.interval * 1000 < untilMs) {
+    await sleepFn(opts.interval * 1000);
+    out.rounds++;
+    if (left.length) {
+      const r = await fetchBars(opts.workerUrl, opts.token, left.map(sym => ({ sym, from: w.from[sym] })));
+      const now = left.filter(sym => r.got.get(sym)?.series?.some(x => x[0] === w.d0));
+      const gone = left.filter(sym => r.got.has(sym) && !r.got.get(sym).series?.length);
+      if (gone.length) log(`дозапрос ${out.rounds}: источник цен больше не знает ${fmt(gone)} — их не переспрашиваю`);
+      if (now.length) {
+        const sub = new Map(now.map(sym => [sym, r.got.get(sym)]));
+        applyBars(opts.data, sub, { updated: day });
+        applyLows(opts.data, sub, Object.fromEntries(Object.entries(w.lows ?? {}).filter(([sym]) => now.includes(sym))));
+        out.arrived.push(...now);
+        out.pending = true;
+        log(`дозапрос ${out.rounds}: бар D0 пришёл у ${fmt(now)} — пересобираю список`);
+      }
+      left = left.filter(sym => !now.includes(sym) && !gone.includes(sym));
+    }
+    if (out.pending) {
+      ctx.stage.built = false;
+      ctx.stage.published = false;
+      const a = await attempt(opts, day, ctx);
+      if (a.ok) {
+        out.pending = false;
+        ctx.d0Late = [...out.arrived];
+        onRebuilt();
+        log(`список пересобран${opts.dry ? '' : ' и отправлен заново'}: без цены на D0 ${ctx.summary?.unpriced ?? '—'}`);
+      } else log(`пересборка не удалась (${a.why}) — повтор через ${opts.interval} с`);
+    }
+  }
+  out.left = left;
+  if (left.length) log(`бар D0 так и не пришёл к ${opts.until} ET у ${left.length} бумаг (${fmt(left)}) — они остаются «без цены»`);
+  if (out.pending) log(`ВНИМАНИЕ: бар D0 пришёл у ${fmt(out.arrived)}, но пересобрать список до ${opts.until} ET не удалось — в воркере список без них`);
+  return out;
+}
+
 // ---------- основной цикл ----------
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const opts = parseArgs(argv, env);
@@ -447,7 +516,12 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     log(`попытка ${n}${ctx.lastChance ? ' (последняя)' : ''}`);
     const r = await attempt(opts, day, ctx);
     if (r.ok) {
-      if (!opts.dry) writeJson(doneFile, { day, at: new Date().toISOString(), ...ctx.summary, ...(ctx.source === 'feed' ? { source: 'feed' } : {}) });
+      const writeDone = () => {
+        if (!opts.dry) writeJson(doneFile, { day, at: new Date().toISOString(), ...ctx.summary, ...(ctx.source === 'feed' ? { source: 'feed' } : {}), ...(ctx.d0Late?.length ? { d0Late: ctx.d0Late } : {}) });
+      };
+      writeDone();
+      // Дозапрос бара D0: список уже отправлен, отметка «собрано» стоит; бумаги без бара дня переспрашиваются до --until
+      if (!opts.once && !opts.noD0Wait) await waitD0(opts, day, ctx, untilMs, { onRebuilt: writeDone });
       // Список по ленте доставлен, но индекс не вышел — это тоже тревога (dash-alert): сторожу и владельцу нужно знать, что не так с EDGAR
       if (ctx.source === 'feed') { log(`СОБРАНО ПО ЛЕНТЕ: ${ctx.feedWhy ?? 'индекс EDGAR за день не получен'} — список мог выйти неполным`); return 1; }
       log('готово');

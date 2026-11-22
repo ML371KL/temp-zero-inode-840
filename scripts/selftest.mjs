@@ -4797,6 +4797,107 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
   });
 }
 
+// Дозапрос бара D0 (22.11.2026). Yahoo отвечает рядом без бара дня, и бумага остаётся «без цены» (ночь на 14.11 — BH-A; 19.11 в
+// 22:04–22:42 ET — ~30 бумаг). Список уходит сразу; бумаги без бара дня переспрашиваются до --until, пришёл бар — список пересобран
+// и отправлен заново. Бумагу, которой у источника нет вовсе, не ждём.
+{
+  const mb = await import('./vps/morning-build.mjs');
+  // LATE получает бар D0 с запроса номер lateAt (первый запрос — основная докачка); GONE у источника нет вовсе; DAYA — обычная бумага
+  async function d0Fixture(name, lateAt) {
+    const base = join(ROOT, name), work = join(base, 'vps'), data = join(work, 'repo');
+    rmSync(base, { recursive: true, force: true });
+    const days = bizDays('2024-01-02', today), D = days.filter(d => d <= addDaysIso(today, -6)).at(-1), PD = days[days.indexOf(D) - 1];
+    const flat = upTo => days.filter(d => d <= upTo).map(d => [d, 100, 100, 1e6]);
+    mkdirSync(join(data, 'state'), { recursive: true });
+    writeJson(join(data, 'reference', 'tickers.json'), { 444: { ticker: 'DAYA', exchange: 'NYSE', name: 'Day A Corp' },
+      446: { ticker: 'LATE', exchange: 'NYSE', name: 'Late Bar Corp' }, 447: { ticker: 'GONE', exchange: 'NYSE', name: 'Gone Corp' } });
+    writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [
+      T({ acc: 'DW1', cik: 444, t: 'DAYA', fdate: D, tdate: PD, owners: ceo, code: 'P', sh: 5000, px: 100, val: 500000, own: 1e5 }),
+      T({ acc: 'DW2', cik: 446, t: 'LATE', fdate: D, tdate: PD, owners: ceo, code: 'P', sh: 5000, px: 100, val: 500000, own: 1e5 }),
+      T({ acc: 'DW3', cik: 447, t: 'GONE', fdate: D, tdate: PD, owners: ceo, code: 'P', sh: 5000, px: 100, val: 500000, own: 1e5 }),
+    ] });
+    writeJson(join(data, 'state', 'live.json'), { schema: SHARD_VERSION, lastDay: D, coverage: { [D]: { status: 'complete', indexed: 3, collected: 3, pending: 0, at: 'x' } } });
+    applyBars(data, new Map(['SPY', 'IWM', 'DAYA', 'LATE'].map(sym => [sym, parseYahooChart(chartOf(flat(PD)))])), { updated: PD });
+    let n = 0;
+    const charts = {
+      SPY: from => chartOf(flat(D).filter(r => r[0] >= from)), IWM: from => chartOf(flat(D).filter(r => r[0] >= from)),
+      DAYA: from => chartOf(flat(D).filter(r => r[0] >= from)),
+      LATE: from => chartOf(flat(++n >= lateAt ? D : PD).filter(r => r[0] >= from)),
+      GONE: () => ({ chart: { result: [] } }),
+    };
+    const api = await fakeWorker({ charts });
+    const opts = mb.parseArgs(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+    mkdirSync(work, { recursive: true });
+    let t = Date.now();
+    const clock = { nowFn: () => t, sleepFn: async ms => { t += ms; }, at: () => t };
+    return { base, data, D, api, opts, clock, asked: sym => api.calls.bars.filter(x => x.sym === sym).length };
+  }
+  const quiet = async fn => {
+    const lines = [], orig = console.log;
+    console.log = (...x) => { lines.push(x.join(' ')); };
+    try { return { value: await fn(), lines }; } finally { console.log = orig; }
+  };
+
+  await okAsync('дозапрос бара D0: список уходит сразу; бар приходит со второго дозапроса — список пересобран и отправлен заново, бумага в основном списке; бумагу, которой нет у источника, не ждём', async () => {
+    const f = await d0Fixture('.selftest-d0wait-1', 3);
+    try {
+      const ctx = { stage: {}, lastChance: false, summary: null };
+      const { value: w, lines } = await quiet(async () => {
+        const r = await mb.attempt(f.opts, f.D, ctx);
+        assert.equal(r.ok, true, r.why);
+        assert.equal(f.api.calls.morningPuts.length, 1, 'список ушёл сразу, не дожидаясь бара');
+        assert.deepEqual([...JSON.parse(f.api.calls.morningPuts[0]).days[0].unpriced].sort(), ['GONE', 'LATE']);
+        assert.ok('LATE' in ctx.d0Wait.from && !('GONE' in ctx.d0Wait.from), 'бумагу, которой у источника нет вовсе, не ждём');
+        return mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 10_000, f.clock);
+      });
+      assert.deepEqual([w.rounds, w.arrived, w.left, w.pending], [2, ['LATE'], [], false], JSON.stringify(w));
+      assert.equal(f.api.calls.morningPuts.length, 2, 'после прихода бара список отправлен заново, и только один раз');
+      const sent = JSON.parse(f.api.calls.morningPuts[1]);
+      assert.deepEqual(sent.days[0].unpriced, ['GONE']);
+      assert.ok(sent.days[0].rows.some(x => x.t === 'LATE' && x.main && x.px === 100), 'LATE — в основном списке с ценой D0');
+      assert.ok(sent.days[0].rows.some(x => x.t === 'DAYA' && x.main), 'DAYA на месте');
+      assert.equal(ctx.summary.unpriced, 1); assert.deepEqual(ctx.d0Late, ['LATE']);
+      assert.deepEqual([f.asked('LATE'), f.asked('GONE'), f.asked('DAYA')], [3, 1, 1], 'дозапрос просит только LATE');
+      assert.ok(lines.some(l => /дозапрос 2: бар D0 пришёл у LATE — пересобираю список/.test(l)), lines.join('\n'));
+      // ждать больше нечего: повторный вызов ничего не просит
+      const again = await quiet(() => mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 10_000, f.clock));
+      assert.deepEqual([again.value.rounds, f.asked('LATE'), f.api.calls.morningPuts.length], [0, 3, 2]);
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: бар так и не пришёл — переспрашивает до --until, список отправлен один раз, в журнале названа бумага; без запаса времени не ждёт', async () => {
+    const f = await d0Fixture('.selftest-d0wait-2', Infinity);
+    try {
+      const ctx = { stage: {}, lastChance: false, summary: null };
+      const { value: w, lines } = await quiet(async () => {
+        assert.equal((await mb.attempt(f.opts, f.D, ctx)).ok, true);
+        return mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 5_000, f.clock);
+      });
+      assert.deepEqual([w.rounds, w.arrived, w.left], [4, [], ['LATE']], 'интервал 1 с, до предела 5 с — четыре дозапроса');
+      assert.equal(f.api.calls.morningPuts.length, 1, 'без нового бара список заново не отправляется');
+      assert.equal(f.asked('LATE'), 5);
+      assert.ok(lines.some(l => /бар D0 так и не пришёл к 23:30 ET у 1 бумаг \(LATE\)/.test(l)), lines.join('\n'));
+      const late = await quiet(() => mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 500, f.clock));
+      assert.deepEqual([late.value.rounds, late.value.left, f.asked('LATE')], [0, ['LATE'], 5], 'до предела меньше интервала — не ждём');
+      assert.ok(late.lines.some(l => /дозапросить уже не успеть/.test(l)));
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: основной цикл зовёт его после отправки списка, а с --once и с --no-d0-wait — нет', async () => {
+    // день фикстуры в прошлом, поэтому дозапрос сразу видит, что до --until не успеть, — это и признак того, что его позвали
+    for (const flag of [null, '--once', '--no-d0-wait']) {
+      const f = await d0Fixture('.selftest-d0wait-3', 2);
+      try {
+        const argv = ['--state', f.opts.state, '--data', f.data, '--site', f.opts.site, '--date', f.D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--interval', '1', ...(flag ? [flag] : [])];
+        const { value: code, lines } = await quiet(() => morningMain(argv, { PAPER_URL: f.api.base, PAPER_TOKEN: 'tok' }));
+        assert.equal(code, 0, String(flag));
+        assert.deepEqual([f.asked('LATE'), f.api.calls.morningPuts.length], [1, 1], `${flag}: только основная докачка, список один`);
+        assert.equal(lines.some(l => /дозапросить уже не успеть/.test(l)), flag === null, `${flag}: ${lines.filter(l => /бара D0/.test(l)).join(' | ')}`);
+      } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+    }
+  });
+}
+
 // Ответ источника цен не укорачивает ряд (20.11.2026). Ночь 19→20.11: ветку data последним писал прогон GitHub после закрытия торгов
 // (бары 19.11 закрытые), а Yahoo в 22:04–22:42 по Нью-Йорку у ~30 бумаг отдавал ряд без бара 19.11. Перекачка пачки 2 (сервер) и полная
 // замена ряда (ежедневный прогон GitHub) стирали этот бар: у сервера «без цены на D0» стало 34 бумаги вместо 5, IRTC и MTDR выпали из обоих
