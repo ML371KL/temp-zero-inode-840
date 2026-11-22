@@ -18,9 +18,9 @@
 //      к отправляемому тексту прикладывается сводка бота ib840      — блок bot для страницы (scripts/lib/botsplit.mjs, файл
 //      «что дал каждый контур», если бот её написал                   --bot-split); список не меняется, неудача вставки — не сбой
 //   8. письмо (если в env есть TELEGRAM_*)                              — scripts/notify.mjs --sender vps; дубль исключает отметка в воркере
-//   9. дозапрос бара D0 (waitD0): бумаги дня, у которых Yahoo ответил    — список уже отправлен; бар пришёл — список пересобирается и
-//      без бара D0, переспрашиваются каждые --interval секунд до --until   отправляется заново (письмо второй раз не уходит). Не с --once
-//                                                                         и не с --no-d0-wait
+//   9. дозапрос бара D0 (waitD0): события дня, которым Yahoo отдал ряд    — список уже отправлен; бар пришёл — список пересобирается и,
+//      без бара D0, переспрашиваются каждые --interval секунд до сборки    если строки дня изменились, отправляется заново. Не с --once,
+//      GitHub (GITHUB_BUILD_UTC), не позже --until                        --dry-run, --no-d0-wait и не когда письма идут с сервера
 //  Лента на весь день (feed-collector.mjs, отдельный юнит): после шага 3 индекс сверяется с лентой — подачи, которые лента видела, а индекс нет,
 //  добавляются в список (coverage.feed); нет индекса до последней попытки — список по ленте с пометкой source: "feed" и ошибкой выхода (тревога).
 // В ветку data VPS ничего не пишет. Код берётся из клона репозитория (обновляет только install.sh).
@@ -56,6 +56,8 @@ export function parseArgs(argv, env = process.env) {
     feedDir: resolve(val('--feed-dir', env.FEED_DIR || '/var/lib/insider840-feed')),
     repoUrl: env.DATA_REPO_URL || 'https://github.com/ML371KL/temp-zero-inode-840.git',
     workerUrl: (env.PAPER_URL || 'https://radar840-quotes.financehub.workers.dev').replace(/\/$/, ''),
+    // страница панели (список ежедневной сборки GitHub): дозапрос бара D0 не отправляет список после того, как GitHub собрал свой
+    pagesUrl: (env.PAGES_URL || 'https://ml371kl.github.io/temp-zero-inode-840').replace(/\/$/, ''),
     token: env.PAPER_TOKEN || '',
     // сводка бота ib840 «что дал каждый контур» (scripts/lib/botsplit.mjs): прикладывается к списку при отправке в воркер
     botSplit: val('--bot-split', env.BOT_SPLIT_FILE || process.env.BOT_SPLIT_FILE || BOT_SPLIT_FILE),
@@ -423,6 +425,8 @@ export async function attempt(opts, day, ctx) {
     const d0 = m.days?.[0];
     log(`список за ${m.listFor}: бумаг от $10 млн ${d0?.rows.length ?? 0}, в основном ${d0?.rows.filter(x => x.main).length ?? 0}, без цены на D0 ${d0?.unpriced?.length ?? 0}`);
     ctx.summary = { listFor: m.listFor, rows: d0?.rows.length ?? 0, main: d0?.rows.filter(x => x.main).length ?? 0, unpriced: d0?.unpriced?.length ?? 0 };
+    ctx.unpricedD0 = d0?.unpriced ?? [];           // для дозапроса бара D0: ждём только события, которым не хватило цены
+    ctx.builtRows = rowsKey(m);
     st.built = true;
   }
 
@@ -430,6 +434,7 @@ export async function attempt(opts, day, ctx) {
     if (!opts.token) return fail('PAPER_TOKEN не задан: список некуда отправить');
     const sent = await sendMorning(opts, readFileSync(join(opts.site, 'data', 'morning.json'), 'utf8'));
     if (!sent.ok) return fail(sent.why);
+    ctx.sentRows = ctx.builtRows;                  // что лежит в воркере: дозапрос не отправляет тот же список второй раз
     st.published = true;
   }
 
@@ -442,65 +447,111 @@ export async function attempt(opts, day, ctx) {
 }
 
 // ---------- дозапрос бара D0 ----------
-// Yahoo иногда отвечает рядом без бара дня: у неликвидной или дорогой бумаги бар появляется позже, а 19.11.2026 в 22:04–22:42 ET его
-// не было у ~30 бумаг. Такая бумага уходит в unpriced и в список не попадает. Утром бот торгует пересечение списков сервера и GitHub,
-// поэтому её не купит, даже если GitHub, собранный позже, цену уже видел (жёлтое «поздняя цена»). Сборка не ждёт: список уходит сразу
-// (в 22:20 ET по нему строится вечерний план бота). Потом бумаги из ctx.d0Wait переспрашиваются каждые --interval секунд, пока до
-// untilMs остаётся интервал. Пришёл бар — он вливается в копию данных, список пересобирается и отправляется заново (тот же attempt,
-// остальные шаги уже пройдены; письмо второй раз не уходит). Утром бот берёт список заново и строит план по нему.
-// Возвращает { rounds, arrived, left, pending } — для журнала и проверок.
-export async function waitD0(opts, day, ctx, untilMs, { sleepFn = sleep, nowFn = Date.now, onRebuilt = () => {} } = {}) {
-  const w = ctx.d0Wait;
-  const out = { rounds: 0, arrived: [], left: [], pending: false };
+// Yahoo бывает отвечает рядом без бара дня: у дорогой или малоторгуемой бумаги бар появляется позже (ночь на 14.11.2026 — BH-A), а
+// 19.11 в 22:04–22:42 ET его не было у ~30 бумаг. Такая бумага уходит в unpriced и в список не попадает. Утром бот торгует пересечение
+// списков сервера и GitHub, поэтому её не купит, даже если GitHub цену видел (жёлтое «поздняя цена»). Сборка не ждёт: список уходит
+// сразу (в 22:20 ET по нему строится вечерний план бота). Потом события дня без бара D0 (ctx.d0Wait ∩ unpriced) переспрашиваются
+// каждые --interval секунд. Пришёл бар — он вливается в копию данных, список пересобирается; если строки дня изменились, список
+// отправляется в воркер заново (тот же attempt, остальные шаги уже пройдены). Утром бот берёт список заново и строит план по нему.
+//
+// Срок — ночная сборка GitHub, а не только --until. Бот (ibkr-bot-840, merge_lists) берёт за основу более позднюю сборку и решает,
+// «поздняя ли цена», по времени сборок: бумага есть только у GitHub, а сервер собран раньше и отметил её без цены — жёлтое; сервер
+// собран позже — красное расхождение и сбойный день. Поэтому повторная отправка разрешена, только пока список GitHub за день ещё не
+// собран: до GITHUB_BUILD_UTC и пока на странице нет его списка за этот день (githubBuilt). Список сервера остаётся раньше GitHub, и
+// сверка в боте работает как до дозапроса.
+// Возвращает { rounds, arrived, left, sent, stopped } — для журнала и проверок.
+export const GITHUB_BUILD_UTC = '03:25';     // внешний cron ежедневной сборки GitHub: 22:25 ET зимой, 23:25 ET летом
+export const githubBuildMs = day => Date.parse(`${addDaysIso(day, 1)}T${GITHUB_BUILD_UTC}:00Z`);
+// Строки дня D0 — то, по чему бот строит план; сравнение до и после пересборки решает, отправлять ли список заново
+export const rowsKey = m => JSON.stringify(m?.days?.[0]?.rows ?? []);
+// Список GitHub за день уже на странице? true — да; false — нет; null — не узнать (сеть): тогда решает только время
+export async function githubBuilt(opts, day, fetchImpl = fetch) {
+  try {
+    const r = await fetchImpl(`${opts.pagesUrl}/data/morning.json`, { headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15000) });
+    if (!r.ok) return null;
+    const m = await r.json();
+    return m?.builder === 'github' && typeof m.listFor === 'string' && m.listFor >= day;
+  } catch { return null; }
+}
+
+export async function waitD0(opts, day, ctx, deadlineMs, { sleepFn = sleep, nowFn = Date.now, onRebuilt = () => {}, pagesFetch = fetch } = {}) {
+  const w = ctx.d0Wait, st = ctx.stage;
+  const out = { rounds: 0, arrived: [], left: [], sent: 0, stopped: null };
   if (!w?.d0) return out;
   const hasD0 = sym => (readPriceCache(opts.data, sym) ?? []).some(x => x[0] === w.d0);
   const fmt = syms => `${syms.slice(0, 8).join(', ')}${syms.length > 8 ? '…' : ''}`;
-  let left = Object.keys(w.from).filter(sym => !hasD0(sym));
+  const unpriced = new Set(ctx.unpricedD0 ?? []);
+  let left = Object.keys(w.from).filter(sym => unpriced.has(sym) && !hasD0(sym));
   if (!left.length) return out;
-  if (nowFn() + opts.interval * 1000 >= untilMs) {
+  const until = nyWall(deadlineMs).slice(11, 16);
+  if (nowFn() + opts.interval * 1000 >= deadlineMs) {
     out.left = left;
-    log(`без бара D0 у ${left.length} бумаг дня (${fmt(left)}), а до ${opts.until} ET дозапросить уже не успеть — они остаются «без цены»`);
+    log(`без бара D0 у ${left.length} бумаг дня (${fmt(left)}), а до ${until} ET (сборка GitHub или --until) дозапросить уже не успеть — они остаются «без цены»`);
     return out;
   }
-  log(`без бара D0 у ${left.length} бумаг дня (${fmt(left)}): Yahoo ответил без него. Список уже отправлен; переспрашиваю каждые ${opts.interval} с до ${opts.until} ET и пересоберу список, если бар придёт`);
-  while ((left.length || out.pending) && nowFn() + opts.interval * 1000 < untilMs) {
+  log(`без бара D0 у ${left.length} бумаг дня (${fmt(left)}): Yahoo ответил без него. Список уже отправлен; переспрашиваю каждые ${opts.interval} с до ${until} ET (до сборки GitHub) и отправлю список заново, если бар придёт`);
+  let needBuild = false, needSend = false;
+  while ((left.length || needBuild || needSend) && nowFn() + opts.interval * 1000 < deadlineMs) {
     await sleepFn(opts.interval * 1000);
     out.rounds++;
     if (left.length) {
       const r = await fetchBars(opts.workerUrl, opts.token, left.map(sym => ({ sym, from: w.from[sym] })));
-      const now = left.filter(sym => r.got.get(sym)?.series?.some(x => x[0] === w.d0));
+      const failed = left.filter(sym => r.failed[sym]);
+      if (failed.length || r.limited) log(`дозапрос ${out.rounds}: источник цен не ответил по ${failed.length} бумагам${r.limited ? ' (лимит воркера)' : ''} — повторю`);
       const gone = left.filter(sym => r.got.has(sym) && !r.got.get(sym).series?.length);
       if (gone.length) log(`дозапрос ${out.rounds}: источник цен больше не знает ${fmt(gone)} — их не переспрашиваю`);
-      if (now.length) {
-        const sub = new Map(now.map(sym => [sym, r.got.get(sym)]));
+      for (const sym of gone) delete w.from[sym];
+      const withBar = left.filter(sym => r.got.get(sym)?.series?.some(x => x[0] === w.d0));
+      if (withBar.length) {
+        const sub = new Map(withBar.map(sym => [sym, r.got.get(sym)]));
         applyBars(opts.data, sub, { updated: day });
-        applyLows(opts.data, sub, Object.fromEntries(Object.entries(w.lows ?? {}).filter(([sym]) => now.includes(sym))));
+        applyLows(opts.data, sub, Object.fromEntries(Object.entries(w.lows ?? {}).filter(([sym]) => withBar.includes(sym))));
+      }
+      // пришло — то, что после вливания действительно лежит в копии данных (чтение кэша может срезать бар)
+      const now = withBar.filter(hasD0);
+      if (now.length) {
         out.arrived.push(...now);
-        out.pending = true;
+        needBuild = true;
         log(`дозапрос ${out.rounds}: бар D0 пришёл у ${fmt(now)} — пересобираю список`);
       }
       left = left.filter(sym => !now.includes(sym) && !gone.includes(sym));
     }
-    if (out.pending) {
-      ctx.stage.built = false;
-      ctx.stage.published = false;
-      const a = await attempt(opts, day, ctx);
-      if (a.ok) {
-        out.pending = false;
-        ctx.d0Late = [...out.arrived];
-        onRebuilt();
-        log(`список пересобран${opts.dry ? '' : ' и отправлен заново'}: без цены на D0 ${ctx.summary?.unpriced ?? '—'}`);
-      } else log(`пересборка не удалась (${a.why}) — повтор через ${opts.interval} с`);
+    if (needBuild) {
+      // пересборка: только расчёт, без отправки. Индекс уже подтверждён (или список по ленте) — SEC второй раз не спрашиваем.
+      st.index = true; st.built = false; st.published = true;
+      const b = await attempt(opts, day, ctx);
+      if (!b.ok) { log(`пересборка не удалась (${b.why}) — повтор через ${opts.interval} с`); continue; }
+      needBuild = false;
+      needSend = ctx.builtRows !== ctx.sentRows;
+      if (!needSend) log('строки списка дня не изменились — заново не отправляю');
+    }
+    if (needSend) {
+      if (opts.dry) { needSend = false; log('пробный прогон: список пересобран, не отправляю'); continue; }
+      // время сборки GitHub отсекает срок (deadlineMs); страница — на случай сборки вне расписания (ручной прогон, бэкфил)
+      if (await githubBuilt(opts, day, pagesFetch) === true) {
+        out.stopped = 'github';
+        log('список GitHub за день уже собран — заново не отправляю: сервер стал бы свежее GitHub, и бот иначе сверил бы списки');
+        break;
+      }
+      st.published = false;
+      const p = await attempt(opts, day, ctx);
+      if (!p.ok) { log(`отправка не удалась (${p.why}) — повтор через ${opts.interval} с`); continue; }
+      needSend = false;
+      out.sent++;
+      ctx.d0Late = [...out.arrived];
+      onRebuilt();
+      log(`список отправлен заново: без цены на D0 ${ctx.summary?.unpriced ?? '—'}, бар пришёл позже у ${fmt(out.arrived)}`);
     }
   }
   out.left = left;
-  if (left.length) log(`бар D0 так и не пришёл к ${opts.until} ET у ${left.length} бумаг (${fmt(left)}) — они остаются «без цены»`);
-  if (out.pending) log(`ВНИМАНИЕ: бар D0 пришёл у ${fmt(out.arrived)}, но пересобрать список до ${opts.until} ET не удалось — в воркере список без них`);
+  if (left.length && !out.stopped) log(`бар D0 так и не пришёл к ${until} ET у ${left.length} бумаг (${fmt(left)}) — они остаются «без цены»`);
+  if ((needBuild || needSend) && !out.stopped) log(`ВНИМАНИЕ: бар D0 пришёл, но ${needBuild ? 'пересобрать' : 'отправить'} список до ${until} ET не удалось — в воркере прежний список`);
   return out;
 }
 
 // ---------- основной цикл ----------
-export async function main(argv = process.argv.slice(2), env = process.env) {
+// deps — для самотестов: срок и часы дозапроса бара D0 (у дня фикстуры, который в прошлом, срок иначе всегда истёк)
+export async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const opts = parseArgs(argv, env);
   mkdirSync(opts.state, { recursive: true });
   const nowMs = Date.now();
@@ -520,8 +571,14 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
         if (!opts.dry) writeJson(doneFile, { day, at: new Date().toISOString(), ...ctx.summary, ...(ctx.source === 'feed' ? { source: 'feed' } : {}), ...(ctx.d0Late?.length ? { d0Late: ctx.d0Late } : {}) });
       };
       writeDone();
-      // Дозапрос бара D0: список уже отправлен, отметка «собрано» стоит; бумаги без бара дня переспрашиваются до --until
-      if (!opts.once && !opts.noD0Wait) await waitD0(opts, day, ctx, untilMs, { onRebuilt: writeDone });
+      // Дозапрос бара D0: список уже отправлен, отметка «собрано» стоит; бумаги без бара дня переспрашиваются до сборки GitHub
+      // (не позже --until). Не в пробном прогоне (он висел бы до срока) и не когда письма идут с сервера: письмо уже ушло со
+      // списком без бумаги, а сверка GitHub сравнивает свой список с тем, что лежит в воркере, — уточнения «список изменён» не было бы.
+      if (!opts.once && !opts.noD0Wait && !opts.dry && !(opts.letters && !opts.noLetter)) {
+        try {
+          await waitD0(opts, day, ctx, deps.d0DeadlineMs ?? Math.min(untilMs, githubBuildMs(day)), { onRebuilt: writeDone, ...(deps.sleepFn ? { sleepFn: deps.sleepFn } : {}), ...(deps.nowFn ? { nowFn: deps.nowFn } : {}) });
+        } catch (e) { log('дозапрос бара D0 оборвался (список уже отправлен, в воркере он есть):', e.message); }
+      }
       // Список по ленте доставлен, но индекс не вышел — это тоже тревога (dash-alert): сторожу и владельцу нужно знать, что не так с EDGAR
       if (ctx.source === 'feed') { log(`СОБРАНО ПО ЛЕНТЕ: ${ctx.feedWhy ?? 'индекс EDGAR за день не получен'} — список мог выйти неполным`); return 1; }
       log('готово');

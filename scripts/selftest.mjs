@@ -2328,7 +2328,8 @@ await okAsync('бары VPS: запрос к воркеру пачками, то
 });
 
 // --- сборка на VPS целиком против подставного воркера: копия данных фикстуры, у LIVA/SPY/IWM срезаны бары D0, всё докачивается ---
-function fakeWorker({ charts = {}, morning = null, markers = {}, rejectBot = 0 } = {}) {
+// pages — список «страницы GitHub» (GET /data/morning.json), failPutAt — номера отправок списка (с единицы), на которые ответ 500
+function fakeWorker({ charts = {}, morning = null, markers = {}, rejectBot = 0, pages = null, failPutAt = [] } = {}) {
   const calls = { morningPuts: [], markerPuts: [], bars: [] };
   const state = { morning, markers: { ...markers } };
   const server = createServer((req, res) => {
@@ -2344,9 +2345,12 @@ function fakeWorker({ charts = {}, morning = null, markers = {}, rejectBot = 0 }
         if (!state.markers[lm[1]]) state.markers[lm[1]] = { ...JSON.parse(raw), ok: true };
         return send(200, { ok: true });
       }
+      if (u.pathname === '/data/morning.json' && req.method === 'GET') return pages ? send(200, pages) : send(404, { error: 'нет' });
       if (u.pathname === '/morning' && req.method === 'GET') return state.morning ? send(200, state.morning) : send(404, { error: 'нет' });
       if (u.pathname === '/morning' && req.method === 'PUT') {
         if (auth !== 'Bearer tok') return send(401, { error: 'нужен токен' });
+        calls.putAttempts = (calls.putAttempts ?? 0) + 1;
+        if (failPutAt.includes(calls.putAttempts)) return send(500, { error: 'сбой воркера' });
         if (rejectBot && 'bot' in JSON.parse(raw)) { calls.rejected = (calls.rejected ?? 0) + 1; return send(rejectBot, { error: 'тело слишком велико' }); }
         calls.morningPuts.push(raw); state.morning = JSON.parse(raw); return send(200, { ok: true, listFor: state.morning.listFor });
       }
@@ -4798,101 +4802,147 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
 }
 
 // Дозапрос бара D0 (22.11.2026). Yahoo отвечает рядом без бара дня, и бумага остаётся «без цены» (ночь на 14.11 — BH-A; 19.11 в
-// 22:04–22:42 ET — ~30 бумаг). Список уходит сразу; бумаги без бара дня переспрашиваются до --until, пришёл бар — список пересобран
-// и отправлен заново. Бумагу, которой у источника нет вовсе, не ждём.
+// 22:04–22:42 ET — ~30 бумаг). Список уходит сразу; события без бара дня переспрашиваются до сборки GitHub, пришёл бар — список
+// пересобран, а если строки дня изменились, отправлен заново. Бумагу, которой у источника нет вовсе, не ждём; после сборки GitHub
+// заново не отправляем — иначе бот (ibkr-bot-840, merge_lists) счёл бы «позднюю цену» расхождением.
 {
   const mb = await import('./vps/morning-build.mjs');
-  // LATE получает бар D0 с запроса номер lateAt (первый запрос — основная докачка); GONE у источника нет вовсе; DAYA — обычная бумага
-  async function d0Fixture(name, lateAt) {
+  // DAYA — обычная бумага; LATE получает бар D0 с запроса номер lateAt (первый — основная докачка); GONE у источника нет вовсе;
+  // THIN получает бар со второго запроса, но оборот у неё $5 млн в день — гейты проходит, «без цены» стоит, а в список с баром не
+  // попадает (порог $10 млн); VANISH со второго запроса источнику неизвестна
+  async function d0Fixture(name, { lateAt = 3, pages = null, failPutAt = [] } = {}) {
     const base = join(ROOT, name), work = join(base, 'vps'), data = join(work, 'repo');
     rmSync(base, { recursive: true, force: true });
     const days = bizDays('2024-01-02', today), D = days.filter(d => d <= addDaysIso(today, -6)).at(-1), PD = days[days.indexOf(D) - 1];
-    const flat = upTo => days.filter(d => d <= upTo).map(d => [d, 100, 100, 1e6]);
+    const flat = (upTo, vol = 1e6) => days.filter(d => d <= upTo).map(d => [d, 100, 100, vol]);
+    const names = { 444: 'DAYA', 446: 'LATE', 447: 'GONE', 448: 'THIN', 449: 'VANISH' };
     mkdirSync(join(data, 'state'), { recursive: true });
-    writeJson(join(data, 'reference', 'tickers.json'), { 444: { ticker: 'DAYA', exchange: 'NYSE', name: 'Day A Corp' },
-      446: { ticker: 'LATE', exchange: 'NYSE', name: 'Late Bar Corp' }, 447: { ticker: 'GONE', exchange: 'NYSE', name: 'Gone Corp' } });
-    writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: [
-      T({ acc: 'DW1', cik: 444, t: 'DAYA', fdate: D, tdate: PD, owners: ceo, code: 'P', sh: 5000, px: 100, val: 500000, own: 1e5 }),
-      T({ acc: 'DW2', cik: 446, t: 'LATE', fdate: D, tdate: PD, owners: ceo, code: 'P', sh: 5000, px: 100, val: 500000, own: 1e5 }),
-      T({ acc: 'DW3', cik: 447, t: 'GONE', fdate: D, tdate: PD, owners: ceo, code: 'P', sh: 5000, px: 100, val: 500000, own: 1e5 }),
-    ] });
-    writeJson(join(data, 'state', 'live.json'), { schema: SHARD_VERSION, lastDay: D, coverage: { [D]: { status: 'complete', indexed: 3, collected: 3, pending: 0, at: 'x' } } });
-    applyBars(data, new Map(['SPY', 'IWM', 'DAYA', 'LATE'].map(sym => [sym, parseYahooChart(chartOf(flat(PD)))])), { updated: PD });
-    let n = 0;
+    writeJson(join(data, 'reference', 'tickers.json'), Object.fromEntries(Object.entries(names).map(([cik, t]) => [cik, { ticker: t, exchange: 'NYSE', name: `${t} Corp` }])));
+    writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: Object.entries(names).map(([cik, t]) =>
+      T({ acc: 'DW' + cik, cik: Number(cik), t, fdate: D, tdate: PD, owners: ceo, code: 'P', ...(t === 'THIN' ? { sh: 200, val: 20000 } : { sh: 5000, val: 500000 }), px: 100, own: 1e5 })) });
+    writeJson(join(data, 'state', 'live.json'), { schema: SHARD_VERSION, lastDay: D, coverage: { [D]: { status: 'complete', indexed: 5, collected: 5, pending: 0, at: 'x' } } });
+    applyBars(data, new Map([...['SPY', 'IWM', 'DAYA', 'LATE', 'VANISH'].map(sym => [sym, parseYahooChart(chartOf(flat(PD)))]),
+      ['THIN', parseYahooChart(chartOf(flat(PD, 5e4)))]]), { updated: PD });
+    const n = {};
+    const nth = sym => (n[sym] = (n[sym] ?? 0) + 1);
+    const upTo = from => series => chartOf(series.filter(r => r[0] >= from));
     const charts = {
-      SPY: from => chartOf(flat(D).filter(r => r[0] >= from)), IWM: from => chartOf(flat(D).filter(r => r[0] >= from)),
-      DAYA: from => chartOf(flat(D).filter(r => r[0] >= from)),
-      LATE: from => chartOf(flat(++n >= lateAt ? D : PD).filter(r => r[0] >= from)),
+      SPY: from => upTo(from)(flat(D)), IWM: from => upTo(from)(flat(D)), DAYA: from => upTo(from)(flat(D)),
+      LATE: from => upTo(from)(flat(nth('LATE') >= lateAt ? D : PD)),
+      THIN: from => upTo(from)(flat(nth('THIN') >= 2 ? D : PD, 5e4)),
+      VANISH: from => (nth('VANISH') >= 2 ? { chart: { result: [] } } : upTo(from)(flat(PD))),
       GONE: () => ({ chart: { result: [] } }),
     };
-    const api = await fakeWorker({ charts });
-    const opts = mb.parseArgs(['--state', work, '--data', data, '--site', join(work, 'site'), '--date', D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+    const api = await fakeWorker({ charts, pages, failPutAt });
+    const env = { PAPER_URL: api.base, PAPER_TOKEN: 'tok', PAGES_URL: api.base };
+    const argv = ['--state', work, '--data', data, '--site', join(work, 'site'), '--date', D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--interval', '1'];
     mkdirSync(work, { recursive: true });
     let t = Date.now();
     const clock = { nowFn: () => t, sleepFn: async ms => { t += ms; }, at: () => t };
-    return { base, data, D, api, opts, clock, asked: sym => api.calls.bars.filter(x => x.sym === sym).length };
+    return { base, work, data, D, api, env, argv, opts: mb.parseArgs(argv, env), clock, asked: sym => api.calls.bars.filter(x => x.sym === sym).length,
+      sent: i => JSON.parse(api.calls.morningPuts[i]) };
   }
   const quiet = async fn => {
     const lines = [], orig = console.log;
     console.log = (...x) => { lines.push(x.join(' ')); };
     try { return { value: await fn(), lines }; } finally { console.log = orig; }
   };
+  const firstBuild = async f => {
+    const ctx = { stage: {}, lastChance: false, summary: null };
+    const r = await mb.attempt(f.opts, f.D, ctx);
+    assert.equal(r.ok, true, r.why);
+    return ctx;
+  };
 
-  await okAsync('дозапрос бара D0: список уходит сразу; бар приходит со второго дозапроса — список пересобран и отправлен заново, бумага в основном списке; бумагу, которой нет у источника, не ждём', async () => {
-    const f = await d0Fixture('.selftest-d0wait-1', 3);
+  await okAsync('дозапрос бара D0: список уходит сразу; бар LATE приходит со второго дозапроса — список отправлен заново, LATE в основном списке; бар бумаги с оборотом ниже порога список заново не отправляет; бумаги, которой нет у источника, не ждём', async () => {
+    const f = await d0Fixture('.selftest-d0wait-1');
     try {
-      const ctx = { stage: {}, lastChance: false, summary: null };
-      const { value: w, lines } = await quiet(async () => {
-        const r = await mb.attempt(f.opts, f.D, ctx);
-        assert.equal(r.ok, true, r.why);
+      const { value: [ctx, w], lines } = await quiet(async () => {
+        const ctx = await firstBuild(f);
         assert.equal(f.api.calls.morningPuts.length, 1, 'список ушёл сразу, не дожидаясь бара');
-        assert.deepEqual([...JSON.parse(f.api.calls.morningPuts[0]).days[0].unpriced].sort(), ['GONE', 'LATE']);
-        assert.ok('LATE' in ctx.d0Wait.from && !('GONE' in ctx.d0Wait.from), 'бумагу, которой у источника нет вовсе, не ждём');
-        return mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 10_000, f.clock);
+        assert.deepEqual([...f.sent(0).days[0].unpriced].sort(), ['GONE', 'LATE', 'THIN', 'VANISH']);
+        assert.ok(!('GONE' in ctx.d0Wait.from), 'бумагу, которой у источника нет вовсе, не ждём');
+        return [ctx, await mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 10_000, f.clock)];
       });
-      assert.deepEqual([w.rounds, w.arrived, w.left, w.pending], [2, ['LATE'], [], false], JSON.stringify(w));
-      assert.equal(f.api.calls.morningPuts.length, 2, 'после прихода бара список отправлен заново, и только один раз');
-      const sent = JSON.parse(f.api.calls.morningPuts[1]);
-      assert.deepEqual(sent.days[0].unpriced, ['GONE']);
-      assert.ok(sent.days[0].rows.some(x => x.t === 'LATE' && x.main && x.px === 100), 'LATE — в основном списке с ценой D0');
-      assert.ok(sent.days[0].rows.some(x => x.t === 'DAYA' && x.main), 'DAYA на месте');
-      assert.equal(ctx.summary.unpriced, 1); assert.deepEqual(ctx.d0Late, ['LATE']);
-      assert.deepEqual([f.asked('LATE'), f.asked('GONE'), f.asked('DAYA')], [3, 1, 1], 'дозапрос просит только LATE');
-      assert.ok(lines.some(l => /дозапрос 2: бар D0 пришёл у LATE — пересобираю список/.test(l)), lines.join('\n'));
+      assert.deepEqual([w.rounds, w.arrived, w.left, w.sent, w.stopped], [2, ['THIN', 'LATE'], [], 1, null], JSON.stringify(w));
+      assert.equal(f.api.calls.morningPuts.length, 2, 'заново отправлено один раз — когда изменились строки дня');
+      const s = f.sent(1).days[0];
+      assert.deepEqual([...s.unpriced].sort(), ['GONE', 'VANISH']);
+      assert.ok(s.rows.some(x => x.t === 'LATE' && x.main && x.px === 100), 'LATE — в основном списке с ценой D0');
+      assert.ok(s.rows.some(x => x.t === 'DAYA' && x.main) && !s.rows.some(x => x.t === 'THIN'), 'DAYA на месте, THIN по обороту не проходит');
+      assert.deepEqual(ctx.d0Late, ['THIN', 'LATE']);
+      assert.deepEqual(['LATE', 'THIN', 'VANISH', 'GONE', 'DAYA'].map(f.asked), [3, 2, 2, 1, 1], 'дозапрос просит только ждущих');
+      assert.ok(lines.some(l => /дозапрос 1: источник цен больше не знает VANISH/.test(l)), 'VANISH выбыла');
+      assert.ok(lines.some(l => /дозапрос 1: бар D0 пришёл у THIN/.test(l)) && lines.some(l => /строки списка дня не изменились — заново не отправляю/.test(l)), lines.join('\n'));
+      assert.ok(lines.some(l => /дозапрос 2: бар D0 пришёл у LATE/.test(l)) && lines.some(l => /список отправлен заново/.test(l)), lines.join('\n'));
       // ждать больше нечего: повторный вызов ничего не просит
       const again = await quiet(() => mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 10_000, f.clock));
       assert.deepEqual([again.value.rounds, f.asked('LATE'), f.api.calls.morningPuts.length], [0, 3, 2]);
     } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
   });
 
-  await okAsync('дозапрос бара D0: бар так и не пришёл — переспрашивает до --until, список отправлен один раз, в журнале названа бумага; без запаса времени не ждёт', async () => {
-    const f = await d0Fixture('.selftest-d0wait-2', Infinity);
+  await okAsync('дозапрос бара D0: бар так и не пришёл — переспрашивает до срока, список отправлен один раз, в журнале названа бумага; без запаса времени не ждёт', async () => {
+    const f = await d0Fixture('.selftest-d0wait-2', { lateAt: Infinity });
     try {
-      const ctx = { stage: {}, lastChance: false, summary: null };
-      const { value: w, lines } = await quiet(async () => {
-        assert.equal((await mb.attempt(f.opts, f.D, ctx)).ok, true);
-        return mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 5_000, f.clock);
+      const { value: [ctx, w], lines } = await quiet(async () => {
+        const ctx = await firstBuild(f);
+        return [ctx, await mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 5_000, f.clock)];
       });
-      assert.deepEqual([w.rounds, w.arrived, w.left], [4, [], ['LATE']], 'интервал 1 с, до предела 5 с — четыре дозапроса');
-      assert.equal(f.api.calls.morningPuts.length, 1, 'без нового бара список заново не отправляется');
+      assert.deepEqual([w.rounds, w.left, w.sent], [4, ['LATE'], 0], 'интервал 1 с, до срока 5 с — четыре дозапроса');
+      assert.equal(f.api.calls.morningPuts.length, 1, 'без нового бара у бумаги списка список заново не отправляется');
       assert.equal(f.asked('LATE'), 5);
-      assert.ok(lines.some(l => /бар D0 так и не пришёл к 23:30 ET у 1 бумаг \(LATE\)/.test(l)), lines.join('\n'));
+      assert.ok(lines.some(l => /бар D0 так и не пришёл к \d\d:\d\d ET у 1 бумаг \(LATE\)/.test(l)), lines.join('\n'));
       const late = await quiet(() => mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 500, f.clock));
-      assert.deepEqual([late.value.rounds, late.value.left, f.asked('LATE')], [0, ['LATE'], 5], 'до предела меньше интервала — не ждём');
+      assert.deepEqual([late.value.rounds, late.value.left, f.asked('LATE')], [0, ['LATE'], 5], 'до срока меньше интервала — не ждём');
       assert.ok(late.lines.some(l => /дозапросить уже не успеть/.test(l)));
     } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
   });
 
-  await okAsync('дозапрос бара D0: основной цикл зовёт его после отправки списка, а с --once и с --no-d0-wait — нет', async () => {
-    // день фикстуры в прошлом, поэтому дозапрос сразу видит, что до --until не успеть, — это и признак того, что его позвали
-    for (const flag of [null, '--once', '--no-d0-wait']) {
-      const f = await d0Fixture('.selftest-d0wait-3', 2);
+  await okAsync('дозапрос бара D0: на странице уже список GitHub за день — бар пришёл, но список заново не отправляется (сервер не становится свежее GitHub)', async () => {
+    const f = await d0Fixture('.selftest-d0wait-3', { lateAt: 2 });
+    try {
+      const { value: w, lines } = await quiet(async () => {
+        const ctx = await firstBuild(f);
+        return mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 10_000, { ...f.clock, pagesFetch: async () => new Response(JSON.stringify({ builder: 'github', listFor: f.D, builtAt: 'x' }), { status: 200 }) });
+      });
+      assert.deepEqual([w.rounds, w.sent, w.stopped], [1, 0, 'github'], JSON.stringify(w));
+      assert.equal(f.api.calls.morningPuts.length, 1);
+      assert.ok(lines.some(l => /список GitHub за день уже собран — заново не отправляю/.test(l)), lines.join('\n'));
+      // список GitHub за прошлый день — не помеха
+      const g = await mb.githubBuilt(f.opts, f.D, async () => new Response(JSON.stringify({ builder: 'github', listFor: '2000-01-03' }), { status: 200 }));
+      assert.equal(g, false);
+      assert.equal(await mb.githubBuilt(f.opts, f.D, async () => { throw new Error('сеть'); }), null, 'страница не ответила — решает время');
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: отправка заново не удалась — повтор в следующем круге, без нового запроса баров', async () => {
+    const f = await d0Fixture('.selftest-d0wait-4', { lateAt: 2, failPutAt: [2] });
+    try {
+      const { value: w, lines } = await quiet(async () => mb.waitD0(f.opts, f.D, await firstBuild(f), f.clock.at() + 10_000, f.clock));
+      assert.deepEqual([w.rounds, w.sent, w.left], [2, 1, []], JSON.stringify(w));
+      assert.deepEqual([f.api.calls.putAttempts, f.api.calls.morningPuts.length], [3, 2], 'вторая отправка упала, третья прошла');
+      assert.ok(f.sent(1).days[0].rows.some(x => x.t === 'LATE' && x.main));
+      assert.equal(f.asked('LATE'), 2, 'повтор отправки бары заново не просит');
+      assert.ok(lines.some(l => /отправка не удалась \(воркер \/morning: HTTP 500/.test(l)), lines.join('\n'));
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: основной цикл зовёт его после отправки и пишет d0Late в отметку «собрано»; с --once, --no-d0-wait и --dry-run — не зовёт', async () => {
+    for (const flag of [null, '--once', '--no-d0-wait', '--dry-run']) {
+      const f = await d0Fixture('.selftest-d0wait-5', { lateAt: 2 });
       try {
-        const argv = ['--state', f.opts.state, '--data', f.data, '--site', f.opts.site, '--date', f.D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--interval', '1', ...(flag ? [flag] : [])];
-        const { value: code, lines } = await quiet(() => morningMain(argv, { PAPER_URL: f.api.base, PAPER_TOKEN: 'tok' }));
+        const deps = { d0DeadlineMs: f.clock.at() + 10_000, sleepFn: f.clock.sleepFn, nowFn: f.clock.nowFn };
+        const { value: code } = await quiet(() => morningMain([...f.argv, ...(flag ? [flag] : [])], f.env, deps));
         assert.equal(code, 0, String(flag));
-        assert.deepEqual([f.asked('LATE'), f.api.calls.morningPuts.length], [1, 1], `${flag}: только основная докачка, список один`);
-        assert.equal(lines.some(l => /дозапросить уже не успеть/.test(l)), flag === null, `${flag}: ${lines.filter(l => /бара D0/.test(l)).join(' | ')}`);
+        const doneFile = join(f.work, 'done', `${f.D}.json`);
+        if (flag === null) {
+          assert.deepEqual([f.asked('LATE'), f.api.calls.morningPuts.length], [2, 2], 'дозапрос был, список отправлен заново');
+          assert.deepEqual(readJson(doneFile).d0Late, ['LATE', 'THIN'], 'обе пришли в первом круге');
+          assert.equal(readJson(doneFile).unpriced, 2, 'отметка — по последней отправке');
+        } else {
+          assert.deepEqual([f.asked('LATE'), f.api.calls.morningPuts.length], [1, flag === '--dry-run' ? 0 : 1], `${flag}: только основная докачка`);
+          if (flag !== '--dry-run') assert.equal(readJson(doneFile).d0Late, undefined);
+        }
       } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
     }
   });
