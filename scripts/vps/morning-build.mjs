@@ -251,7 +251,7 @@ export async function sendMorning(opts, disk) {
     const last = body === disk;
     try {
       const r = await fetch(`${opts.workerUrl}/morning`, { method: 'PUT', body, headers: { Authorization: `Bearer ${opts.token}`, 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(30000) });
-      if (r.status === 409) log('воркер хранит версию новее — наша не принята (это не сбой)');
+      if (r.status === 409) { log('воркер хранит версию новее — наша не принята (это не сбой)'); return { ok: true, stale: true }; }
       else if (!r.ok && !last && (r.status === 400 || r.status === 413)) { log(`воркер не принял список со сводкой бота (HTTP ${r.status}) — отправляю без неё`); continue; }
       else if (!r.ok) return { ok: false, why: `воркер /morning: HTTP ${r.status} ${(await r.text()).slice(0, 200)}` };
       else log('отправлено в воркер:', (await r.text()).slice(0, 200));
@@ -434,7 +434,9 @@ export async function attempt(opts, day, ctx) {
     if (!opts.token) return fail('PAPER_TOKEN не задан: список некуда отправить');
     const sent = await sendMorning(opts, readFileSync(join(opts.site, 'data', 'morning.json'), 'utf8'));
     if (!sent.ok) return fail(sent.why);
-    ctx.sentRows = ctx.builtRows;                  // что лежит в воркере: дозапрос не отправляет тот же список второй раз
+    // 409: воркер хранит версию новее — наш список не лёг; дозапрос по этому признаку прекращает отправки
+    ctx.sendStale = !!sent.stale;
+    if (!sent.stale) ctx.sentRows = ctx.builtRows; // что лежит в воркере: дозапрос не отправляет тот же список второй раз
     st.published = true;
   }
 
@@ -457,13 +459,28 @@ export async function attempt(opts, day, ctx) {
 // Срок — ночная сборка GitHub, а не только --until. Бот (ibkr-bot-840, merge_lists) берёт за основу более позднюю сборку и решает,
 // «поздняя ли цена», по времени сборок: бумага есть только у GitHub, а сервер собран раньше и отметил её без цены — жёлтое; сервер
 // собран позже — красное расхождение и сбойный день. Поэтому повторная отправка разрешена, только пока список GitHub за день ещё не
-// собран: до GITHUB_BUILD_UTC и пока на странице нет его списка за этот день (githubBuilt). Список сервера остаётся раньше GitHub, и
-// сверка в боте работает как до дозапроса.
+// собран: до GITHUB_BUILD_UTC и пока на странице нет его списка за этот день (githubBuilt). Список сервера остаётся раньше GitHub.
+// Не лечится: бар пришёл серверу дозапросом, а GitHub его не получил — у бота «только в одном источнике» (красное, код 8; сделки те
+// же), это правка сверки в боте (docs/СБОРКА-НА-VPS.md, «Дозапрос бара D0»).
 // Возвращает { rounds, arrived, left, sent, stopped } — для журнала и проверок.
 export const GITHUB_BUILD_UTC = '03:25';     // внешний cron ежедневной сборки GitHub: 22:25 ET зимой, 23:25 ET летом
 export const githubBuildMs = day => Date.parse(`${addDaysIso(day, 1)}T${GITHUB_BUILD_UTC}:00Z`);
 // Строки дня D0 — то, по чему бот строит план; сравнение до и после пересборки решает, отправлять ли список заново
 export const rowsKey = m => JSON.stringify(m?.days?.[0]?.rows ?? []);
+// Тикеры, чьи строки дня различаются между двумя ключами rowsKey (строка появилась, пропала или изменилась)
+export function changedTickers(aKey, bKey) {
+  const map = k => new Map((JSON.parse(k ?? '[]') ?? []).map(x => [x?.t, JSON.stringify(x)]));
+  const a = map(aKey), b = map(bKey);
+  return [...new Set([...a.keys(), ...b.keys()])].filter(t => a.get(t) !== b.get(t));
+}
+// Почему дозапрос бара D0 после отправки не запускается (для строки журнала), или null — запускается
+export function d0WaitOff(opts) {
+  if (opts.once) return '--once';
+  if (opts.noD0Wait) return '--no-d0-wait';
+  if (opts.dry) return 'пробный прогон';
+  if (opts.letters && !opts.noLetter) return 'письма идут с сервера (TELEGRAM_* в env): письмо уже ушло со списком без бумаги, уточнения «список изменён» не было бы';
+  return null;
+}
 // Список GitHub за день уже на странице? true — да; false — нет; null — не узнать (сеть): тогда решает только время
 export async function githubBuilt(opts, day, fetchImpl = fetch) {
   try {
@@ -483,6 +500,11 @@ export async function waitD0(opts, day, ctx, deadlineMs, { sleepFn = sleep, nowF
   const unpriced = new Set(ctx.unpricedD0 ?? []);
   let left = Object.keys(w.from).filter(sym => unpriced.has(sym) && !hasD0(sym));
   if (!left.length) return out;
+  if (ctx.sendStale) {
+    out.left = left; out.stopped = 'worker';
+    log(`без бара D0 у ${left.length} бумаг дня (${fmt(left)}), но воркер не принял и первую отправку (хранит список новее) — дозапрос не запускаю`);
+    return out;
+  }
   const until = nyWall(deadlineMs).slice(11, 16);
   if (nowFn() + opts.interval * 1000 >= deadlineMs) {
     out.left = left;
@@ -491,8 +513,17 @@ export async function waitD0(opts, day, ctx, deadlineMs, { sleepFn = sleep, nowF
   }
   log(`без бара D0 у ${left.length} бумаг дня (${fmt(left)}): Yahoo ответил без него. Список уже отправлен; переспрашиваю каждые ${opts.interval} с до ${until} ET (до сборки GitHub) и отправлю список заново, если бар придёт`);
   let needBuild = false, needSend = false;
+  // Срок проверяется и внутри круга: круг, начатый за секунды до срока, иначе запросил бы бары, пересобрал список и отправил его
+  // на минуты позже сборки GitHub. После срока список не пересобирается и не отправляется.
+  const pastDeadline = where => {
+    if (nowFn() < deadlineMs) return false;
+    out.stopped = 'deadline';
+    log(`срок ${until} ET (сборка GitHub или --until) наступил ${where} — список больше не пересобираю и не отправляю`);
+    return true;
+  };
   while ((left.length || needBuild || needSend) && nowFn() + opts.interval * 1000 < deadlineMs) {
     await sleepFn(opts.interval * 1000);
+    if (pastDeadline('до дозапроса')) break;
     out.rounds++;
     if (left.length) {
       const r = await fetchBars(opts.workerUrl, opts.token, left.map(sym => ({ sym, from: w.from[sym] })));
@@ -516,6 +547,7 @@ export async function waitD0(opts, day, ctx, deadlineMs, { sleepFn = sleep, nowF
       }
       left = left.filter(sym => !now.includes(sym) && !gone.includes(sym));
     }
+    if (needBuild && pastDeadline('до пересборки')) break;
     if (needBuild) {
       // пересборка: только расчёт, без отправки. Индекс уже подтверждён (или список по ленте) — SEC второй раз не спрашиваем.
       st.index = true; st.built = false; st.published = true;
@@ -525,6 +557,7 @@ export async function waitD0(opts, day, ctx, deadlineMs, { sleepFn = sleep, nowF
       needSend = ctx.builtRows !== ctx.sentRows;
       if (!needSend) log('строки списка дня не изменились — заново не отправляю');
     }
+    if (needSend && !opts.dry && pastDeadline('до отправки')) break;
     if (needSend) {
       if (opts.dry) { needSend = false; log('пробный прогон: список пересобран, не отправляю'); continue; }
       // время сборки GitHub отсекает срок (deadlineMs); страница — на случай сборки вне расписания (ручной прогон, бэкфил)
@@ -534,18 +567,27 @@ export async function waitD0(opts, day, ctx, deadlineMs, { sleepFn = sleep, nowF
         break;
       }
       st.published = false;
+      const was = ctx.sentRows;
       const p = await attempt(opts, day, ctx);
       if (!p.ok) { log(`отправка не удалась (${p.why}) — повтор через ${opts.interval} с`); continue; }
       needSend = false;
+      if (ctx.sendStale) {
+        // 409: у воркера версия новее (список GitHub или ручная отправка) — наша не легла: это не отправка, и дальше отправлять незачем
+        out.stopped = 'worker';
+        log('воркер хранит список новее — повторная отправка не принята; дальше не отправляю');
+        break;
+      }
       out.sent++;
-      ctx.d0Late = [...out.arrived];
+      // в отметке «собрано» — бумаги, чей бар пришёл позже и чьи строки списка изменились (бар бумаги ниже порогов строк не меняет)
+      const changed = new Set(changedTickers(was, ctx.sentRows));
+      ctx.d0Late = [...new Set([...(ctx.d0Late ?? []), ...out.arrived.filter(t => changed.has(t))])];
       onRebuilt();
-      log(`список отправлен заново: без цены на D0 ${ctx.summary?.unpriced ?? '—'}, бар пришёл позже у ${fmt(out.arrived)}`);
+      log(`список отправлен заново: без цены на D0 ${ctx.summary?.unpriced ?? '—'}, строки изменились у ${fmt(ctx.d0Late)}`);
     }
   }
   out.left = left;
   if (left.length && !out.stopped) log(`бар D0 так и не пришёл к ${until} ET у ${left.length} бумаг (${fmt(left)}) — они остаются «без цены»`);
-  if ((needBuild || needSend) && !out.stopped) log(`ВНИМАНИЕ: бар D0 пришёл, но ${needBuild ? 'пересобрать' : 'отправить'} список до ${until} ET не удалось — в воркере прежний список`);
+  if ((needBuild || needSend) && (!out.stopped || out.stopped === 'deadline')) log(`ВНИМАНИЕ: бар D0 пришёл, но ${needBuild ? 'пересобрать' : 'отправить'} список до ${until} ET не удалось — в воркере прежний список`);
   return out;
 }
 
@@ -574,7 +616,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
       // Дозапрос бара D0: список уже отправлен, отметка «собрано» стоит; бумаги без бара дня переспрашиваются до сборки GitHub
       // (не позже --until). Не в пробном прогоне (он висел бы до срока) и не когда письма идут с сервера: письмо уже ушло со
       // списком без бумаги, а сверка GitHub сравнивает свой список с тем, что лежит в воркере, — уточнения «список изменён» не было бы.
-      if (!opts.once && !opts.noD0Wait && !opts.dry && !(opts.letters && !opts.noLetter)) {
+      const d0Off = d0WaitOff(opts);
+      if (d0Off) log(`дозапрос бара D0 после отправки не запускается: ${d0Off}`);
+      else {
         try {
           await waitD0(opts, day, ctx, deps.d0DeadlineMs ?? Math.min(untilMs, githubBuildMs(day)), { onRebuilt: writeDone, ...(deps.sleepFn ? { sleepFn: deps.sleepFn } : {}), ...(deps.nowFn ? { nowFn: deps.nowFn } : {}) });
         } catch (e) { log('дозапрос бара D0 оборвался (список уже отправлен, в воркере он есть):', e.message); }
