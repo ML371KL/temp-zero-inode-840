@@ -4917,6 +4917,10 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       const g = await mb.githubBuilt(f.opts, f.D, async () => new Response(JSON.stringify({ builder: 'github', listFor: '2000-01-03' }), { status: 200 }));
       assert.equal(g, false);
       assert.equal(await mb.githubBuilt(f.opts, f.D, async () => { throw new Error('сеть'); }), null, 'страница не ответила — решает время');
+      // адрес страницы — с меткой времени: кэш CDN GitHub Pages не отдаёт старый список после внеплановой сборки GitHub
+      let asked = null;
+      await mb.githubBuilt(f.opts, f.D, async url => { asked = url; return new Response('{}', { status: 200 }); });
+      assert.match(asked, /\/data\/morning\.json\?t=\d{13}$/);
     } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
   });
 

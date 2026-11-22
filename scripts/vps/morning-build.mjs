@@ -484,7 +484,8 @@ export function d0WaitOff(opts) {
 // Список GitHub за день уже на странице? true — да; false — нет; null — не узнать (сеть): тогда решает только время
 export async function githubBuilt(opts, day, fetchImpl = fetch) {
   try {
-    const r = await fetchImpl(`${opts.pagesUrl}/data/morning.json`, { headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15000) });
+    // метка в адресе — мимо кэша CDN GitHub Pages (около 10 минут): после внеплановой сборки GitHub страница иначе отдавала бы старый список
+    const r = await fetchImpl(`${opts.pagesUrl}/data/morning.json?t=${Date.now()}`, { headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(15000) });
     if (!r.ok) return null;
     const m = await r.json();
     return m?.builder === 'github' && typeof m.listFor === 'string' && m.listFor >= day;
