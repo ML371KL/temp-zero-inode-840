@@ -32,7 +32,7 @@ import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, unlinkSyn
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { readJson, writeJson, addDaysIso } from '../lib/util.mjs';
-import { nyWall } from '../lib/nytime.mjs';
+import { nyWall, nyToMs } from '../lib/nytime.mjs';
 import { barClosedAtMs, openBarDay, dropOpenBars } from '../lib/session.mjs';
 import { fetchBars, applyBars, applyLows, BACK_DAYS } from '../lib/bars.mjs';
 import { readPriceCache, turnover20 } from '../lib/prices.mjs';
@@ -52,6 +52,11 @@ export const REF = {
   freshShareLast: 0.8,     // на последней попытке хватит и этого (остальные бумаги сигнала не дадут)
   keepDays: 10,            // сколько справочников хранить
   morningMaxMin: 45,       // утренний повтор (запуск с 04:00 до 12:00 ET) работает не дольше: в 08:20 стартует торговый день бота
+  // Жёсткий срок утреннего повтора: расчёт (compute, до 3 ГБ памяти) не начинается позже morningComputeBy и снимается, если идёт
+  // дольше morningKillBy, — иначе медленный источник цен сдвинул бы его на старт дня бота (08:20), приём списка (08:30) и
+  // постановку заявок. Не успел — выход с ошибкой (тревога dash-alert), процесс сигналов в этот день сам напишет off.
+  morningComputeBy: '08:05',
+  morningKillBy: '08:15',
   pauseMs: 1500,           // пауза между пачками по 20 бумаг у воркера: вселенная — около 85 пачек, спешить некуда
 };
 
@@ -73,12 +78,22 @@ export function parseArgs(argv, env = process.env) {
   };
 }
 
-function run(cmd, args, { cwd, env, label }) {
+// killAtMs — момент, после которого процесс снимается (SIGKILL: compute не держит ничего, что надо дописывать) и код — 124
+export function run(cmd, args, { cwd, env, label, killAtMs = null }) {
   return new Promise(resolveP => {
     const p = spawn(cmd, args, { cwd, env, stdio: 'inherit' });
-    p.on('error', e => { log(`${label}: не запустился — ${e.message}`); resolveP(127); });
-    p.on('close', code => resolveP(code ?? 1));
+    let killed = false;
+    const timer = killAtMs === null ? null : setTimeout(() => { killed = true; log(`${label}: срок вышел — снимаю`); p.kill('SIGKILL'); }, Math.max(0, killAtMs - Date.now()));
+    p.on('error', e => { if (timer) clearTimeout(timer); log(`${label}: не запустился — ${e.message}`); resolveP(127); });
+    p.on('close', code => { if (timer) clearTimeout(timer); resolveP(killed ? 124 : (code ?? 1)); });
   });
+}
+// Утренний срок расчёта в мс или null (ночной запуск). day — дата по Нью-Йорку
+export function morningDeadlines(nowMs) {
+  const w = nyWall(nowMs), hour = Number(w.slice(11, 13));
+  if (!(hour >= 4 && hour < 12)) return null;
+  const day = w.slice(0, 10);
+  return { computeBy: nyToMs(`${day}T${REF.morningComputeBy}`), killBy: nyToMs(`${day}T${REF.morningKillBy}`) };
 }
 const git = (args, o) => run('git', args, { cwd: o.cwd, env: o.env, label: 'git ' + args[0] });
 // Ветка data -> своя копия (как у сборки списка: постоянный репозиторий, каждый запуск — чистое дерево)
@@ -157,7 +172,9 @@ export const refReady = (have, days) => !!have && have.v === SIGNAL.v && have.as
 export async function attempt(opts, days, ctx, { fetchBarsImpl = fetchBars, nowMs = () => Date.now() } = {}) {
   const st = ctx.stage;
   const fail = why => { log('✗', why); return { ok: false, why }; };
+  const late = () => ({ ok: false, late: true, why: `утром расчёт справочника не начинается позже ${REF.morningComputeBy} ET (в 08:20 — старт дня бота), а сейчас ${nyWall(nowMs()).slice(11, 16)} ET` });
   const { asOf, forDay } = days;
+  if (ctx.deadlines && !st.built && nowMs() >= ctx.deadlines.computeBy) return late();
   if (!opts.noSync && !st.sync) {
     log('ветка data: загрузка…');
     if (!(await syncData(opts))) return fail('не удалось получить ветку data');
@@ -217,13 +234,15 @@ export async function attempt(opts, days, ctx, { fetchBarsImpl = fetchBars, nowM
     st.bars = true;
   }
   if (!st.built) {
+    if (ctx.deadlines && nowMs() >= ctx.deadlines.computeBy) return late();
     mkdirSync(opts.site, { recursive: true });
     mkdirSync(opts.refDir, { recursive: true });
     const uniFile = join(opts.build, 'universe.json'), tmp = join(opts.refDir, `.${forDay}.json.tmp`);
     writeJson(uniFile, names);
     const code = await run(process.execPath, ['--max-old-space-size=3072', join(CODE, 'scripts/compute.mjs'), '--data', opts.data, '--site', opts.site,
       '--only-morning', '--builder', 'vps-ref', '--intraday-ref', tmp, '--intraday-for', forDay, '--intraday-universe', uniFile],
-      { cwd: CODE, env: { ...process.env, ...opts.env }, label: 'compute' });
+      { cwd: CODE, env: { ...process.env, ...opts.env }, label: 'compute', killAtMs: ctx.deadlines?.killBy ?? null });
+    if (code === 124 && ctx.deadlines) return { ok: false, late: true, why: `расчёт справочника не успел к ${REF.morningKillBy} ET и снят` };
     if (code) return fail(`compute завершился с ошибкой (код ${code})`);
     const ref = readJson(tmp, null);
     const bad = !ref ? 'файл не записан' : ref.v !== SIGNAL.v ? `версия ${ref.v}` : ref.asOf !== asOf ? `бары по ${ref.asOf}, а нужен ${asOf}` : ref.for !== forDay ? `день ${ref.for}` : !(ref.n >= opts.minTickers) ? `бумаг ${ref.n}, меньше ${opts.minTickers}` : null;
@@ -265,7 +284,9 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const maxMin = hour >= 4 && hour < 12 ? Math.min(opts.maxMin, REF.morningMaxMin) : opts.maxMin;
   log(`день сигнала ${days.forDay}, бары по ${days.asOf}; ${nyWall(nowMs()).slice(0, 16)} ET, не дольше ${maxMin} мин`);
   const untilMs = Date.now() + maxMin * 60e3;
-  const ctx = { stage: {}, lastChance: false, summary: null };
+  // утренний запуск: жёсткий срок расчёта (по часам --now, если они заданы)
+  const ctx = { stage: {}, lastChance: false, summary: null, deadlines: morningDeadlines(nowMs()) };
+  if (ctx.deadlines && fixed !== null) ctx.deadlines.killBy = Date.now() + (ctx.deadlines.killBy - fixed);
   for (let n = 1; ; n++) {
     ctx.lastChance = opts.once || Date.now() + opts.interval * 1000 >= untilMs;
     log(`попытка ${n}${ctx.lastChance ? ' (последняя)' : ''}`);
@@ -280,6 +301,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
       log('готово', JSON.stringify(ctx.summary));
       return 0;
     }
+    if (r.late) { log(`НЕ СОБРАНО (поздно): ${r.why} — сигналов ${days.forDay} не будет, процесс сигналов запишет off`); return 1; }
     if (ctx.lastChance) { log(`НЕ СОБРАНО: ${r.why} — сигналов ${days.forDay} не будет`); return 1; }
     await sleep(opts.interval * 1000);
   }

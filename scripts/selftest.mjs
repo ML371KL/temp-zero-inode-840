@@ -5403,6 +5403,71 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     rmSync(sigBase, { recursive: true, force: true });
   });
 
+  // Пачка форм такта ленты (независимая проверка 22.11.2026): лента пишет seen по всем новым подачам такта, потом формы по одной;
+  // процесс сигналов не считает событие, пока пачка не дочитана, — иначе три формы размещения делились «две и одна»
+  ok('контур B: пачка такта ленты — событие ждёт, пока замеченные подачи не скачаны; старая незакрытая подача не держит; потолок ожидания', () => {
+    const g = new it.FormGate({ pendingSec: 20, maxSec: 30 }), t0 = ny(`${DAY}T11:01:00`);
+    const one = (cik, acc) => new Map([[cik, { acc }]]);
+    g.seen('A', t0); g.seen('B', t0); g.seen('C', t0);
+    g.formed('A'); g.hold(one(100, 'A'), t0 + 1000);
+    assert.deepEqual(g.due(t0 + 1500), [], 'B и C ещё качаются');
+    g.formed('B');
+    assert.deepEqual(g.due(t0 + 2000), []);
+    g.formed('C');
+    assert.deepEqual(g.due(t0 + 3000).map(x => [x.cik, x.form.acc, x.held, x.cap]), [[100, 'A', 2, false]], 'пачка дочитана');
+    // подача, которая не скачивается (файла у SEC ещё нет), держит событие не дольше pendingSec от того, как её заметили
+    g.seen('D', t0 + 10_000); g.hold(one(200, 'E'), t0 + 12_000);
+    assert.deepEqual(g.due(t0 + 29_000), []);
+    assert.deepEqual(g.due(t0 + 30_000).map(x => [x.cik, x.held, x.cap]), [[200, 18, false]]);
+    // подачи всё прибывают: событие отпускается по потолку maxSec
+    g.hold(one(300, 'F'), t0 + 40_000);
+    for (const s of [40_000, 46_000, 52_000, 58_000, 64_000]) { g.seen('N' + s, t0 + s); assert.deepEqual(g.due(t0 + s + 500), [], String(s)); }
+    g.seen('N70', t0 + 70_000);
+    assert.deepEqual(g.due(t0 + 70_500).map(x => [x.cik, x.held, x.cap]), [[300, 30.5, true]]);
+    // поздняя форма того же эмитента в ожидании заменяет причину записи; конец работы отпускает всё
+    g.seen('G', t0 + 80_000); g.hold(one(400, 'H1'), t0 + 80_100);
+    g.hold(new Map([[400, { acc: 'H2', acs: `${DAY}T11:02:30` }]]), t0 + 80_200);
+    assert.deepEqual(g.due(t0 + 80_300, { force: true }).map(x => [x.cik, x.form.acc]), [[400, 'H2']]);
+    assert.equal(g.held.size, 0);
+  });
+
+  await okAsync('контур B: процесс сигналов — три формы размещения одного такта, скачанные по одной, сигнала не дают (повтор журнала); недокачанная подача задерживает сигнал не дольше 20 с, задержка записана', async () => {
+    const who = n => [{ cik: 9200 + n, name: `Placer ${n}`, rel: 'DO', title: 'CFO' }];
+    const iso = hms => new Date(ny(`${DAY}T${hms}`)).toISOString();
+    const forms = [1, 2, 3].map(n => ({ ...formOf([row({ owners: who(n), sh: 30000 })], '11:03:00'), w: iso(`11:03:0${5 + n}`) }));
+    const seen = forms.map(f => ({ k: 'seen', acc: f.acc, cik: 9200, filed: DAY, t: iso('11:03:05') }));
+    const base = join(ROOT, '.selftest-signals-batch');
+    rmSync(base, { recursive: true, force: true });
+    const run = async (name, recs) => {
+      const dir = join(base, name, 'sig'), fd = join(base, name, 'feed');
+      mkdirSync(join(dir, 'ref'), { recursive: true }); mkdirSync(fd, { recursive: true });
+      writeJson(join(dir, 'ref', `${DAY}.json`), mkRef());
+      writeFileSync(feedFile(fd, DAY), recs.map(x => JSON.stringify(x)).join('\n') + '\n');
+      const r = await runWatch(dir, fd, ['--replay']);
+      assert.equal(r.code, 0, r.out);
+      return { L: linesOf(join(dir, `${DAY}.jsonl`)).filter(x => x.k === 'sig' || x.k === 'skip'), out: r.out };
+    };
+    try {
+      // seen трёх подач такта, затем формы по одной секунде: до правки первая форма давала сигнал
+      const a = await run('sync', [{ k: 'run' }, ...seen, ...forms]);
+      assert.deepEqual(a.L.map(x => [x.k, x.why ?? null]), [['skip', 'gates:sync']], a.out);
+      assert.ok(a.L[0].hold >= 2 && a.L[0].hold <= 3.5, 'событие ждало дочитки пачки: ' + a.L[0].hold);
+      // одна форма и одна недокачанная подача: сигнал отпущен через 20 с после того, как ленту увидела подачу
+      const f1 = { ...formOf([row({ sh: 30000 })], '11:10:00'), w: iso('11:10:31') };
+      const b = await run('pending', [{ k: 'run' },
+        { k: 'seen', acc: f1.acc, cik: 100, filed: DAY, t: iso('11:10:30') }, { k: 'seen', acc: 'NEVER-1', cik: 9999, filed: DAY, t: iso('11:10:30') },
+        f1, { k: 'stat', t: iso('11:20:00') }]);
+      assert.deepEqual(b.L.map(x => x.k), ['sig'], b.out);
+      assert.ok(b.L[0].hold >= 19 && b.L[0].hold <= 20.5 && !b.L[0].holdCap, JSON.stringify(b.L[0]));
+      assert.ok(Date.parse(b.L[0].tw) - Date.parse(iso('11:10:31')) >= 19e3 && Date.parse(b.L[0].tw) - Date.parse(iso('11:10:31')) <= 21e3, b.L[0].tw);
+      assert.match(b.out, /ждал дочитки пачки ленты \d+(\.\d)? с/);
+      // форма без ожидания (пачка из одной подачи) — поля hold нет, момент записи прежний
+      const f2 = { ...formOf([row({ sh: 30000 })], '11:12:00'), w: iso('11:12:31') };
+      const c = await run('single', [{ k: 'run' }, { k: 'seen', acc: f2.acc, cik: 100, filed: DAY, t: iso('11:12:30') }, f2]);
+      assert.deepEqual([c.L.length, c.L[0].k, c.L[0].hold, c.L[0].tw], [1, 'sig', undefined, '2026-11-20T16:12:31Z']);
+    } finally { rmSync(base, { recursive: true, force: true }); }
+  });
+
   // Справочник D−1 от самого compute: без ключа сборка не меняется; событие по справочнику равно строке списка, посчитанной compute
   await okAsync('контур B: compute --intraday-ref — список тот же, что без ключа; событие по справочнику равно строке списка самого compute на тех же барах', async () => {
     const base = join(ROOT, '.selftest-intraday'), data = join(base, 'repo');
@@ -5506,6 +5571,35 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       assert.equal(await ir.main(['--state', state, '--no-sync', '--once', '--now', nowIso, '--no-forms-from'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' }), 1, 'справочник из одной бумаги — не справочник (порог --min-tickers)');
     } finally { await api.close(); rmSync(base, { recursive: true, force: true }); }
     assert.equal(ir.closedOnly({ series: [['2026-11-19', 1, 1, 1], ['2026-11-20', 2, 2, 2]], ohlc: [['2026-11-19', 1, 1], ['2026-11-20', 2, 2]], lows: [['2026-11-19', 1], ['2026-11-20', 2]] }, '2026-11-19', nyToMs('2026-11-20T23:52')).series.length, 1, 'бары позже asOf срезаются и после закрытия');
+  });
+
+  // Жёсткий срок утреннего справочника (независимая проверка 22.11.2026): расчёт до 3 ГБ не должен прийтись на старт дня бота
+  await okAsync('контур B: утренний справочник — расчёт не начинается позже 08:05 ET (выход с ошибкой, к источнику цен не ходим), начатый снимается в 08:15; ночной запуск сроков не знает', async () => {
+    assert.equal(ir.morningDeadlines(nyToMs('2026-11-23T23:52')), null, 'ночной запуск');
+    assert.deepEqual(ir.morningDeadlines(nyToMs('2026-11-24T07:00')), { computeBy: nyToMs('2026-11-24T08:05'), killBy: nyToMs('2026-11-24T08:15') });
+    assert.equal(ir.morningDeadlines(nyToMs('2026-11-24T12:00')), null);
+    const base = join(ROOT, '.selftest-intraday3'), state = join(base, 'state'), data = join(state, 'build', 'repo');
+    rmSync(base, { recursive: true, force: true });
+    for (const d of ['trades', 'reference', 'prices', 'state']) cpSync(join(TMP, d), join(data, d), { recursive: true });
+    let day = nyWall(Date.now()).slice(0, 10); while (isMarketClosed(day)) day = addDaysIso(day, 1);
+    const asked = [];
+    const api = await fakeWorker({ charts: { SPY: from => { asked.push(['SPY', from]); return chartOf([]); } } });
+    const lines = [], orig = console.log;
+    try {
+      console.log = (...x) => { lines.push(x.join(' ')); };
+      const code = await ir.main(['--state', state, '--no-sync', '--now', new Date(nyToMs(`${day}T08:06`)).toISOString(), '--min-tickers', '1', '--no-forms-from', '--interval', '1'], { PAPER_URL: api.base, PAPER_TOKEN: 'tok' });
+      console.log = orig;
+      assert.equal(code, 1, lines.join('\n'));
+      assert.deepEqual(asked, [], 'после срока бары не запрашиваются');
+      assert.equal(existsSync(join(state, 'ref', `${day}.json`)), false);
+      assert.ok(lines.some(l => /НЕ СОБРАНО \(поздно\): утром расчёт справочника не начинается позже 08:05 ET/.test(l)), lines.join('\n'));
+      assert.equal(lines.filter(l => /попытка \d/.test(l)).length, 1, 'после срока попыток больше нет');
+    } finally { console.log = orig; await api.close(); rmSync(base, { recursive: true, force: true }); }
+    // снятие по сроку: долгий процесс снимается, код 124
+    const t0 = Date.now();
+    const code = await ir.run(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { label: 'проба', killAtMs: Date.now() + 300 });
+    assert.equal(code, 124); assert.ok(Date.now() - t0 < 10_000);
+    assert.equal(await ir.run(process.execPath, ['-e', 'process.exit(0)'], { label: 'проба', killAtMs: Date.now() + 20_000 }), 0, 'успел — код процесса');
   });
 }
 

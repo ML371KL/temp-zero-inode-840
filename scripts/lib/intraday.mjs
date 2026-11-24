@@ -327,6 +327,11 @@ export class DayState {
   // Формы, пришедшие разными тактами, по-прежнему считаются по мере прихода. seenAtOf(acc) — когда лента увидела подачу;
   // onError(cik, ошибка) — расчёт события одного эмитента не удался (остальные считаются). -> записи для файла сигналов
   onForms(forms, { seenAtOf = () => null, nowMs = Date.now(), onError = null } = {}) {
+    return this.evalTouched(this.addForms(forms), { seenAtOf, nowMs, onError });
+  }
+  // Первая половина onForms: учесть формы порции, не считая событий. -> Map cik -> форма, принятая SEC позже остальных (причина
+  // записи). Процесс сигналов держит событие (FormGate), пока пачка форм такта ленты не дочитана, и считает его evalTouched.
+  addForms(forms) {
     const touched = new Map();       // cik -> форма порции, принятая SEC позже остальных: она и есть причина записи
     for (const form of forms ?? []) {
       if (!form || form.filed !== this.day || this.accs.has(form.acc)) continue;
@@ -339,6 +344,10 @@ export class DayState {
       const prev = touched.get(cik);
       if (!prev || (acceptedMs(form) ?? 0) >= (acceptedMs(prev) ?? 0)) touched.set(cik, form);
     }
+    return touched;
+  }
+  // Вторая половина onForms: событие каждого эмитента из touched (cik -> форма-причина) считается один раз
+  evalTouched(touched, { seenAtOf = () => null, nowMs = Date.now(), onError = null } = {}) {
     if (this.off) return [];
     const out = [];
     for (const [cik, form] of touched) {
@@ -376,6 +385,54 @@ export class DayState {
       score: body.score, pts: body.pts, mx: body.mx, val: body.val, rows: body.rows, dv: body.dv, px: body.px, asOf: body.asOf, dd: body.dd,
       role: body.role, td: body.td, fpx: body.fpx, same: body.same, units: body.units,
     }];
+  }
+}
+
+// ---------- пачка форм такта ленты ----------
+// Лента (feed-collector.mjs, tick) за такт сначала пишет записи seen по всем новым подачам, затем качает формы по одной и пишет
+// запись form на каждую. Процесс сигналов читает журнал раз в 1,5 с и мог посчитать событие эмитента по части пачки: три формы
+// размещения одной цены делились «две и одна», сигнал уходил по первым, а отсев «синхронная подача» видел бы только все три
+// (независимая проверка 22.11.2026). Поэтому событие держится, пока у ленты есть замеченные и не скачанные подачи.
+//
+// Чьи это подачи, по записи seen не узнать: лента EDGAR даёт запись и на эмитента, и на каждого подавшего, а сборщик берёт первую
+// (на журналах 05–17.11.2026 CIK записи seen совпадал с эмитентом формы у 15–20% подач). Поэтому ждать — любую незакрытую подачу,
+// но недолго: подача, замеченная больше pendingSec назад и всё не скачанная (файла у SEC ещё нет, сеть), событие не держит, а одно
+// событие держится не дольше maxSec (потолок — пока подачи всё прибывают). Формы разных тактов, между которыми пачка успела
+// дочитаться, считаются по мере прихода, как раньше.
+export const HOLD = { pendingSec: 20, maxSec: 30 };
+export class FormGate {
+  constructor(p = HOLD) { this.p = p; this.pending = new Map(); this.done = new Set(); this.held = new Map(); }
+  // запись seen журнала ленты: подача замечена в seenMs
+  seen(acc, seenMs) { if (acc && !this.done.has(acc) && Number.isFinite(seenMs)) this.pending.set(acc, seenMs); }
+  // запись form: подача скачана
+  formed(acc) { if (!acc) return; this.pending.delete(acc); this.done.add(acc); }
+  // события, затронутые порцией форм (DayState.addForms), — держать до дочитки пачки
+  hold(touched, nowMs) {
+    for (const [cik, form] of touched) {
+      const h = this.held.get(cik);
+      if (!h) this.held.set(cik, { form, since: nowMs });
+      else if ((acceptedMs(form) ?? 0) >= (acceptedMs(h.form) ?? 0)) h.form = form;
+    }
+  }
+  // незакрытые подачи, которые сейчас держат события
+  blockers(nowMs) {
+    let n = 0;
+    for (const ms of this.pending.values()) if (ms <= nowMs && nowMs - ms < this.p.pendingSec * 1000) n++;
+    return n;
+  }
+  // события, которые пора считать: пачка дочитана, потолок ожидания вышел или force (конец работы).
+  // -> [{ cik, form, held: секунд ожидания, cap: отпущено по потолку }]
+  due(nowMs, { force = false } = {}) {
+    const open = force ? 0 : this.blockers(nowMs), out = [];
+    for (const [cik, h] of this.held) {
+      const cap = open > 0 && nowMs - h.since >= this.p.maxSec * 1000;
+      if (open > 0 && !cap && !force) continue;
+      this.held.delete(cik);
+      out.push({ cik, form: h.form, held: Math.max(0, Math.round((nowMs - h.since) / 100) / 10), cap });
+    }
+    // старые незакрытые подачи памяти не держат
+    for (const [acc, ms] of this.pending) if (nowMs - ms >= this.p.pendingSec * 1000) this.pending.delete(acc);
+    return out;
   }
 }
 
