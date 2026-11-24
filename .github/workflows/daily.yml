@@ -54,7 +54,7 @@ jobs:
     timeout-minutes: 170
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
     steps:
       - uses: actions/checkout@v6
 
@@ -187,8 +187,28 @@ jobs:
 
       # Таймаут 30 мин вместо 10 по умолчанию: 04.11.2026 развёртывание Pages дважды висело в updating_pages дольше 10 минут
       # и отменялось, хотя третье в тот же час прошло за 21 минуту. Снимок данных и письмо к этому моменту уже готовы.
+      # (deploy-pages@v4 сам урезает таймаут до 10 мин — предупреждение в логе; значение оставлено как было.)
+      #
+      # Повтор публикации. deploy-pages ищет архив списком артефактов прогона через 0,3–0,8 с после того, как
+      # upload-artifact его финализировал, и API артефактов иногда отвечает пустым списком: «Found 0 artifact(s)» /
+      # «No artifacts named "github-pages"» — 4 прогона из 16 за 19–23.11.2026 (ночные 19.11 и 23.11), хотя архив загружен
+      # («successfully finalized. Artifact ID …»). Разрыв у упавших (0,36–0,66 с) и у прошедших (0,34–0,79 с) один и тот же —
+      # это задержка API GitHub, а не наш шаг. Первая попытка не красит прогон; при её сбое — пауза 30 с и вторая попытка
+      # с тем же архивом; упала и она — прогон красный, как раньше. Разбор — b\work\PAGES-FAIL.md в папке контура B.
       - name: Публикация Pages
         id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+        with:
+          timeout: 1800000
+
+      - name: Пауза перед повтором публикации
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+
+      - name: Публикация Pages (повтор)
+        id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v4
         with:
           timeout: 1800000

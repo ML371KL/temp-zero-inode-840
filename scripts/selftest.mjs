@@ -4683,6 +4683,21 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
     assert.match(y, /concurrency:\n {2}group: insider-radar-data\n {2}cancel-in-progress: false/);
     assert.match(y, /- cron: "40 3 \* \* 2-6"/);
   });
+
+  ok('публикация Pages: первая попытка не красит прогон, при её сбое — пауза и повтор с тем же архивом; адрес страницы — от любой удачной', () => {
+    const y = readFileSync(join(ROOT, '.github', 'workflows', 'daily.yml'), 'utf8').replace(/\r/g, '');
+    const update = y.slice(y.indexOf('\n  update:\n'));
+    assert.match(update, /url: \$\{\{ steps\.deployment\.outputs\.page_url \|\| steps\.deployment_retry\.outputs\.page_url \}\}/);
+    assert.match(update, /- name: Публикация Pages\n {8}id: deployment\n {8}continue-on-error: true\n {8}uses: actions\/deploy-pages@v4\n/);
+    assert.match(update, /- name: Пауза перед повтором публикации\n {8}if: steps\.deployment\.outcome == 'failure'\n {8}run: sleep \d+\n/);
+    assert.match(update, /- name: Публикация Pages \(повтор\)\n {8}id: deployment_retry\n {8}if: steps\.deployment\.outcome == 'failure'\n {8}uses: actions\/deploy-pages@v4\n/);
+    const iUp = update.indexOf('- name: Артефакт Pages'), i1 = update.indexOf('- name: Публикация Pages\n'),
+      iPause = update.indexOf('- name: Пауза перед повтором публикации'), i2 = update.indexOf('- name: Публикация Pages (повтор)'),
+      iRed = update.indexOf('- name: Красный прогон при недоставленных уведомлениях');
+    assert.ok(iUp < i1 && i1 < iPause && iPause < i2 && i2 < iRed, 'порядок: архив → публикация → пауза → повтор → красный прогон');
+    // у второй попытки нет continue-on-error: её сбой должен оставаться красным прогоном
+    assert.ok(!/continue-on-error/.test(update.slice(i2, iRed)), 'сбой повтора красит прогон');
+  });
 }
 
 // Правка 1: ночная сборка сервера перекачивает бар D0 всем бумагам дня, бар дня входа — строкам вчерашнего списка, бары бенчмарков — всегда
