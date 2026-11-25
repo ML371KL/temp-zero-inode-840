@@ -2328,7 +2328,9 @@ await okAsync('бары VPS: запрос к воркеру пачками, то
 });
 
 // --- сборка на VPS целиком против подставного воркера: копия данных фикстуры, у LIVA/SPY/IWM срезаны бары D0, всё докачивается ---
-function fakeWorker({ charts = {}, morning = null, markers = {}, rejectBot = 0 } = {}) {
+// pages — список «страницы GitHub» (GET /data/morning.json), failPutAt — номера отправок списка (с единицы), на которые ответ 500
+// conflictPutAt — номера отправок, на которые воркер отвечает 409 (хранит версию новее)
+function fakeWorker({ charts = {}, morning = null, markers = {}, rejectBot = 0, pages = null, failPutAt = [], conflictPutAt = [] } = {}) {
   const calls = { morningPuts: [], markerPuts: [], bars: [] };
   const state = { morning, markers: { ...markers } };
   const server = createServer((req, res) => {
@@ -2344,9 +2346,13 @@ function fakeWorker({ charts = {}, morning = null, markers = {}, rejectBot = 0 }
         if (!state.markers[lm[1]]) state.markers[lm[1]] = { ...JSON.parse(raw), ok: true };
         return send(200, { ok: true });
       }
+      if (u.pathname === '/data/morning.json' && req.method === 'GET') return pages ? send(200, pages) : send(404, { error: 'нет' });
       if (u.pathname === '/morning' && req.method === 'GET') return state.morning ? send(200, state.morning) : send(404, { error: 'нет' });
       if (u.pathname === '/morning' && req.method === 'PUT') {
         if (auth !== 'Bearer tok') return send(401, { error: 'нужен токен' });
+        calls.putAttempts = (calls.putAttempts ?? 0) + 1;
+        if (failPutAt.includes(calls.putAttempts)) return send(500, { error: 'сбой воркера' });
+        if (conflictPutAt.includes(calls.putAttempts)) return send(409, { error: 'есть версия новее', stored: state.morning });
         if (rejectBot && 'bot' in JSON.parse(raw)) { calls.rejected = (calls.rejected ?? 0) + 1; return send(rejectBot, { error: 'тело слишком велико' }); }
         calls.morningPuts.push(raw); state.morning = JSON.parse(raw); return send(200, { ok: true, listFor: state.morning.listFor });
       }
@@ -4809,6 +4815,256 @@ ok('датасеты: флажок 10b5-1 «true» и сноска о плане
       assert.equal(r.ok, true, r.why);
       assert.match(fetched(), /, 0 — перекачка бара, уже лежащего в данных\)/, 'перекачка бара D0 — один раз за запуск');
     } finally { console.log = orig; await api.close(); rmSync(base, { recursive: true, force: true }); }
+  });
+}
+
+// Дозапрос бара D0 (22.11.2026). Yahoo отвечает рядом без бара дня, и бумага остаётся «без цены» (ночь на 14.11 — BH-A; 19.11 в
+// 22:04–22:42 ET — ~30 бумаг). Список уходит сразу; события без бара дня переспрашиваются до сборки GitHub, пришёл бар — список
+// пересобран, а если строки дня изменились, отправлен заново. Бумагу, которой у источника нет вовсе, не ждём; после сборки GitHub
+// заново не отправляем — иначе бот (ibkr-bot-840, merge_lists) счёл бы «позднюю цену» расхождением.
+{
+  const mb = await import('./vps/morning-build.mjs');
+  // DAYA — обычная бумага; LATE получает бар D0 с запроса номер lateAt (первый — основная докачка); GONE у источника нет вовсе;
+  // THIN получает бар со второго запроса, но оборот у неё $5 млн в день — гейты проходит, «без цены» стоит, а в список с баром не
+  // попадает (порог $10 млн); VANISH со второго запроса источнику неизвестна
+  // onAsk(sym, n) — вызывается при n-м запросе бумаги к источнику (часы теста можно сдвинуть: медленный ответ); botSplit — файл
+  // сводки бота для блока bot
+  async function d0Fixture(name, { lateAt = 3, pages = null, failPutAt = [], conflictPutAt = [], onAsk = null, botSplit = null } = {}) {
+    const base = join(ROOT, name), work = join(base, 'vps'), data = join(work, 'repo');
+    rmSync(base, { recursive: true, force: true });
+    const days = bizDays('2024-01-02', today), D = days.filter(d => d <= addDaysIso(today, -6)).at(-1), PD = days[days.indexOf(D) - 1];
+    const flat = (upTo, vol = 1e6) => days.filter(d => d <= upTo).map(d => [d, 100, 100, vol]);
+    const names = { 444: 'DAYA', 446: 'LATE', 447: 'GONE', 448: 'THIN', 449: 'VANISH' };
+    mkdirSync(join(data, 'state'), { recursive: true });
+    writeJson(join(data, 'reference', 'tickers.json'), Object.fromEntries(Object.entries(names).map(([cik, t]) => [cik, { ticker: t, exchange: 'NYSE', name: `${t} Corp` }])));
+    writeJsonGz(join(data, 'trades', 'live.json.gz'), { v: SHARD_VERSION, amend: [], trades: Object.entries(names).map(([cik, t]) =>
+      T({ acc: 'DW' + cik, cik: Number(cik), t, fdate: D, tdate: PD, owners: ceo, code: 'P', ...(t === 'THIN' ? { sh: 200, val: 20000 } : { sh: 5000, val: 500000 }), px: 100, own: 1e5 })) });
+    writeJson(join(data, 'state', 'live.json'), { schema: SHARD_VERSION, lastDay: D, coverage: { [D]: { status: 'complete', indexed: 5, collected: 5, pending: 0, at: 'x' } } });
+    applyBars(data, new Map([...['SPY', 'IWM', 'DAYA', 'LATE', 'VANISH'].map(sym => [sym, parseYahooChart(chartOf(flat(PD)))]),
+      ['THIN', parseYahooChart(chartOf(flat(PD, 5e4)))]]), { updated: PD });
+    const n = {};
+    const nth = sym => { n[sym] = (n[sym] ?? 0) + 1; onAsk?.(sym, n[sym]); return n[sym]; };
+    const upTo = from => series => chartOf(series.filter(r => r[0] >= from));
+    const charts = {
+      SPY: from => upTo(from)(flat(D)), IWM: from => upTo(from)(flat(D)), DAYA: from => upTo(from)(flat(D)),
+      LATE: from => upTo(from)(flat(nth('LATE') >= lateAt ? D : PD)),
+      THIN: from => upTo(from)(flat(nth('THIN') >= 2 ? D : PD, 5e4)),
+      VANISH: from => (nth('VANISH') >= 2 ? { chart: { result: [] } } : upTo(from)(flat(PD))),
+      GONE: () => ({ chart: { result: [] } }),
+    };
+    const api = await fakeWorker({ charts, pages, failPutAt, conflictPutAt });
+    const env = { PAPER_URL: api.base, PAPER_TOKEN: 'tok', PAGES_URL: api.base, ...(botSplit ? { BOT_SPLIT_FILE: botSplit } : {}) };
+    const argv = ['--state', work, '--data', data, '--site', join(work, 'site'), '--date', D, '--no-sync', '--no-live', '--no-index-check', '--no-feed', '--interval', '1'];
+    mkdirSync(work, { recursive: true });
+    let t = Date.now();
+    const clock = { nowFn: () => t, sleepFn: async ms => { t += ms; }, at: () => t, jump: ms => { t += ms; } };
+    return { base, work, data, D, api, env, argv, opts: mb.parseArgs(argv, env), clock, asked: sym => api.calls.bars.filter(x => x.sym === sym).length,
+      sent: i => JSON.parse(api.calls.morningPuts[i]) };
+  }
+  const quiet = async fn => {
+    const lines = [], orig = console.log;
+    console.log = (...x) => { lines.push(x.join(' ')); };
+    try { return { value: await fn(), lines }; } finally { console.log = orig; }
+  };
+  const firstBuild = async f => {
+    const ctx = { stage: {}, lastChance: false, summary: null };
+    const r = await mb.attempt(f.opts, f.D, ctx);
+    assert.equal(r.ok, true, r.why);
+    return ctx;
+  };
+
+  await okAsync('дозапрос бара D0: список уходит сразу; бар LATE приходит со второго дозапроса — список отправлен заново, LATE в основном списке; бар бумаги с оборотом ниже порога список заново не отправляет; бумаги, которой нет у источника, не ждём', async () => {
+    const f = await d0Fixture('.selftest-d0wait-1');
+    try {
+      const { value: [ctx, w], lines } = await quiet(async () => {
+        const ctx = await firstBuild(f);
+        assert.equal(f.api.calls.morningPuts.length, 1, 'список ушёл сразу, не дожидаясь бара');
+        assert.deepEqual([...f.sent(0).days[0].unpriced].sort(), ['GONE', 'LATE', 'THIN', 'VANISH']);
+        assert.ok(!('GONE' in ctx.d0Wait.from), 'бумагу, которой у источника нет вовсе, не ждём');
+        return [ctx, await mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 10_000, f.clock)];
+      });
+      assert.deepEqual([w.rounds, w.arrived, w.left, w.sent, w.stopped], [2, ['THIN', 'LATE'], [], 1, null], JSON.stringify(w));
+      assert.equal(f.api.calls.morningPuts.length, 2, 'заново отправлено один раз — когда изменились строки дня');
+      const s = f.sent(1).days[0];
+      assert.deepEqual([...s.unpriced].sort(), ['GONE', 'VANISH']);
+      assert.ok(s.rows.some(x => x.t === 'LATE' && x.main && x.px === 100), 'LATE — в основном списке с ценой D0');
+      assert.ok(s.rows.some(x => x.t === 'DAYA' && x.main) && !s.rows.some(x => x.t === 'THIN'), 'DAYA на месте, THIN по обороту не проходит');
+      assert.deepEqual(ctx.d0Late, ['LATE'], 'в d0Late — только бумаги, чьи строки изменились (у THIN строки нет: оборот ниже порога)');
+      assert.ok(lines.some(l => /список отправлен заново: .*строки изменились у LATE$/.test(l)), lines.join('\n'));
+      assert.deepEqual(['LATE', 'THIN', 'VANISH', 'GONE', 'DAYA'].map(f.asked), [3, 2, 2, 1, 1], 'дозапрос просит только ждущих');
+      assert.ok(lines.some(l => /дозапрос 1: источник цен больше не знает VANISH/.test(l)), 'VANISH выбыла');
+      assert.ok(lines.some(l => /дозапрос 1: бар D0 пришёл у THIN/.test(l)) && lines.some(l => /строки списка дня не изменились — заново не отправляю/.test(l)), lines.join('\n'));
+      assert.ok(lines.some(l => /дозапрос 2: бар D0 пришёл у LATE/.test(l)) && lines.some(l => /список отправлен заново/.test(l)), lines.join('\n'));
+      // ждать больше нечего: повторный вызов ничего не просит
+      const again = await quiet(() => mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 10_000, f.clock));
+      assert.deepEqual([again.value.rounds, f.asked('LATE'), f.api.calls.morningPuts.length], [0, 3, 2]);
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: бар так и не пришёл — переспрашивает до срока, список отправлен один раз, в журнале названа бумага; без запаса времени не ждёт', async () => {
+    const f = await d0Fixture('.selftest-d0wait-2', { lateAt: Infinity });
+    try {
+      const { value: [ctx, w], lines } = await quiet(async () => {
+        const ctx = await firstBuild(f);
+        return [ctx, await mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 5_000, f.clock)];
+      });
+      assert.deepEqual([w.rounds, w.left, w.sent], [4, ['LATE'], 0], 'интервал 1 с, до срока 5 с — четыре дозапроса');
+      assert.equal(f.api.calls.morningPuts.length, 1, 'без нового бара у бумаги списка список заново не отправляется');
+      assert.equal(f.asked('LATE'), 5);
+      assert.ok(lines.some(l => /бар D0 так и не пришёл к \d\d:\d\d ET у 1 бумаг \(LATE\)/.test(l)), lines.join('\n'));
+      const late = await quiet(() => mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 500, f.clock));
+      assert.deepEqual([late.value.rounds, late.value.left, f.asked('LATE')], [0, ['LATE'], 5], 'до срока меньше интервала — не ждём');
+      assert.ok(late.lines.some(l => /дозапросить уже не успеть/.test(l)));
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: на странице уже список GitHub за день — бар пришёл, но список заново не отправляется (сервер не становится свежее GitHub)', async () => {
+    const f = await d0Fixture('.selftest-d0wait-3', { lateAt: 2 });
+    try {
+      const { value: w, lines } = await quiet(async () => {
+        const ctx = await firstBuild(f);
+        return mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 10_000, { ...f.clock, pagesFetch: async () => new Response(JSON.stringify({ builder: 'github', listFor: f.D, builtAt: 'x' }), { status: 200 }) });
+      });
+      assert.deepEqual([w.rounds, w.sent, w.stopped], [1, 0, 'github'], JSON.stringify(w));
+      assert.equal(f.api.calls.morningPuts.length, 1);
+      assert.ok(lines.some(l => /список GitHub за день уже собран — заново не отправляю/.test(l)), lines.join('\n'));
+      // список GitHub за прошлый день — не помеха
+      const g = await mb.githubBuilt(f.opts, f.D, async () => new Response(JSON.stringify({ builder: 'github', listFor: '2000-01-03' }), { status: 200 }));
+      assert.equal(g, false);
+      assert.equal(await mb.githubBuilt(f.opts, f.D, async () => { throw new Error('сеть'); }), null, 'страница не ответила — решает время');
+      // адрес страницы — с меткой времени: кэш CDN GitHub Pages не отдаёт старый список после внеплановой сборки GitHub
+      let asked = null;
+      await mb.githubBuilt(f.opts, f.D, async url => { asked = url; return new Response('{}', { status: 200 }); });
+      assert.match(asked, /\/data\/morning\.json\?t=\d{13}$/);
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: отправка заново не удалась — повтор в следующем круге, без нового запроса баров', async () => {
+    const f = await d0Fixture('.selftest-d0wait-4', { lateAt: 2, failPutAt: [2] });
+    try {
+      const { value: w, lines } = await quiet(async () => mb.waitD0(f.opts, f.D, await firstBuild(f), f.clock.at() + 10_000, f.clock));
+      assert.deepEqual([w.rounds, w.sent, w.left], [2, 1, []], JSON.stringify(w));
+      assert.deepEqual([f.api.calls.putAttempts, f.api.calls.morningPuts.length], [3, 2], 'вторая отправка упала, третья прошла');
+      assert.ok(f.sent(1).days[0].rows.some(x => x.t === 'LATE' && x.main));
+      assert.equal(f.asked('LATE'), 2, 'повтор отправки бары заново не просит');
+      assert.ok(lines.some(l => /отправка не удалась \(воркер \/morning: HTTP 500/.test(l)), lines.join('\n'));
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: основной цикл зовёт его после отправки и пишет d0Late в отметку «собрано»; с --once, --no-d0-wait и --dry-run — не зовёт', async () => {
+    for (const flag of [null, '--once', '--no-d0-wait', '--dry-run']) {
+      const f = await d0Fixture('.selftest-d0wait-5', { lateAt: 2 });
+      try {
+        const deps = { d0DeadlineMs: f.clock.at() + 10_000, sleepFn: f.clock.sleepFn, nowFn: f.clock.nowFn };
+        const { value: code } = await quiet(() => morningMain([...f.argv, ...(flag ? [flag] : [])], f.env, deps));
+        assert.equal(code, 0, String(flag));
+        const doneFile = join(f.work, 'done', `${f.D}.json`);
+        if (flag === null) {
+          assert.deepEqual([f.asked('LATE'), f.api.calls.morningPuts.length], [2, 2], 'дозапрос был, список отправлен заново');
+          assert.deepEqual(readJson(doneFile).d0Late, ['LATE'], 'обе пришли в первом круге, строки изменились только у LATE');
+          assert.equal(readJson(doneFile).unpriced, 2, 'отметка — по последней отправке');
+        } else {
+          assert.deepEqual([f.asked('LATE'), f.api.calls.morningPuts.length], [1, flag === '--dry-run' ? 0 : 1], `${flag}: только основная докачка`);
+          if (flag !== '--dry-run') assert.equal(readJson(doneFile).d0Late, undefined);
+        }
+      } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+    }
+  });
+  // Проверки 22.11.2026 (независимая проверка запроса №28): срок внутри круга, строка журнала о выключенном дозапросе, боевой срок,
+  // блок bot во второй отправке, 409 воркера — не отправка, d0Late — только изменившиеся строки (выше).
+  await okAsync('дозапрос бара D0: круг начат за секунды до срока — после сна срок наступил: бары не просит, список не пересобирает и не отправляет', async () => {
+    const f = await d0Fixture('.selftest-d0wait-6', { lateAt: 2 });
+    try {
+      const { value: w, lines } = await quiet(async () => {
+        const ctx = await firstBuild(f);
+        // интервал 1 с, до срока 3 с; сон затянулся на 2,5 с сверх интервала (занятый процессор, долгий таймер)
+        return mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 3_000, { ...f.clock, sleepFn: async ms => f.clock.jump(ms + 2_500) });
+      });
+      assert.deepEqual([w.rounds, w.sent, w.stopped, f.asked('LATE'), f.api.calls.morningPuts.length], [0, 0, 'deadline', 1, 1], JSON.stringify(w));
+      assert.ok(lines.some(l => /срок \d\d:\d\d ET \(сборка GitHub или --until\) наступил до дозапроса — список больше не пересобираю и не отправляю/.test(l)), lines.join('\n'));
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: срок наступил, пока источник отвечал, — бар пришёл, но список не пересобран и не отправлен; в журнале — предупреждение', async () => {
+    let f = null;
+    f = await d0Fixture('.selftest-d0wait-7', { lateAt: 2, onAsk: (sym, n) => { if (sym === 'LATE' && n === 2) f.clock.jump(20_000); } });
+    try {
+      const { value: w, lines } = await quiet(async () => mb.waitD0(f.opts, f.D, await firstBuild(f), f.clock.at() + 10_000, f.clock));
+      assert.deepEqual([w.rounds, [...w.arrived].sort(), w.sent, w.stopped, f.api.calls.morningPuts.length], [1, ['LATE', 'THIN'], 0, 'deadline', 1], JSON.stringify(w));
+      assert.ok(lines.some(l => /наступил до пересборки/.test(l)) && lines.some(l => /ВНИМАНИЕ: бар D0 пришёл, но пересобрать список/.test(l)), lines.join('\n'));
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: срок наступил между пересборкой и отправкой — список не отправлен', async () => {
+    let armed = false;
+    const f = await d0Fixture('.selftest-d0wait-8', { lateAt: 2 });
+    try {
+      const { value: w, lines } = await quiet(async () => {
+        const ctx = await firstBuild(f);
+        const deadline = f.clock.at() + 10_000;
+        // часы сдвигаются, когда пересборка уже прошла и строки дня изменились, — то есть прямо перед отправкой
+        const nowFn = () => { if (!armed && ctx.builtRows !== ctx.sentRows) { armed = true; f.clock.jump(20_000); } return f.clock.at(); };
+        return mb.waitD0(f.opts, f.D, ctx, deadline, { ...f.clock, nowFn });
+      });
+      assert.deepEqual([w.sent, w.stopped, f.api.calls.morningPuts.length], [0, 'deadline', 1], JSON.stringify(w));
+      assert.ok(lines.some(l => /наступил до отправки/.test(l)) && lines.some(l => /ВНИМАНИЕ: бар D0 пришёл, но отправить список/.test(l)), lines.join('\n'));
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  ok('дозапрос бара D0: боевой срок — сборка GitHub в 03:25 UTC следующих суток (22:25 ET зимой)', () => {
+    assert.equal(mb.githubBuildMs('2026-11-24'), Date.parse('2026-11-25T03:25:00Z'));
+    assert.equal(mb.githubBuildMs('2026-12-31'), Date.parse('2027-01-01T03:25:00Z'), 'через границу года');
+  });
+
+  await okAsync('дозапрос бара D0: письма идут с сервера — дозапроса нет, в журнале причина; с --no-letter дозапрос есть; другие выключатели тоже названы', async () => {
+    const tg = { TELEGRAM_BOT_TOKEN: 'x', TELEGRAM_CHAT_ID: '1' };
+    assert.match(mb.d0WaitOff(mb.parseArgs([], tg)), /письма идут с сервера/);
+    assert.equal(mb.d0WaitOff(mb.parseArgs(['--no-letter'], tg)), null);
+    assert.equal(mb.d0WaitOff(mb.parseArgs([], {})), null);
+    assert.equal(mb.d0WaitOff(mb.parseArgs(['--once'], {})), '--once');
+    assert.equal(mb.d0WaitOff(mb.parseArgs(['--no-d0-wait'], {})), '--no-d0-wait');
+    const f = await d0Fixture('.selftest-d0wait-9', { lateAt: 2 });
+    try {
+      const deps = { d0DeadlineMs: f.clock.at() + 10_000, sleepFn: f.clock.sleepFn, nowFn: f.clock.nowFn };
+      const { value: code, lines } = await quiet(() => morningMain([...f.argv, '--no-d0-wait'], f.env, deps));
+      assert.equal(code, 0);
+      assert.ok(lines.some(l => /дозапрос бара D0 после отправки не запускается: --no-d0-wait/.test(l)), lines.join('\n'));
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: блок bot (сводка бота для витрины) есть и во второй отправке', async () => {
+    const dir = join(ROOT, '.selftest-d0wait-10s');
+    mkdirSync(dir, { recursive: true });
+    const splitFile = join(dir, 'split.json');
+    writeFileSync(splitFile, JSON.stringify({ ...bsSplit(), built: new Date().toISOString() }));
+    const f = await d0Fixture('.selftest-d0wait-10', { lateAt: 2, botSplit: splitFile });
+    try {
+      const { value: w } = await quiet(async () => mb.waitD0(f.opts, f.D, await firstBuild(f), f.clock.at() + 10_000, f.clock));
+      assert.equal(w.sent, 1);
+      assert.equal(f.api.calls.morningPuts.length, 2);
+      for (const i of [0, 1]) assert.ok('bot' in f.sent(i), 'отправка ' + (i + 1) + ': блок bot');
+      assert.deepEqual(f.sent(1).bot, f.sent(0).bot);
+      assert.ok(f.sent(1).days[0].rows.some(x => x.t === 'LATE' && x.main), 'вторая отправка — с LATE');
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  await okAsync('дозапрос бара D0: воркер ответил на повторную отправку 409 (хранит список новее) — это не отправка: дальше не шлём, d0Late нет', async () => {
+    const f = await d0Fixture('.selftest-d0wait-11', { lateAt: 2, conflictPutAt: [2] });
+    try {
+      const { value: [ctx, w], lines } = await quiet(async () => {
+        const ctx = await firstBuild(f);
+        return [ctx, await mb.waitD0(f.opts, f.D, ctx, f.clock.at() + 10_000, f.clock)];
+      });
+      assert.deepEqual([w.sent, w.stopped, f.api.calls.putAttempts, f.api.calls.morningPuts.length], [0, 'worker', 2, 1], JSON.stringify(w));
+      assert.equal(ctx.d0Late, undefined);
+      assert.ok(lines.some(l => /повторная отправка не принята; дальше не отправляю/.test(l)) && !lines.some(l => /список отправлен заново/.test(l)), lines.join('\n'));
+    } finally { await f.api.close(); rmSync(f.base, { recursive: true, force: true }); }
+    // и первая отправка не легла (409) — дозапрос не запускается вовсе
+    const g = await d0Fixture('.selftest-d0wait-12', { lateAt: 2, conflictPutAt: [1] });
+    try {
+      const r = await quiet(async () => mb.waitD0(g.opts, g.D, await firstBuild(g), g.clock.at() + 10_000, g.clock));
+      assert.deepEqual([r.value.rounds, r.value.stopped, g.asked('LATE'), g.api.calls.putAttempts], [0, 'worker', 1, 1], JSON.stringify(r.value));
+    } finally { await g.api.close(); rmSync(g.base, { recursive: true, force: true }); }
   });
 }
 
