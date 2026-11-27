@@ -2,6 +2,7 @@
 import { PriceChart, fmtPrice, fmtInt, fmtMoney, fmtPct, fmtDate } from './charts.js';
 import { staleState } from './stale.js';
 import { pickBotSplit, botBlockHtml } from './botsplit.js';
+import { nextMarketDay } from './calendar.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -298,12 +299,10 @@ state.live = null;                                    // последний от
 const onMorning = () => { const h = location.hash; return h === '' || h.startsWith('#morning') || h.startsWith('#screener'); };
 // Дата котировки по Нью-Йорку: цена принадлежит своей сессии, а не местному дню
 const nyDate = sec => new Date(sec * 1000).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-// Следующий рабочий день после подачи — ожидаемый D+1 (праздники не знаем: в праздник живой слой просто не включится)
-function nextBusinessDay(iso) {
-  const d = new Date(iso + 'T00:00:00Z');
-  do { d.setUTCDate(d.getUTCDate() + 1); } while (d.getUTCDay() === 0 || d.getUTCDay() === 6);
-  return d.toISOString().slice(0, 10);
-}
+// Ожидаемый D+1 — следующий торговый день биржи после подачи (nextMarketDay, web/calendar.js): с праздниками NYSE. До 27.11.2026
+// здесь брался следующий будний день, и после праздника (список за ср 25.11 → чт 26.11, День благодарения) живой слой ждал
+// котировок за праздник и не включался в настоящий D+1 (пт 27.11). Разовые закрытия биржи календарь не знает — в такой день слой
+// просто не включится.
 // Выбранный день, торги D+1 которого ещё не закрыты в снимке: только по нему идёт опрос
 const liveDay = () => { const d = state.morning?.days.find(x => x.date === mDay); return d && !d.done && d.rows.length ? d : null; };
 // Котировка годится, только если она за сегодняшнюю сессию D+1 и идут торги (или уже закрылись):
@@ -576,7 +575,7 @@ function renderDay() {
   const days = state.morning.days;
   const day = days.find(d => d.date === mDay) ?? null;
   const rows = viewRows(day), rest = restRows(day);
-  const d1 = day ? nextBusinessDay(day.date) : null;
+  const d1 = day ? nextMarketDay(day.date) : null;
   const liveOn = !!day && !day.done && [...rows, ...rest].some(x => liveOf(x.t, d1));
   const bq = liveOn ? liveOf('IWM', d1) : null;
   const ctx = { past: !!day?.done, liveOn, d1, bq };
