@@ -2,7 +2,7 @@
 import { PriceChart, fmtPrice, fmtInt, fmtMoney, fmtPct, fmtDate } from './charts.js';
 import { staleState } from './stale.js';
 import { pickBotSplit, botBlockHtml } from './botsplit.js';
-import { nextMarketDay } from './calendar.js';
+import { nextMarketDay, mocCutoffEt } from './calendar.js';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -596,7 +596,10 @@ function renderDay() {
     $('#m-rest').className = 'morning' + live;
     $('#m-rest').innerHTML = dayTable(rest, ctx);
   }
-  $('#m-foot').innerHTML = 'Только заявки на аукционы: покупка на открытии (LOO до 9:28, лимит +10% к закрытию дня подачи), продажа на закрытии (MOC до 15:50 по Нью-Йорку). '
+  // D+1 — сокращённый день (закрытие в 13:00): отсечка MOC на три часа раньше (до 27.11.2026 подпись всегда «до 15:50»)
+  const moc = (d1 && mocCutoffEt(d1)) || '15:50';
+  $('#m-foot').innerHTML = 'Только заявки на аукционы: покупка на открытии (LOO до 9:28, лимит +10% к закрытию дня подачи), '
+    + `продажа на закрытии (MOC до ${moc} по Нью-Йорку${moc === '12:50' ? ': D+1 — сокращённый день, закрытие в 13:00' : ''}). `
     + 'Перевес дня достаётся покупке по цене аукциона: сразу после открытия цена продавца выше неё на 0,3–0,5%, и покупка по рынку его съедает. '
     + 'Сумма на бумагу одинаковая. Скор и итоги проверки — на вкладке <a href="#stats">Статистика</a>.';
 }

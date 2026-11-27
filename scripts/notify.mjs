@@ -25,6 +25,7 @@
 // Если полный пересчёт на GitHub разошёлся со списком VPS (morning.crossCheck.same === false, пишет scripts/crosscheck.mjs) и письмо
 // о списке отправил VPS, уходит короткое уточнение (ключ fix|ДАТА, раз на дату).
 import { readJson, writeJson, isoToday, addDaysIso } from './lib/util.mjs';
+import { nextMarketDay } from './lib/calendar.mjs';
 import { join } from 'node:path';
 
 const args = process.argv.slice(2);
@@ -184,7 +185,7 @@ const PANEL_TAG = 'Инсайдерский радар';
 const NBSP = ' ';
 const MINUS = '−';
 const MSK_MS = 3 * 3600e3;
-const today = isoToday();
+const today = argVal('--today', isoToday());   // --today — только для самотестов и ручной проверки
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 // Одна функция на число: digits — знаков после запятой; fixed — держать нули («$22,70»); sign — «+».
 function fmtNum(x, digits = 1, { fixed = false, sign = false } = {}) {
@@ -262,16 +263,11 @@ const restOf = day => (day?.rows ?? []).filter(x => !x.main && !x.fpi);
 const fpiOf = day => (day?.rows ?? []).filter(x => x.fpi && x.score >= (morning?.params?.scoreMin ?? 2));
 const days = (morning?.days ?? []);                       // от свежего дня к старому
 
-// Следующий рабочий день после даты подачи (праздники не знаем): до его конца утренний список ещё
-// пригоден. После — письмо «покупай на открытии» читалось бы задним числом, и слать его не нужно.
-function nextBusinessDay(iso) {
-  let d = addDaysIso(iso, 1);
-  for (;;) {
-    const dow = new Date(d + 'T00:00:00Z').getUTCDay();
-    if (dow !== 0 && dow !== 6) return d;
-    d = addDaysIso(d, 1);
-  }
-}
+// D+1 списка — следующий торговый день биржи после даты подачи (nextMarketDay, web/calendar.js: с праздниками NYSE): до его конца
+// утренний список ещё пригоден. После — письмо «покупай на открытии» читалось бы задним числом, и слать его не нужно. До 27.11.2026
+// здесь был следующий будний день без праздников: список за ср 25.11 считался устаревшим уже в пт 27.11 (его D+1), и письмо после
+// сбоя первой отправки не ушло бы; так же перед Рождеством, Новым годом, Страстной пятницей и праздничными понедельниками.
+const letterUntil = iso => nextMarketDay(iso);
 
 // ---------- сообщение ----------
 // Устройство письма: первая строка самодостаточна (в пуше видно только её), дальше — десять
@@ -473,7 +469,7 @@ const hasLetter = d => mainOf(d).length > 0 || (d.date === listFor && emptyOk);
 // Свежий список, о котором ещё не писали. --any-date снимает проверку свежести
 // (ручной прогон после простоя).
 const fresh = days.filter(d => hasLetter(d) && !sent.has(dayId(d))
-  && (args.includes('--any-date') || today <= nextBusinessDay(d.date))).reverse();   // от старого к свежему
+  && (args.includes('--any-date') || today <= letterUntil(d.date))).reverse();   // от старого к свежему
 // Смены статуса здоровья, о которых ещё не писали (от старой к свежей — так они лежат в файле)
 const healthDue = [];
 for (const c of healthChanges) {
@@ -490,7 +486,7 @@ saveState();
 // встанет в него; уже ушло — отдельное короткое сообщение.
 const oiDay = days.find(d => d.date === oiCheck?.listFor) ?? null;
 const oiId = oiDay ? `oi|${oiDay.date}` : null;
-const oiOpen = !!oiDay && oiAlerts(oiDay).length > 0 && !sent.has(oiId) && (args.includes('--any-date') || today <= nextBusinessDay(oiDay.date));
+const oiOpen = !!oiDay && oiAlerts(oiDay).length > 0 && !sent.has(oiId) && (args.includes('--any-date') || today <= letterUntil(oiDay.date));
 const oiDue = oiOpen && sent.has(dayId(oiDay));
 // Уточнение по crossCheck может понадобиться и без новых списков: письмо ушло с VPS раньше, а пересчёт разошёлся с ним позже
 if (!fresh.length && morning?.crossCheck?.same !== false && !healthDue.length && !oiDue) { console.log('[notify] новых утренних списков нет'); process.exit(0); }
@@ -521,7 +517,7 @@ if (already.length) saveState();
 // Уточнение: полный пересчёт на GitHub разошёлся со списком, о котором написал VPS
 const cc = morning?.crossCheck;
 if (cc && cc.same === false && cc.listFor && (cc.diff ?? []).length && !sent.has(`fix|${cc.listFor}`)
-  && (args.includes('--any-date') || today <= nextBusinessDay(cc.listFor)) && sent.has(dayId({ date: cc.listFor }))) {
+  && (args.includes('--any-date') || today <= letterUntil(cc.listFor)) && sent.has(dayId({ date: cc.listFor }))) {
   const mk = await markerGet(cc.listFor);
   if (mk?.by === 'vps' && mk.ok) messages.push({ date: null, text: fixMessage(cc), markup: undefined, id: `fix|${cc.listFor}`, eventId: `840|fix|${cc.listFor}` });
 }

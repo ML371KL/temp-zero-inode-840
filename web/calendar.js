@@ -35,11 +35,16 @@ export function secHolidays(year) {
     observed(iso(year + 1, 1, 1)),   // Новый год следующего года, перенесённый на 31 декабря этого
   ]);
 }
-// Индекса EDGAR за этот день не будет: выходной или федеральный праздник
+// Внеплановые закрытия SEC (EDGAR не принимает подач) указом президента о закрытии ведомств; биржа при этом могла работать.
+// Сверено с sec.gov 27.11.2026: 24.12.2024 (EO 14129), 09.01.2025 (EO 14133, траур; биржа тоже закрыта), 24 и 26.12.2025 (EO 14371).
+// Такие указы выходят в середине декабря: новый день закрытия добавляется сюда и в календарь бота (ibkr-bot-840, morning.py,
+// SEC_ONLY_HOLIDAYS, если биржа в этот день торгует) — иначе сборка на VPS ждёт индекс до 23:30 и поднимает тревогу.
+export const SEC_SPECIAL_CLOSURES = new Set(['2024-12-24', '2025-01-09', '2025-12-24', '2025-12-26']);
+// Индекса EDGAR за этот день не будет: выходной, федеральный праздник или внеплановое закрытие
 export function isSecClosed(day) {
   const w = dow(day);
   if (w === 0 || w === 6) return true;
-  return secHolidays(Number(day.slice(0, 4))).has(day);
+  return secHolidays(Number(day.slice(0, 4))).has(day) || SEC_SPECIAL_CLOSURES.has(day);
 }
 
 // Биржа (NYSE) закрыта: выходные и биржевые праздники. От календаря SEC отличается: Страстная пятница — биржа закрыта, а SEC работает и индекс выходит;
@@ -50,14 +55,20 @@ function easter(y) {   // григорианская Пасха (алгорит�
   const month = Math.floor((h + l - 7 * m + 114) / 31), day = ((h + l - 7 * m + 114) % 31) + 1;
   return iso(y, month, day);
 }
+// Разовые закрытия биржи (траур, ураган) — те же, что у бота (ibkr-bot-840, auction.py, _SPECIAL_CLOSURES). Будущие не известны:
+// новое добавляется сюда и в календари бота (calendar.py HOLIDAYS, auction.py) вместе.
+export const NYSE_SPECIAL_CLOSURES = new Set(['2007-01-02', '2012-10-29', '2012-10-30', '2018-12-05', '2025-01-09']);
 export function nyseHolidays(year) {
   const set = new Set([
-    ...[[6, 19], [7, 4], [12, 25]].map(([m, d]) => observed(iso(year, m, d))),
+    ...[[7, 4], [12, 25]].map(([m, d]) => observed(iso(year, m, d))),
     nth(year, 1, 1, 3), nth(year, 2, 1, 3), nth(year, 5, 1, -1), nth(year, 9, 1, 1), nth(year, 11, 4, 4),
     addDaysIso(easter(year), -2),                       // Страстная пятница
   ]);
+  // Juneteenth биржа закрывает с 2022 года (до 27.11.2026 здесь — за все годы: бары IWM и SPY есть 19.06.2014–18.06.2021)
+  if (year >= 2022) set.add(observed(iso(year, 6, 19)));
   const ny = iso(year, 1, 1);                           // Новый год: на субботу не переносится (в пятницу 31 декабря биржа открыта), с воскресенья — на понедельник
   if (dow(ny) !== 6) set.add(dow(ny) === 0 ? addDaysIso(ny, 1) : ny);
+  for (const d of NYSE_SPECIAL_CLOSURES) if (d.startsWith(`${year}-`)) set.add(d);
   return set;
 }
 export function isMarketClosed(day) {
@@ -86,4 +97,10 @@ export function nyseEarlyCloses(year) {
 export function marketCloseEt(day) {
   if (isMarketClosed(day)) return null;
   return nyseEarlyCloses(Number(day.slice(0, 4))).has(day) ? '13:00' : '16:00';
+}
+// Отсечка заявок MOC/LOC NYSE по Нью-Йорку: за 10 минут до закрытия — '15:50', в сокращённый день '12:50' (правило NYSE 7.35:
+// сроки аукциона закрытия сдвигаются вместе с концом сессии); null — биржа не торгует. Подпись таблицы списка на странице.
+export function mocCutoffEt(day) {
+  const close = marketCloseEt(day);
+  return close === null ? null : close === '13:00' ? '12:50' : '15:50';
 }
