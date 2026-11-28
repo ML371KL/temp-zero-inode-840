@@ -1,0 +1,30 @@
+{
+ "aggFlash": false,
+ "version": 4,
+ "sentMorning": [
+  "morning|2026-11-03",
+  "morning|2026-11-02",
+  "morning|2026-10-29",
+  "morning|2026-10-28",
+  "morning|2026-10-27",
+  "morning|2026-10-23",
+  "morning|2026-10-21",
+  "morning|2026-11-04",
+  "morning|2026-11-05",
+  "morning|2026-11-06",
+  "morning|2026-11-09",
+  "morning|2026-11-10",
+  "morning|2026-11-12",
+  "morning|2026-11-13",
+  "morning|2026-11-16",
+  "morning|2026-11-17",
+  "morning|2026-11-18",
+  "morning|2026-11-19",
+  "morning|2026-11-20",
+  "morning|2026-11-23",
+  "morning|2026-11-24",
+  "morning|2026-11-25",
+  "morning|2026-11-27"
+ ],
+ "sentHealth": []
+}
